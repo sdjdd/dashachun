@@ -154,7 +154,7 @@ async fn drive(
                         utterance = None;
                         completion = None;
                         synthesis = None;
-                        if out_tx.send(AgentOutput::TtsStop).await.is_err() {
+                        if out_tx.send(AgentOutput::TtsAbort).await.is_err() {
                             break;
                         }
                     }
@@ -286,7 +286,7 @@ async fn drive(
                         if out_tx.send(AgentOutput::Error { message }).await.is_err() {
                             break;
                         }
-                        if tts_active && out_tx.send(AgentOutput::TtsStop).await.is_err() {
+                        if tts_active && out_tx.send(AgentOutput::TtsAbort).await.is_err() {
                             break;
                         }
                     }
@@ -323,7 +323,7 @@ async fn drive(
                         synthesis = None;
                         warn!(session_id = %session.id, %message, "tts failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err()
-                            || out_tx.send(AgentOutput::TtsStop).await.is_err()
+                            || out_tx.send(AgentOutput::TtsAbort).await.is_err()
                         {
                             break;
                         }
@@ -738,7 +738,7 @@ mod tests {
             .unwrap();
 
         let item = output.next().await;
-        assert!(matches!(item, Some(AgentOutput::TtsStop)), "got {item:?}");
+        assert!(matches!(item, Some(AgentOutput::TtsAbort)), "got {item:?}");
     }
 
     async fn wait_for_calls(

@@ -1,4 +1,6 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::State;
@@ -7,8 +9,9 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
@@ -21,6 +24,8 @@ use crate::dto::ws::{
 use crate::state::AppState;
 
 const AGENT_CHANNEL_CAPACITY: usize = 64;
+const PLAYER_CHANNEL_CAPACITY: usize = 64;
+const MAX_PREBUFFER_FRAMES: u32 = 8;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/gateway", get(handle_device_connect))
@@ -57,7 +62,11 @@ async fn handle_device_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    let mut session = Session::new(tx.clone(), state.agent);
+    let mut session = Session::new(
+        tx.clone(),
+        state.agent,
+        state.config.server.playback_prebuffer_ms,
+    );
     while let Some(result) = stream.next().await {
         let msg = match result {
             Ok(Message::Close(_)) => break,
@@ -96,17 +105,19 @@ struct Session {
     tx: mpsc::Sender<Message>,
     decoder: Option<OpusDecoder>,
     agent: Arc<dyn Agent>,
+    playback_prebuffer_ms: u32,
     agent_tx: Option<mpsc::Sender<AgentInput>>,
     agent_task: Option<JoinHandle<()>>,
 }
 
 impl Session {
-    fn new(tx: mpsc::Sender<Message>, agent: Arc<dyn Agent>) -> Self {
+    fn new(tx: mpsc::Sender<Message>, agent: Arc<dyn Agent>, playback_prebuffer_ms: u32) -> Self {
         Self {
             id: None,
             tx,
             decoder: None,
             agent,
+            playback_prebuffer_ms,
             agent_tx: None,
             agent_task: None,
         }
@@ -186,7 +197,14 @@ impl Session {
         )
         .map_err(|err| warn!(%err, "failed to create opus encoder"))
         .ok();
-        self.agent_task = Some(tokio::spawn(run_agent(output, tx, session_id, encoder)));
+        let player = spawn_player(
+            tx.clone(),
+            audio_params.frame_duration,
+            self.playback_prebuffer_ms,
+        );
+        self.agent_task = Some(tokio::spawn(run_agent(
+            output, tx, session_id, encoder, player,
+        )));
         self.agent_tx = Some(agent_tx);
     }
 
@@ -259,6 +277,7 @@ async fn run_agent(
     tx: mpsc::Sender<Message>,
     session_id: String,
     mut encoder: Option<OpusEncoder>,
+    player: Player,
 ) {
     use crate::agent::AgentOutput;
     while let Some(item) = output.next().await {
@@ -278,15 +297,25 @@ async fn run_agent(
                 send_json(&tx, &TtsMessage::sentence_start(session_id.clone(), text)).await;
             }
             AgentOutput::TtsStop => {
-                if let Some(encoder) = encoder.as_mut() {
-                    send_audio(encoder.flush(), &tx).await;
+                if let Some(encoder) = encoder.as_mut()
+                    && let Some(packet) = encoder.flush()
+                {
+                    player.push(packet).await;
                 }
+                player.finish().await;
+                send_json(&tx, &TtsMessage::stop(session_id.clone())).await;
+            }
+            AgentOutput::TtsAbort => {
+                if let Some(encoder) = encoder.as_mut() {
+                    encoder.reset();
+                }
+                player.abort().await;
                 send_json(&tx, &TtsMessage::stop(session_id.clone())).await;
             }
             AgentOutput::Audio(samples) => {
                 if let Some(encoder) = encoder.as_mut() {
                     for packet in encoder.push(&samples) {
-                        send_binary(&tx, packet).await;
+                        player.push(packet).await;
                     }
                 }
             }
@@ -300,14 +329,119 @@ async fn run_agent(
     }
 }
 
-async fn send_audio(packet: Option<Vec<u8>>, tx: &mpsc::Sender<Message>) {
-    if let Some(packet) = packet {
-        send_binary(tx, packet).await;
+enum PlayerCommand {
+    Packet(Vec<u8>),
+    Finish(oneshot::Sender<()>),
+    Abort,
+}
+
+struct Player {
+    tx: mpsc::Sender<PlayerCommand>,
+}
+
+impl Player {
+    async fn push(&self, packet: Vec<u8>) {
+        if self.tx.send(PlayerCommand::Packet(packet)).await.is_err() {
+            trace!("player closed, dropping audio packet");
+        }
+    }
+
+    async fn abort(&self) {
+        let _ = self.tx.send(PlayerCommand::Abort).await;
+    }
+
+    async fn finish(&self) {
+        let (done_tx, done_rx) = oneshot::channel();
+        if self.tx.send(PlayerCommand::Finish(done_tx)).await.is_ok() {
+            let _ = done_rx.await;
+        }
     }
 }
 
-async fn send_binary(tx: &mpsc::Sender<Message>, packet: Vec<u8>) {
-    let _ = tx.send(Message::Binary(packet.into())).await;
+fn spawn_player(tx: mpsc::Sender<Message>, frame_duration_ms: u32, prebuffer_ms: u32) -> Player {
+    let (player_tx, player_rx) = mpsc::channel::<PlayerCommand>(PLAYER_CHANNEL_CAPACITY);
+    let frame_ms = frame_duration_ms.max(1);
+    let frame = Duration::from_millis(u64::from(frame_ms));
+    let burst = (prebuffer_ms / frame_ms).clamp(1, MAX_PREBUFFER_FRAMES);
+    tokio::spawn(run_player(player_rx, tx, frame, burst));
+    Player { tx: player_tx }
+}
+
+async fn run_player(
+    mut rx: mpsc::Receiver<PlayerCommand>,
+    tx: mpsc::Sender<Message>,
+    frame: Duration,
+    burst: u32,
+) {
+    let capacity = f64::from(burst);
+    let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut ack: Option<oneshot::Sender<()>> = None;
+    let mut credits: f64 = capacity;
+    let mut last: Option<Instant> = None;
+    loop {
+        let now = Instant::now();
+        if let Some(previous) = last {
+            credits = (credits + now.duration_since(previous).as_secs_f64() / frame.as_secs_f64())
+                .min(capacity);
+        }
+        last = Some(now);
+
+        if !queue.is_empty() {
+            if credits >= 1.0 {
+                let Some(packet) = queue.pop_front() else {
+                    continue;
+                };
+                if tx.send(Message::Binary(packet.into())).await.is_err() {
+                    return;
+                }
+                credits -= 1.0;
+                last = Some(Instant::now());
+                continue;
+            }
+            let wait = frame.mul_f64(1.0 - credits);
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                command = rx.recv() => {
+                    if !apply_player_command(command, &mut queue, &mut ack, &mut credits, capacity) {
+                        return;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some(done) = ack.take() {
+            let _ = done.send(());
+        }
+        if !apply_player_command(
+            rx.recv().await,
+            &mut queue,
+            &mut ack,
+            &mut credits,
+            capacity,
+        ) {
+            return;
+        }
+    }
+}
+
+fn apply_player_command(
+    command: Option<PlayerCommand>,
+    queue: &mut VecDeque<Vec<u8>>,
+    ack: &mut Option<oneshot::Sender<()>>,
+    credits: &mut f64,
+    capacity: f64,
+) -> bool {
+    match command {
+        Some(PlayerCommand::Packet(packet)) => queue.push_back(packet),
+        Some(PlayerCommand::Finish(done)) => *ack = Some(done),
+        Some(PlayerCommand::Abort) => {
+            queue.clear();
+            *credits = capacity;
+        }
+        None => return false,
+    }
+    true
 }
 
 async fn send_json<T: serde::Serialize>(tx: &mpsc::Sender<Message>, value: &T) {
@@ -316,5 +450,88 @@ async fn send_json<T: serde::Serialize>(tx: &mpsc::Sender<Message>, value: &T) {
             let _ = tx.send(Message::text(payload)).await;
         }
         Err(err) => error!(%err, "failed to serialize message"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn player_releases_one_packet_per_frame() {
+        let (tx, mut rx) = mpsc::channel::<Message>(16);
+        let player = spawn_player(tx, 50, 0);
+        for i in 0..3u8 {
+            player.push(vec![i]).await;
+        }
+        let finished = tokio::spawn(async move {
+            player.finish().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let first = rx.try_recv().expect("first packet should be released");
+        assert!(matches!(first, Message::Binary(data) if data.as_ref() == [0u8]));
+        assert!(
+            rx.try_recv().is_err(),
+            "packets released ahead of frame pacing"
+        );
+
+        finished.await.unwrap();
+        let mut rest = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Message::Binary(data) = msg {
+                rest.push(data[0]);
+            }
+        }
+        assert_eq!(rest, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn player_primes_device_queue_with_prebuffer() {
+        let (tx, mut rx) = mpsc::channel::<Message>(16);
+        let player = spawn_player(tx, 50, 100);
+        for i in 0..4u8 {
+            player.push(vec![i]).await;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let mut primed = Vec::new();
+        while let Ok(Message::Binary(data)) = rx.try_recv() {
+            primed.push(data[0]);
+        }
+        assert_eq!(primed, vec![0, 1], "expected a two-frame prebuffer burst");
+        assert!(rx.try_recv().is_err(), "rest must stay paced");
+
+        let finished = tokio::spawn(async move {
+            player.finish().await;
+        });
+        finished.await.unwrap();
+        let mut rest = Vec::new();
+        while let Ok(Message::Binary(data)) = rx.try_recv() {
+            rest.push(data[0]);
+        }
+        assert_eq!(rest, vec![2, 3]);
+    }
+
+    #[tokio::test]
+    async fn player_abort_drops_pending_audio() {
+        let (tx, mut rx) = mpsc::channel::<Message>(16);
+        let player = spawn_player(tx, 50, 0);
+        for i in 0..3u8 {
+            player.push(vec![i]).await;
+        }
+        player.abort().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let first = rx.try_recv().expect("first packet should be released");
+        assert!(matches!(first, Message::Binary(data) if data.as_ref() == [0u8]));
+
+        let finished = tokio::spawn(async move {
+            player.finish().await;
+        });
+        finished.await.unwrap();
+        assert!(
+            rx.try_recv().is_err(),
+            "buffered packets should be dropped after abort"
+        );
     }
 }

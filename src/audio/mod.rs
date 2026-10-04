@@ -147,6 +147,10 @@ impl OpusEncoder {
         Some(self.encode_frame(&frame))
     }
 
+    pub fn reset(&mut self) {
+        self.pending.clear();
+    }
+
     fn encode_frame(&mut self, frame: &[f32]) -> Vec<u8> {
         let pcm: Vec<i16> = frame
             .iter()
@@ -213,5 +217,25 @@ mod tests {
             OpusEncoder::new(SAMPLE_RATE, 3, FRAME_DURATION_MS),
             Err(EncodeError::UnsupportedChannels(3))
         ));
+    }
+
+    #[test]
+    fn every_encoded_packet_is_one_full_frame() {
+        let mut encoder = OpusEncoder::new(SAMPLE_RATE, CHANNELS, FRAME_DURATION_MS).unwrap();
+        let mut decoder = OpusDecoder::new(SAMPLE_RATE, CHANNELS).unwrap();
+        let expected = (SAMPLE_RATE / 1000 * FRAME_DURATION_MS) as usize;
+
+        let mut packets = Vec::new();
+        for chunk in [7usize, 100, 300, 960, 50, 1, 1919] {
+            let samples = vec![0.3f32; chunk];
+            packets.extend(encoder.push(&samples));
+        }
+        packets.extend(encoder.flush());
+
+        assert!(packets.len() >= 3);
+        for packet in &packets {
+            let decoded = decoder.decode(packet).unwrap();
+            assert_eq!(decoded.len(), expected, "packet was not exactly one frame");
+        }
     }
 }

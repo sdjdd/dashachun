@@ -33,6 +33,7 @@ pub enum AgentOutput {
     TtsSentence { text: String },
     Audio(Vec<f32>),
     TtsStop,
+    TtsAbort,
     Mcp(serde_json::Value),
     Error { message: String },
 }

@@ -19,6 +19,7 @@ fn state_with_url(websocket_url: Option<String>) -> AppState {
         config: AppConfig {
             server: ServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
+                playback_prebuffer_ms: 180,
             },
             ota: OtaConfig {
                 websocket_url,

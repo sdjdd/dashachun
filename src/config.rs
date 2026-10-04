@@ -9,6 +9,7 @@ pub struct AppConfig {
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub bind_addr: String,
+    pub playback_prebuffer_ms: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +32,9 @@ impl ServerConfig {
     pub fn from_env() -> Self {
         Self {
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:3000"),
+            playback_prebuffer_ms: env_or("PLAYBACK_PREBUFFER_MS", "180")
+                .parse()
+                .unwrap_or(180),
         }
     }
 }
