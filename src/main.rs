@@ -5,10 +5,12 @@ use axum::body::Body;
 use axum::http::Request;
 use tracing_subscriber::EnvFilter;
 
+use xiaozhi_server_rs::agent::{Agent, CompositeAgent};
 use xiaozhi_server_rs::asr::volc::VolcAsr;
 use xiaozhi_server_rs::asr::{Asr, StubAsr};
 use xiaozhi_server_rs::config::AppConfig;
 use xiaozhi_server_rs::state::AppState;
+use xiaozhi_server_rs::vad::SileroVadFactory;
 
 #[tokio::main]
 async fn main() {
@@ -30,7 +32,9 @@ async fn main() {
             Arc::new(StubAsr::default())
         }
     };
-    let app = xiaozhi_server_rs::app(AppState { config, asr });
+    let vad = Arc::new(SileroVadFactory::from_env());
+    let agent: Arc<dyn Agent> = Arc::new(CompositeAgent::new(asr, None, None, vad));
+    let app = xiaozhi_server_rs::app(AppState { config, agent });
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     tracing::info!("listening on {bind_addr}");

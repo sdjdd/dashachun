@@ -5,14 +5,17 @@ use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
 
 use crate::state::AppState;
 
+pub mod agent;
 pub mod asr;
 pub mod audio;
 pub mod config;
 pub mod dto;
 pub mod error;
 pub mod extract;
+pub mod llm;
 pub mod routes;
 pub mod state;
+pub mod tts;
 pub mod vad;
 
 pub fn app(state: AppState) -> NormalizePath<Router> {

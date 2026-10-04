@@ -4,9 +4,11 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use xiaozhi_server_rs::agent::{Agent, CompositeAgent};
 use xiaozhi_server_rs::asr::StubAsr;
 use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
 use xiaozhi_server_rs::state::AppState;
+use xiaozhi_server_rs::vad::{SileroVadFactory, VadConfig};
 
 fn state() -> AppState {
     state_with_url(Some("ws://configured/gateway".into()))
@@ -24,7 +26,12 @@ fn state_with_url(websocket_url: Option<String>) -> AppState {
                 timezone_offset: 480,
             },
         },
-        asr: Arc::new(StubAsr::default()),
+        agent: Arc::new(CompositeAgent::new(
+            Arc::new(StubAsr::default()),
+            None,
+            None,
+            Arc::new(SileroVadFactory::new(VadConfig::default())),
+        )) as Arc<dyn Agent>,
     }
 }
 

@@ -133,6 +133,15 @@ impl From<voice_activity_detector::Error> for VadError {
     }
 }
 
+pub trait Vad: Send {
+    fn push(&mut self, samples: &[f32]) -> Vec<VadEvent>;
+    fn flush(&mut self) -> Vec<VadEvent>;
+}
+
+pub trait VadFactory: Send + Sync {
+    fn build(&self, sample_rate: u32) -> Result<Box<dyn Vad>, VadError>;
+}
+
 struct SpeechSegmenter {
     config: VadConfig,
     chunk_ms: u32,
@@ -198,16 +207,17 @@ impl SpeechSegmenter {
     }
 }
 
-pub struct Vad {
+pub struct SileroVad {
     model: VoiceActivityDetector,
     chunk_size: usize,
     buffer: VecDeque<f32>,
     chunk: Vec<f32>,
     segmenter: SpeechSegmenter,
     pre_padding: PrePadding,
+    active: bool,
 }
 
-impl Vad {
+impl SileroVad {
     pub fn new(sample_rate: u32, config: VadConfig) -> Result<Self, VadError> {
         match sample_rate {
             16000 | 8000 => {}
@@ -226,37 +236,11 @@ impl Vad {
             chunk: vec![0.0; chunk_size],
             segmenter: SpeechSegmenter::new(config, chunk_ms),
             pre_padding: PrePadding::new(config.pre_padding_ms, sample_rate),
+            active: false,
         })
     }
 
-    pub fn segment(self, audio: AudioStream) -> VadEvents {
-        let state = SegmentState {
-            vad: self,
-            audio,
-            pending: VecDeque::new(),
-            active: false,
-            finished: false,
-        };
-        Box::pin(futures_util::stream::unfold(
-            state,
-            |mut state| async move {
-                loop {
-                    if let Some(event) = state.pending.pop_front() {
-                        return Some((event, state));
-                    }
-                    if state.finished {
-                        return None;
-                    }
-                    match state.audio.next().await {
-                        Some(frame) => state.process(frame),
-                        None => state.finish(),
-                    }
-                }
-            },
-        ))
-    }
-
-    fn push(&mut self, samples: &[f32], events: &mut Vec<SegmentEvent>) {
+    fn predict_push(&mut self, samples: &[f32], events: &mut Vec<SegmentEvent>) {
         self.buffer.extend(samples.iter().copied());
         while self.buffer.len() >= self.chunk_size {
             for slot in self.chunk.iter_mut() {
@@ -269,7 +253,7 @@ impl Vad {
         }
     }
 
-    fn flush(&mut self, events: &mut Vec<SegmentEvent>) {
+    fn predict_flush(&mut self, events: &mut Vec<SegmentEvent>) {
         while !self.buffer.is_empty() {
             for slot in self.chunk.iter_mut() {
                 *slot = self.buffer.pop_front().unwrap_or(0.0);
@@ -283,56 +267,98 @@ impl Vad {
             events.push(event);
         }
     }
-}
 
-struct SegmentState {
-    vad: Vad,
-    audio: AudioStream,
-    pending: VecDeque<VadEvent>,
-    active: bool,
-    finished: bool,
-}
-
-impl SegmentState {
-    fn process(&mut self, frame: Vec<f32>) {
-        let mut boundaries = Vec::new();
-        self.vad.push(&frame, &mut boundaries);
+    fn boundaries_to_events(&mut self, boundaries: Vec<SegmentEvent>) -> Vec<VadEvent> {
+        let mut events = Vec::new();
         for event in boundaries {
             match event {
                 SegmentEvent::Start { at_ms } => {
                     self.active = true;
-                    let pre_padding = self.vad.pre_padding.take();
-                    self.pending.push_back(VadEvent::SpeechStart { at_ms });
+                    let pre_padding = self.pre_padding.take();
+                    events.push(VadEvent::SpeechStart { at_ms });
                     if !pre_padding.is_empty() {
-                        self.pending.push_back(VadEvent::Speech {
+                        events.push(VadEvent::Speech {
                             samples: pre_padding,
                         });
                     }
                 }
                 SegmentEvent::End { at_ms } => {
                     self.active = false;
-                    self.pending.push_back(VadEvent::SpeechEnd { at_ms });
+                    events.push(VadEvent::SpeechEnd { at_ms });
                 }
             }
         }
+        events
+    }
+}
+
+impl Vad for SileroVad {
+    fn push(&mut self, samples: &[f32]) -> Vec<VadEvent> {
+        let mut boundaries = Vec::new();
+        self.predict_push(samples, &mut boundaries);
+        let events = self.boundaries_to_events(boundaries);
         if self.active {
-            self.pending.push_back(VadEvent::Speech { samples: frame });
+            let mut events = events;
+            events.push(VadEvent::Speech {
+                samples: samples.to_vec(),
+            });
+            events
         } else {
-            self.vad.pre_padding.push(&frame);
+            self.pre_padding.push(samples);
+            events
         }
     }
 
-    fn finish(&mut self) {
+    fn flush(&mut self) -> Vec<VadEvent> {
         let mut boundaries = Vec::new();
-        self.vad.flush(&mut boundaries);
-        for event in boundaries {
-            if let SegmentEvent::End { at_ms } = event {
-                self.active = false;
-                self.pending.push_back(VadEvent::SpeechEnd { at_ms });
-            }
-        }
-        self.finished = true;
+        self.predict_flush(&mut boundaries);
+        self.boundaries_to_events(boundaries)
     }
+}
+
+#[derive(Clone)]
+pub struct SileroVadFactory {
+    config: VadConfig,
+}
+
+impl SileroVadFactory {
+    pub fn new(config: VadConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn from_env() -> Self {
+        Self::new(VadConfig::from_env())
+    }
+}
+
+impl VadFactory for SileroVadFactory {
+    fn build(&self, sample_rate: u32) -> Result<Box<dyn Vad>, VadError> {
+        SileroVad::new(sample_rate, self.config).map(|vad| Box::new(vad) as Box<dyn Vad>)
+    }
+}
+
+pub fn segment(vad: Box<dyn Vad>, audio: AudioStream) -> VadEvents {
+    let state = (vad, audio, VecDeque::new(), false);
+    Box::pin(futures_util::stream::unfold(
+        state,
+        |(mut vad, mut audio, mut pending, mut finished)| async move {
+            loop {
+                if let Some(event) = pending.pop_front() {
+                    return Some((event, (vad, audio, pending, finished)));
+                }
+                if finished {
+                    return None;
+                }
+                match audio.next().await {
+                    Some(frame) => pending.extend(vad.push(&frame)),
+                    None => {
+                        pending.extend(vad.flush());
+                        finished = true;
+                    }
+                }
+            }
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -429,16 +455,17 @@ mod tests {
     #[test]
     fn unsupported_sample_rate() {
         assert!(matches!(
-            Vad::new(24000, VadConfig::default()),
+            SileroVad::new(24000, VadConfig::default()),
             Err(VadError::UnsupportedSampleRate(24000))
         ));
     }
 
     #[tokio::test]
     async fn real_model_silence_produces_no_events() {
-        let vad = Vad::new(SAMPLE_RATE, VadConfig::default()).unwrap();
+        let factory = SileroVadFactory::new(VadConfig::default());
+        let vad = factory.build(SAMPLE_RATE).unwrap();
         let frames = (0..20).map(|_| vec![0.0f32; 960]).collect();
-        let events: Vec<_> = vad.segment(audio_stream(frames)).collect().await;
+        let events: Vec<_> = segment(vad, audio_stream(frames)).collect().await;
         assert!(events.is_empty(), "unexpected events: {events:?}");
     }
 

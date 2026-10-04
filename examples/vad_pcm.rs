@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use futures_util::StreamExt;
 use xiaozhi_server_rs::audio::AudioStream;
-use xiaozhi_server_rs::vad::{Vad, VadConfig, VadEvent};
+use xiaozhi_server_rs::vad::{SileroVadFactory, VadConfig, VadEvent, VadFactory, segment};
 
 const FRAME_SAMPLES: usize = 960;
 
@@ -78,7 +78,7 @@ async fn main() {
         config.speech_threshold = threshold;
     }
 
-    let vad = match Vad::new(rate, config) {
+    let vad = match SileroVadFactory::new(config).build(rate) {
         Ok(vad) => vad,
         Err(err) => {
             eprintln!("failed to create vad: {err}");
@@ -88,7 +88,7 @@ async fn main() {
 
     let frames: Vec<Vec<f32>> = samples.chunks(FRAME_SAMPLES).map(<[f32]>::to_vec).collect();
     let audio: AudioStream = Box::pin(futures_util::stream::iter(frames));
-    let mut events = vad.segment(audio);
+    let mut events = segment(vad, audio);
 
     let mut speech_ms = 0u64;
     let mut speech_start = 0u64;

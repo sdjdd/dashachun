@@ -12,16 +12,15 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
-use crate::asr::{Asr, AsrEvent, AudioStream};
+use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
 use crate::audio::OpusDecoder;
 use crate::dto::ws::{
     Abort, AudioParams, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage,
     TtsMessage,
 };
 use crate::state::AppState;
-use crate::vad::{Vad, VadConfig, VadEvent, VadEvents};
 
-const ASR_CHANNEL_CAPACITY: usize = 64;
+const AGENT_CHANNEL_CAPACITY: usize = 64;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/gateway", get(handle_device_connect))
@@ -58,7 +57,7 @@ async fn handle_device_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    let mut session = Session::new(tx.clone(), state.asr);
+    let mut session = Session::new(tx.clone(), state.agent);
     while let Some(result) = stream.next().await {
         let msg = match result {
             Ok(Message::Close(_)) => break,
@@ -92,42 +91,31 @@ async fn handle_device_socket(socket: WebSocket, state: AppState) {
     info!("device disconnected");
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SessionState {
-    Idle,
-    Listening,
-    Speaking,
-}
-
 struct Session {
     id: Option<String>,
-    state: SessionState,
     tx: mpsc::Sender<Message>,
     decoder: Option<OpusDecoder>,
-    audio_params: AudioParams,
-    asr: Arc<dyn Asr>,
-    vad_task: Option<JoinHandle<()>>,
-    audio_tx: Option<mpsc::Sender<Vec<f32>>>,
+    agent: Arc<dyn Agent>,
+    agent_tx: Option<mpsc::Sender<AgentInput>>,
+    agent_task: Option<JoinHandle<()>>,
 }
 
 impl Session {
-    fn new(tx: mpsc::Sender<Message>, asr: Arc<dyn Asr>) -> Self {
+    fn new(tx: mpsc::Sender<Message>, agent: Arc<dyn Agent>) -> Self {
         Self {
             id: None,
-            state: SessionState::Idle,
             tx,
             decoder: None,
-            audio_params: AudioParams::default(),
-            asr,
-            vad_task: None,
-            audio_tx: None,
+            agent,
+            agent_tx: None,
+            agent_task: None,
         }
     }
 
     async fn handle(&mut self, message: InboundMessage) {
         match message {
             InboundMessage::Hello(hello) => self.on_hello(hello).await,
-            InboundMessage::Listen(listen) => self.on_listen(listen).await,
+            InboundMessage::Listen(listen) => self.on_listen(listen),
             InboundMessage::Abort(abort) => self.on_abort(abort),
             InboundMessage::Mcp(mcp) => self.on_mcp(mcp),
         }
@@ -167,27 +155,35 @@ impl Session {
                     None
                 }
             };
-        let vad_config = VadConfig::from_env();
-        info!(
-            session_id = %id,
-            decoder = self.decoder.is_some(),
-            speech_threshold = vad_config.speech_threshold,
-            silence_threshold = vad_config.silence_threshold,
-            min_speech_ms = vad_config.min_speech_ms,
-            min_silence_ms = vad_config.min_silence_ms,
-            pre_padding_ms = vad_config.pre_padding_ms,
-            "audio pipeline ready"
-        );
         send_json(
             &self.tx,
             &ServerHello::new(id.clone(), audio_params.clone()),
         )
         .await;
-        self.audio_params = audio_params;
-        self.id = Some(id);
+        self.id = Some(id.clone());
+        self.start_agent(id, audio_params);
     }
 
-    async fn on_listen(&mut self, listen: Listen) {
+    fn start_agent(&mut self, session_id: String, audio_params: AudioParams) {
+        let (agent_tx, agent_rx) = mpsc::channel::<AgentInput>(AGENT_CHANNEL_CAPACITY);
+        let input: crate::agent::AgentInputStream = Box::pin(futures_util::stream::unfold(
+            agent_rx,
+            |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
+        ));
+        let session = AgentSession {
+            id: session_id,
+            sample_rate: audio_params.sample_rate,
+            channels: audio_params.channels as u16,
+            frame_duration_ms: audio_params.frame_duration,
+        };
+        let output = self.agent.run(session, input);
+        let tx = self.tx.clone();
+        let session_id = self.id.clone().unwrap_or_default();
+        self.agent_task = Some(tokio::spawn(run_agent(output, tx, session_id)));
+        self.agent_tx = Some(agent_tx);
+    }
+
+    fn on_listen(&mut self, listen: Listen) {
         let Some(session_id) = self.id.clone() else {
             warn!("listen message before hello, ignoring");
             return;
@@ -195,189 +191,94 @@ impl Session {
 
         match listen.state.as_str() {
             "start" => {
-                self.start_listening(session_id, listen.mode);
+                self.send_agent(AgentInput::ListenStart { mode: listen.mode });
+                info!(session_id, "device started listening");
             }
             "detect" => {
                 info!(session_id, text = ?listen.text, "wake word detected");
             }
             "stop" => {
-                self.stop_listening();
+                self.send_agent(AgentInput::ListenStop);
             }
             other => warn!(%other, "unknown listen state"),
         }
     }
 
     fn on_abort(&mut self, abort: Abort) {
-        self.stop_vad();
-        self.state = SessionState::Idle;
-        info!(session_id = ?self.id, reason = ?abort.reason, "abort requested");
+        let reason = abort.reason;
+        info!(session_id = ?self.id, reason = ?reason, "abort requested");
+        self.send_agent(AgentInput::Interrupt { reason });
     }
 
-    fn on_mcp(&self, mcp: Mcp) {
+    fn on_mcp(&mut self, mcp: Mcp) {
         debug!(session_id = ?self.id, payload = %mcp.payload, "mcp message");
+        self.send_agent(AgentInput::Mcp(mcp.payload));
     }
 
     fn handle_binary(&mut self, data: &[u8]) {
-        if self.state != SessionState::Listening {
-            let state = self.state;
-            debug!(len = data.len(), ?state, "unexpected binary frame");
-            return;
-        }
-
         let Some(decoder) = self.decoder.as_mut() else {
             debug!(len = data.len(), "binary frame before decoder ready");
             return;
         };
-        let Ok(samples) = decoder.decode(data) else {
-            warn!(len = data.len(), "failed to decode opus frame");
-            return;
+        let samples = match decoder.decode(data) {
+            Ok(samples) => samples.to_vec(),
+            Err(err) => {
+                warn!(%err, len = data.len(), "failed to decode opus frame");
+                return;
+            }
         };
         trace!(samples = samples.len(), "decoded opus frame");
+        self.send_agent(AgentInput::Audio(samples));
+    }
 
-        if let Some(tx) = self.audio_tx.as_ref()
-            && tx.try_send(samples.to_vec()).is_err()
+    fn send_agent(&self, input: AgentInput) {
+        if let Some(tx) = self.agent_tx.as_ref()
+            && tx.try_send(input).is_err()
         {
-            trace!("vad input full, dropping frame");
-        }
-    }
-
-    fn start_listening(&mut self, session_id: String, mode: Option<String>) {
-        self.stop_vad();
-        if self.decoder.is_none() {
-            self.state = SessionState::Listening;
-            info!(session_id, mode = ?mode, "device started listening");
-            return;
-        }
-        match Vad::new(self.audio_params.sample_rate, VadConfig::from_env()) {
-            Ok(vad) => {
-                let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
-                let audio: AudioStream = Box::pin(futures_util::stream::unfold(
-                    audio_rx,
-                    |mut rx| async move { rx.recv().await.map(|chunk| (chunk, rx)) },
-                ));
-                let events = vad.segment(audio);
-                let tx = self.tx.clone();
-                let asr = self.asr.clone();
-                self.vad_task = Some(tokio::spawn(run_vad(session_id.clone(), tx, asr, events)));
-                self.audio_tx = Some(audio_tx);
-                self.state = SessionState::Listening;
-                info!(session_id, mode = ?mode, "device started listening");
-            }
-            Err(err) => {
-                warn!(%err, "failed to create vad");
-                self.state = SessionState::Listening;
-            }
-        }
-    }
-
-    fn stop_listening(&mut self) {
-        self.audio_tx = None;
-        self.state = SessionState::Speaking;
-    }
-
-    fn stop_vad(&mut self) {
-        self.audio_tx = None;
-        if let Some(handle) = self.vad_task.take() {
-            handle.abort();
+            trace!("agent input full or closed, dropping message");
         }
     }
 
     fn shutdown(&mut self) {
-        self.stop_vad();
-    }
-}
-
-async fn run_vad(
-    session_id: String,
-    tx: mpsc::Sender<Message>,
-    asr: Arc<dyn Asr>,
-    mut events: VadEvents,
-) {
-    let mut utterance: Option<(mpsc::Sender<Vec<f32>>, UtteranceTask)> = None;
-
-    while let Some(event) = events.next().await {
-        match event {
-            VadEvent::SpeechStart { at_ms } => {
-                info!(session_id, at_ms, "speech start");
-                let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
-                let audio: AudioStream = Box::pin(futures_util::stream::unfold(
-                    audio_rx,
-                    |mut rx| async move { rx.recv().await.map(|chunk| (chunk, rx)) },
-                ));
-                let handle =
-                    tokio::spawn(run_asr(session_id.clone(), tx.clone(), asr.clone(), audio));
-                utterance = Some((audio_tx, UtteranceTask(Some(handle))));
-            }
-            VadEvent::Speech { samples } => {
-                if let Some((tx, _)) = utterance.as_ref()
-                    && tx.try_send(samples).is_err()
-                {
-                    trace!("asr input full, dropping frame");
-                }
-            }
-            VadEvent::SpeechEnd { at_ms } => {
-                info!(session_id, at_ms, "speech end");
-                if let Some((_, task)) = utterance.take() {
-                    task.detach();
-                }
-            }
-        }
-    }
-}
-
-struct UtteranceTask(Option<JoinHandle<()>>);
-
-impl UtteranceTask {
-    fn detach(mut self) {
-        if let Some(handle) = self.0.take() {
-            drop(handle);
-        }
-    }
-}
-
-impl Drop for UtteranceTask {
-    fn drop(&mut self) {
-        if let Some(handle) = self.0.take() {
+        self.agent_tx = None;
+        if let Some(handle) = self.agent_task.take() {
             handle.abort();
         }
     }
 }
 
-async fn run_asr(
-    session_id: String,
-    tx: mpsc::Sender<Message>,
-    asr: Arc<dyn Asr>,
-    audio: AudioStream,
-) {
-    let mut events = asr.transcribe(audio);
-    while let Some(result) = events.next().await {
-        match result {
-            Ok(AsrEvent::Partial { text }) => {
-                debug!(session_id, %text, "asr partial");
-            }
-            Ok(AsrEvent::Final { text }) => {
-                info!(session_id, %text, "asr result");
-                if !text.is_empty() {
-                    run_response(&session_id, &tx, text).await;
+async fn run_agent(mut output: AgentOutputStream, tx: mpsc::Sender<Message>, session_id: String) {
+    use crate::agent::AgentOutput;
+    while let Some(item) = output.next().await {
+        match item {
+            AgentOutput::Stt { text, is_final } => {
+                if is_final {
+                    info!(%text, "stt final");
+                } else {
+                    debug!(%text, "stt partial");
                 }
+                send_json(&tx, &SttMessage::new(session_id.clone(), text)).await;
             }
-            Err(err) => {
-                warn!(session_id, %err, "asr failed");
-                return;
+            AgentOutput::TtsStart => {
+                send_json(&tx, &TtsMessage::start(session_id.clone())).await;
+            }
+            AgentOutput::TtsSentence { text } => {
+                send_json(&tx, &TtsMessage::sentence_start(session_id.clone(), text)).await;
+            }
+            AgentOutput::TtsStop => {
+                send_json(&tx, &TtsMessage::stop(session_id.clone())).await;
+            }
+            AgentOutput::Audio(samples) => {
+                debug!(samples = samples.len(), "agent audio (codec not wired yet)");
+            }
+            AgentOutput::Mcp(payload) => {
+                debug!(%payload, "agent mcp output");
+            }
+            AgentOutput::Error { message } => {
+                warn!(%message, "agent error");
             }
         }
     }
-}
-
-async fn run_response(session_id: &str, tx: &mpsc::Sender<Message>, text: String) {
-    let session = session_id.to_string();
-    send_json(tx, &SttMessage::new(session.clone(), text.clone())).await;
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    send_json(tx, &TtsMessage::start(session.clone())).await;
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    send_json(tx, &TtsMessage::sentence_start(session.clone(), text)).await;
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    send_json(tx, &TtsMessage::stop(session)).await;
 }
 
 async fn send_json<T: serde::Serialize>(tx: &mpsc::Sender<Message>, value: &T) {
