@@ -3,6 +3,8 @@ use std::pin::Pin;
 
 use futures_util::{Stream, StreamExt};
 
+pub mod volc;
+
 pub type AudioStream = Pin<Box<dyn Stream<Item = Vec<f32>> + Send>>;
 pub type AsrEvents<'a> = Pin<Box<dyn Stream<Item = Result<AsrEvent, AsrError>> + Send + 'a>>;
 
