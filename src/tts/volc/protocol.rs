@@ -27,6 +27,7 @@ pub const EVENT_TASK_REQUEST: i32 = 200;
 pub const EVENT_TTS_SENTENCE_START: i32 = 350;
 pub const EVENT_TTS_SENTENCE_END: i32 = 351;
 pub const EVENT_TTS_RESPONSE: i32 = 352;
+pub const EVENT_TTS_SUBTITLE: i32 = 364;
 
 fn is_connection_event(event: i32) -> bool {
     matches!(

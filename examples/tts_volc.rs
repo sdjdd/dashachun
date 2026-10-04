@@ -62,6 +62,10 @@ async fn main() {
         let elapsed = start.elapsed().as_millis();
         match event {
             Ok(TtsEvent::SentenceStart { text }) => println!("[{elapsed:>6} ms] sentence: {text}"),
+            Ok(TtsEvent::Subtitle(subtitle)) => println!(
+                "[{elapsed:>6} ms] subtitle: {}..{} ms  {}",
+                subtitle.start_ms, subtitle.end_ms, subtitle.text
+            ),
             Ok(TtsEvent::Audio(chunk)) => {
                 println!("[{elapsed:>6} ms] audio:    {} samples", chunk.len());
                 samples.extend_from_slice(&chunk);

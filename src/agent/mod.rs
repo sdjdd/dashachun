@@ -31,6 +31,7 @@ pub enum AgentOutput {
     Stt { text: String, is_final: bool },
     TtsStart,
     TtsSentence { text: String },
+    TtsSubtitle { subtitle: crate::tts::Subtitle },
     Audio(Vec<f32>),
     TtsStop,
     TtsAbort,

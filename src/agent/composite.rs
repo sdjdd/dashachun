@@ -10,7 +10,7 @@ use crate::agent::{
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
 use crate::llm::{ChatMessage, Llm, LlmEvent};
-use crate::tts::{TextStream, Tts, TtsEvent};
+use crate::tts::{Subtitle, TextStream, Tts, TtsEvent};
 use crate::vad::{Vad, VadEvent, VadFactory};
 
 const ASR_CHANNEL_CAPACITY: usize = 64;
@@ -78,6 +78,7 @@ enum LlmMessage {
 
 enum TtsMessage {
     SentenceStart { generation: u64, text: String },
+    Subtitle { generation: u64, subtitle: Subtitle },
     Audio { generation: u64, samples: Vec<f32> },
     Done { generation: u64 },
     Error { generation: u64, message: String },
@@ -295,6 +296,7 @@ async fn drive(
             Some(message) = tts_rx.recv() => {
                 let current = match &message {
                     TtsMessage::SentenceStart { generation, .. }
+                    | TtsMessage::Subtitle { generation, .. }
                     | TtsMessage::Audio { generation, .. }
                     | TtsMessage::Done { generation, .. }
                     | TtsMessage::Error { generation, .. } => *generation,
@@ -305,6 +307,15 @@ async fn drive(
                 match message {
                     TtsMessage::SentenceStart { text, .. } => {
                         if out_tx.send(AgentOutput::TtsSentence { text }).await.is_err() {
+                            break;
+                        }
+                    }
+                    TtsMessage::Subtitle { subtitle, .. } => {
+                        if out_tx
+                            .send(AgentOutput::TtsSubtitle { subtitle })
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -553,6 +564,10 @@ async fn run_tts(
     while let Some(result) = events.next().await {
         let message = match result {
             Ok(TtsEvent::SentenceStart { text }) => TtsMessage::SentenceStart { generation, text },
+            Ok(TtsEvent::Subtitle(subtitle)) => TtsMessage::Subtitle {
+                generation,
+                subtitle,
+            },
             Ok(TtsEvent::Audio(samples)) => TtsMessage::Audio {
                 generation,
                 samples,
@@ -608,7 +623,12 @@ mod tests {
                 while let Some(chunk) = text.next().await {
                     acc.push_str(&chunk);
                 }
-                let _ = tx.send(Ok(TtsEvent::SentenceStart { text: acc }));
+                let _ = tx.send(Ok(TtsEvent::SentenceStart { text: acc.clone() }));
+                let _ = tx.send(Ok(TtsEvent::Subtitle(Subtitle {
+                    text: acc,
+                    start_ms: 0,
+                    end_ms: 120,
+                })));
                 let _ = tx.send(Ok(TtsEvent::Audio(vec![0.25; 960])));
                 let _ = tx.send(Ok(TtsEvent::Done));
             });
@@ -845,6 +865,11 @@ mod tests {
             seen.iter()
                 .any(|item| matches!(item, AgentOutput::TtsSentence { text } if text == "hi"))
         );
+        assert!(seen.iter().any(|item| matches!(
+            item,
+            AgentOutput::TtsSubtitle { subtitle }
+                if subtitle.text == "hi" && subtitle.end_ms == 120
+        )));
         assert!(
             seen.iter()
                 .any(|item| matches!(item, AgentOutput::Audio(s) if s.len() == 960))

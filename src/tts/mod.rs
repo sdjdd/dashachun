@@ -9,8 +9,16 @@ pub type TextStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 pub type TtsEvents<'a> = Pin<Box<dyn Stream<Item = Result<TtsEvent, TtsError>> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Subtitle {
+    pub text: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TtsEvent {
     SentenceStart { text: String },
+    Subtitle(Subtitle),
     Audio(Vec<f32>),
     Done,
 }

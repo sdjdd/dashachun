@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 mod protocol;
 
-use super::{TextStream, Tts, TtsError, TtsEvent, TtsEvents};
+use super::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 use protocol::Message as TtsMessage;
 
 pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
@@ -265,6 +265,13 @@ async fn run(
                             return Ok(());
                         }
                     }
+                    protocol::EVENT_TTS_SUBTITLE => {
+                        if let Some(subtitle) = subtitle(&message)
+                            && tx.send(Ok(TtsEvent::Subtitle(subtitle))).is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
                     protocol::EVENT_SESSION_FINISHED => {
                         if !finish_sent {
                             finish_sent = true;
@@ -332,6 +339,45 @@ fn sentence_text(message: &TtsMessage) -> Option<String> {
         .or_else(|| json.get("text"))?
         .as_str()
         .map(str::to_string)
+}
+
+fn subtitle(message: &TtsMessage) -> Option<Subtitle> {
+    let json = message.json()?;
+    let text = json
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut start_ms: Option<u64> = None;
+    let mut end_ms = 0;
+    if let Some(words) = json.get("words").and_then(serde_json::Value::as_array) {
+        for word in words {
+            let Some(start) = word.get("startTime").and_then(seconds_to_ms) else {
+                continue;
+            };
+            let Some(end) = word.get("endTime").and_then(seconds_to_ms) else {
+                continue;
+            };
+            start_ms = Some(start_ms.map_or(start, |current| current.min(start)));
+            end_ms = end_ms.max(end);
+        }
+    }
+    if text.is_empty() && start_ms.is_none() {
+        return None;
+    }
+    Some(Subtitle {
+        text,
+        start_ms: start_ms.unwrap_or(0),
+        end_ms,
+    })
+}
+
+fn seconds_to_ms(value: &serde_json::Value) -> Option<u64> {
+    let seconds = value.as_f64()?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    Some((seconds * 1000.0).round() as u64)
 }
 
 fn pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
@@ -403,5 +449,29 @@ mod tests {
             pcm16_to_f32(&[0, 0, 0xff, 0x7f]),
             vec![0.0, 32767.0 / 32768.0]
         );
+    }
+
+    #[test]
+    fn subtitle_spans_text_and_words() {
+        let subtitle = subtitle(&message(
+            r#"{"phonemes":[],"text":"你好。","words":[{"confidence":0.9,"endTime":0.615,"startTime":0.585,"word":"你"},{"confidence":0.8,"endTime":1.0,"startTime":0.615,"word":"好。"}]}"#,
+        ))
+        .unwrap();
+        assert_eq!(subtitle.text, "你好。");
+        assert_eq!(subtitle.start_ms, 585);
+        assert_eq!(subtitle.end_ms, 1000);
+    }
+
+    #[test]
+    fn subtitle_skips_empty() {
+        assert!(subtitle(&message(r#"{"phonemes":[],"text":"","words":[]}"#)).is_none());
+    }
+
+    #[test]
+    fn subtitle_keeps_text_without_words() {
+        let subtitle = subtitle(&message(r#"{"phonemes":[],"text":"你好。","words":[]}"#)).unwrap();
+        assert_eq!(subtitle.text, "你好。");
+        assert_eq!(subtitle.start_ms, 0);
+        assert_eq!(subtitle.end_ms, 0);
     }
 }

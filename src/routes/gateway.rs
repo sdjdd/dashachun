@@ -296,6 +296,14 @@ async fn run_agent(
             AgentOutput::TtsSentence { text } => {
                 send_json(&tx, &TtsMessage::sentence_start(session_id.clone(), text)).await;
             }
+            AgentOutput::TtsSubtitle { subtitle } => {
+                debug!(
+                    text = %subtitle.text,
+                    start_ms = subtitle.start_ms,
+                    end_ms = subtitle.end_ms,
+                    "tts subtitle"
+                );
+            }
             AgentOutput::TtsStop => {
                 if let Some(encoder) = encoder.as_mut()
                     && let Some(packet) = encoder.flush()
