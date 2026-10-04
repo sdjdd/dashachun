@@ -5,6 +5,7 @@ use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
 
 use crate::state::AppState;
 
+pub mod asr;
 pub mod audio;
 pub mod config;
 pub mod dto;

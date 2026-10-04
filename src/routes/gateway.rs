@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -10,6 +12,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::asr::{Asr, AsrEvent, AudioStream};
 use crate::audio::OpusDecoder;
 use crate::dto::ws::{
     Abort, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage, TtsMessage,
@@ -18,6 +21,7 @@ use crate::state::AppState;
 use crate::vad::{Vad, VadConfig, VadEvent};
 
 const AUDIO_STATS_INTERVAL: u64 = 50;
+const ASR_CHANNEL_CAPACITY: usize = 64;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/gateway", get(handle_device_connect))
@@ -41,7 +45,7 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str>
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-async fn handle_device_socket(socket: WebSocket, _state: AppState) {
+async fn handle_device_socket(socket: WebSocket, state: AppState) {
     info!("device connected");
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(32);
@@ -54,7 +58,7 @@ async fn handle_device_socket(socket: WebSocket, _state: AppState) {
         }
     });
 
-    let mut session = Session::new(tx.clone());
+    let mut session = Session::new(tx.clone(), state.asr);
     while let Some(result) = stream.next().await {
         let msg = match result {
             Ok(Message::Close(_)) => break,
@@ -130,22 +134,26 @@ struct Session {
     id: Option<String>,
     state: SessionState,
     tx: mpsc::Sender<Message>,
-    pipeline: Option<JoinHandle<()>>,
+    asr_task: Option<JoinHandle<()>>,
     decoder: Option<OpusDecoder>,
     vad: Option<Vad>,
     audio: AudioStats,
+    asr: Arc<dyn Asr>,
+    asr_tx: Option<mpsc::Sender<Option<Vec<f32>>>>,
 }
 
 impl Session {
-    fn new(tx: mpsc::Sender<Message>) -> Self {
+    fn new(tx: mpsc::Sender<Message>, asr: Arc<dyn Asr>) -> Self {
         Self {
             id: None,
             state: SessionState::Idle,
             tx,
-            pipeline: None,
+            asr_task: None,
             decoder: None,
             vad: None,
             audio: AudioStats::default(),
+            asr,
+            asr_tx: None,
         }
     }
 
@@ -222,27 +230,20 @@ impl Session {
 
         match listen.state.as_str() {
             "start" => {
-                self.stop_pipeline();
-                self.reset_vad();
-                self.audio = AudioStats::default();
-                self.state = SessionState::Listening;
-                info!(session_id, mode = ?listen.mode, "device started listening");
+                self.start_listening(session_id, listen.mode);
             }
             "detect" => {
                 info!(session_id, text = ?listen.text, "wake word detected");
             }
             "stop" => {
-                self.flush_vad();
-                info!(session_id, "device stopped listening");
-                log_audio_stats(self.id.as_deref(), &self.audio);
-                self.start_pipeline(session_id);
+                self.stop_listening();
             }
             other => warn!(%other, "unknown listen state"),
         }
     }
 
     fn on_abort(&mut self, abort: Abort) {
-        self.stop_pipeline();
+        self.stop_asr();
         self.state = SessionState::Idle;
         info!(session_id = ?self.id, reason = ?abort.reason, "abort requested");
     }
@@ -263,6 +264,7 @@ impl Session {
             decoder,
             vad,
             audio,
+            asr_tx,
             ..
         } = self;
 
@@ -283,6 +285,11 @@ impl Session {
             audio.vad_peak = audio.vad_peak.max(probability);
             log_vad_events(id.as_deref(), events);
         }
+        if let Some(asr_tx) = asr_tx.as_mut()
+            && asr_tx.try_send(Some(samples.to_vec())).is_err()
+        {
+            trace!(len = samples.len(), "asr input full, dropping frame");
+        }
         if audio.frames.is_multiple_of(AUDIO_STATS_INTERVAL) {
             log_audio_stats(id.as_deref(), audio);
         }
@@ -297,24 +304,48 @@ impl Session {
         log_vad_events(self.id.as_deref(), events);
     }
 
-    fn start_pipeline(&mut self, session_id: String) {
-        self.stop_pipeline();
-        self.state = SessionState::Speaking;
+    fn start_listening(&mut self, session_id: String, mode: Option<String>) {
+        self.stop_asr();
+        self.reset_vad();
+        self.audio = AudioStats::default();
+
+        let (audio_tx, audio_rx) = mpsc::channel::<Option<Vec<f32>>>(ASR_CHANNEL_CAPACITY);
         let tx = self.tx.clone();
-        self.pipeline = Some(tokio::spawn(async move {
-            run_stub_pipeline(&session_id, &tx).await;
-        }));
+        let asr = self.asr.clone();
+        self.asr_task = Some(tokio::spawn(run_asr(
+            session_id.clone(),
+            tx,
+            asr,
+            asr_stream(audio_rx),
+        )));
+        self.asr_tx = Some(audio_tx);
+        self.state = SessionState::Listening;
+        info!(session_id, mode = ?mode, "device started listening");
     }
 
-    fn stop_pipeline(&mut self) {
-        if let Some(handle) = self.pipeline.take() {
+    fn stop_listening(&mut self) {
+        self.flush_vad();
+        let duration_ms = self.audio.samples * 1000 / crate::audio::SAMPLE_RATE as u64;
+        info!(session_id = ?self.id, duration_ms, "device stopped listening");
+        log_audio_stats(self.id.as_deref(), &self.audio);
+
+        if let Some(asr_tx) = self.asr_tx.as_mut() {
+            let _ = asr_tx.try_send(None);
+        }
+        self.asr_tx = None;
+        self.state = SessionState::Speaking;
+    }
+
+    fn stop_asr(&mut self) {
+        self.asr_tx = None;
+        if let Some(handle) = self.asr_task.take() {
             handle.abort();
         }
     }
 
     fn shutdown(&mut self) {
         self.flush_vad();
-        self.stop_pipeline();
+        self.stop_asr();
     }
 
     fn reset_vad(&mut self) {
@@ -349,22 +380,48 @@ fn log_vad_events(session_id: Option<&str>, events: Vec<VadEvent>) {
     }
 }
 
-async fn run_stub_pipeline(session_id: &str, tx: &mpsc::Sender<Message>) {
-    info!(session_id, "stub pipeline: stt -> tts start/stop");
+fn asr_stream(rx: mpsc::Receiver<Option<Vec<f32>>>) -> AudioStream {
+    Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(Some(chunk)) => Some((chunk, rx)),
+            _ => None,
+        }
+    }))
+}
+
+async fn run_asr(
+    session_id: String,
+    tx: mpsc::Sender<Message>,
+    asr: Arc<dyn Asr>,
+    audio: AudioStream,
+) {
+    let mut events = asr.transcribe(audio);
+    while let Some(result) = events.next().await {
+        match result {
+            Ok(AsrEvent::Partial { text }) => {
+                info!(session_id, %text, "asr partial");
+            }
+            Ok(AsrEvent::Final { text }) => {
+                info!(session_id, %text, "asr final");
+                if !text.is_empty() {
+                    run_response(&session_id, &tx, text).await;
+                }
+            }
+            Err(err) => {
+                warn!(session_id, %err, "asr failed");
+                return;
+            }
+        }
+    }
+}
+
+async fn run_response(session_id: &str, tx: &mpsc::Sender<Message>, text: String) {
     let session = session_id.to_string();
-    send_json(
-        tx,
-        &SttMessage::new(session_id.to_string(), "你好".to_string()),
-    )
-    .await;
+    send_json(tx, &SttMessage::new(session.clone(), text.clone())).await;
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     send_json(tx, &TtsMessage::start(session.clone())).await;
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    send_json(
-        tx,
-        &TtsMessage::sentence_start(session.clone(), "你好".to_string()),
-    )
-    .await;
+    send_json(tx, &TtsMessage::sentence_start(session.clone(), text)).await;
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     send_json(tx, &TtsMessage::stop(session)).await;
 }

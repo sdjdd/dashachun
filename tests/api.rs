@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
+use xiaozhi_server_rs::asr::StubAsr;
 use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
 use xiaozhi_server_rs::state::AppState;
 
@@ -21,6 +24,7 @@ fn state_with_url(websocket_url: Option<String>) -> AppState {
                 timezone_offset: 480,
             },
         },
+        asr: Arc::new(StubAsr::default()),
     }
 }
 

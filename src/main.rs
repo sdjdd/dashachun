@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use axum::ServiceExt;
 use axum::body::Body;
 use axum::http::Request;
 use tracing_subscriber::EnvFilter;
 
+use xiaozhi_server_rs::asr::StubAsr;
 use xiaozhi_server_rs::config::AppConfig;
 use xiaozhi_server_rs::state::AppState;
 
@@ -16,7 +19,10 @@ async fn main() {
 
     let config = AppConfig::from_env();
     let bind_addr = config.server.bind_addr.clone();
-    let app = xiaozhi_server_rs::app(AppState { config });
+    let app = xiaozhi_server_rs::app(AppState {
+        config,
+        asr: Arc::new(StubAsr::default()),
+    });
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     tracing::info!("listening on {bind_addr}");
