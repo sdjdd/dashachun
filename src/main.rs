@@ -14,11 +14,9 @@ use xiaozhi_server_rs::state::AppState;
 async fn main() {
     let _ = dotenvy::dotenv();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = filter.add_directive("ort=off".parse().expect("valid directive"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = AppConfig::from_env();
     let bind_addr = config.server.bind_addr.clone();

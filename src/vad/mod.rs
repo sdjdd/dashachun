@@ -17,6 +17,7 @@ pub struct VadConfig {
     pub silence_threshold: f32,
     pub min_speech_ms: u32,
     pub min_silence_ms: u32,
+    pub pre_padding_ms: u32,
 }
 
 impl Default for VadConfig {
@@ -26,6 +27,7 @@ impl Default for VadConfig {
             silence_threshold: 0.3,
             min_speech_ms: 120,
             min_silence_ms: 400,
+            pre_padding_ms: 300,
         }
     }
 }
@@ -45,7 +47,44 @@ impl VadConfig {
         if let Some(value) = env_parse("VAD_MIN_SILENCE_MS") {
             config.min_silence_ms = value;
         }
+        if let Some(value) = env_parse("VAD_PRE_PADDING_MS") {
+            config.pre_padding_ms = value;
+        }
         config
+    }
+}
+
+#[derive(Debug)]
+pub struct PrePadding {
+    capacity: usize,
+    samples: VecDeque<f32>,
+}
+
+impl PrePadding {
+    pub fn new(pre_padding_ms: u32, sample_rate: u32) -> Self {
+        let capacity = (sample_rate as u64 * pre_padding_ms as u64 / 1000) as usize;
+        Self {
+            capacity,
+            samples: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    pub fn push(&mut self, frame: &[f32]) {
+        if self.capacity == 0 {
+            return;
+        }
+        self.samples.extend(frame.iter().copied());
+        while self.samples.len() > self.capacity {
+            self.samples.pop_front();
+        }
+    }
+
+    pub fn take(&mut self) -> Vec<f32> {
+        self.samples.drain(..).collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
     }
 }
 
@@ -219,7 +258,6 @@ impl Vad {
 
     fn process_chunk(&mut self, events: &mut Vec<VadEvent>) -> f32 {
         let probability = self.model.predict(self.chunk.iter().copied());
-        tracing::trace!(probability, "vad chunk");
         if let Some(event) = self.segmenter.push(probability) {
             events.push(event);
         }
@@ -238,9 +276,40 @@ mod tests {
                 silence_threshold: 0.35,
                 min_speech_ms: 250,
                 min_silence_ms: 500,
+                pre_padding_ms: 300,
             },
             32,
         )
+    }
+
+    #[test]
+    fn pre_padding_keeps_only_recent_audio() {
+        let mut pre_padding = PrePadding::new(100, 16000);
+        pre_padding.push(&vec![1.0; 1600]);
+        pre_padding.push(&[2.0; 100]);
+        let kept = pre_padding.take();
+        assert_eq!(kept.len(), 1600);
+        assert_eq!(kept[0], 1.0);
+        assert_eq!(kept[1599], 2.0);
+        assert_eq!(kept.iter().filter(|&&s| s == 2.0).count(), 100);
+        assert!(pre_padding.take().is_empty());
+    }
+
+    #[test]
+    fn pre_padding_disabled_when_zero() {
+        let mut pre_padding = PrePadding::new(0, 16000);
+        pre_padding.push(&[1.0; 512]);
+        assert!(pre_padding.take().is_empty());
+    }
+
+    #[test]
+    fn pre_padding_take_then_clear() {
+        let mut pre_padding = PrePadding::new(300, 16000);
+        pre_padding.push(&[0.5; 4800]);
+        assert_eq!(pre_padding.take().len(), 4800);
+        pre_padding.push(&[0.1; 100]);
+        pre_padding.clear();
+        assert!(pre_padding.take().is_empty());
     }
 
     #[test]
