@@ -56,3 +56,93 @@ impl ServerHello {
         }
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum InboundMessage {
+    #[serde(rename = "hello")]
+    Hello(ClientHello),
+    #[serde(rename = "listen")]
+    Listen(Listen),
+    #[serde(rename = "abort")]
+    Abort(Abort),
+    #[serde(rename = "mcp")]
+    Mcp(Mcp),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Listen {
+    pub state: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Abort {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Mcp {
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SttMessage {
+    #[serde(rename = "type")]
+    pub type_: &'static str,
+    pub session_id: String,
+    pub text: String,
+}
+
+impl SttMessage {
+    pub fn new(session_id: String, text: String) -> Self {
+        Self {
+            type_: "stt",
+            session_id,
+            text,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TtsMessage {
+    #[serde(rename = "type")]
+    pub type_: &'static str,
+    pub session_id: String,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl TtsMessage {
+    pub fn start(session_id: String) -> Self {
+        Self {
+            type_: "tts",
+            session_id,
+            state: "start",
+            text: None,
+        }
+    }
+
+    pub fn stop(session_id: String) -> Self {
+        Self {
+            type_: "tts",
+            session_id,
+            state: "stop",
+            text: None,
+        }
+    }
+
+    pub fn sentence_start(session_id: String, text: String) -> Self {
+        Self {
+            type_: "tts",
+            session_id,
+            state: "sentence_start",
+            text: Some(text),
+        }
+    }
+}
