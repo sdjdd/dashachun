@@ -10,11 +10,13 @@ use crate::agent::{
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
 use crate::llm::{ChatMessage, Llm, LlmEvent};
-use crate::tts::Tts;
+use crate::tts::{TextStream, Tts, TtsEvent};
 use crate::vad::{Vad, VadEvent, VadFactory};
 
 const ASR_CHANNEL_CAPACITY: usize = 64;
 const LLM_CHANNEL_CAPACITY: usize = 64;
+const TTS_CHANNEL_CAPACITY: usize = 64;
+const TTS_TEXT_CHANNEL_CAPACITY: usize = 64;
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 
 pub struct CompositeAgent {
@@ -48,11 +50,12 @@ impl Agent for CompositeAgent {
         let (out_tx, out_rx) = mpsc::channel::<AgentOutput>(OUTPUT_CHANNEL_CAPACITY);
         let asr = self.asr.clone();
         let llm = self.llm.clone();
+        let tts = self.tts.clone();
         let vad_factory = self.vad.clone();
         let session_id = session.id.clone();
         info!(session_id, "agent started");
         tokio::spawn(async move {
-            drive(&session, input, asr, llm, vad_factory, out_tx).await;
+            drive(&session, input, asr, llm, tts, vad_factory, out_tx).await;
             info!(session_id, "agent stopped");
         });
         Box::pin(futures_util::stream::unfold(out_rx, |mut rx| async move {
@@ -73,19 +76,29 @@ enum LlmMessage {
     Error { generation: u64, message: String },
 }
 
+enum TtsMessage {
+    SentenceStart { generation: u64, text: String },
+    Audio { generation: u64, samples: Vec<f32> },
+    Done { generation: u64 },
+    Error { generation: u64, message: String },
+}
+
 async fn drive(
     session: &AgentSession,
     mut input: AgentInputStream,
     asr: Arc<dyn Asr>,
     llm: Option<Arc<dyn Llm>>,
+    tts: Option<Arc<dyn Tts>>,
     vad_factory: Arc<dyn VadFactory>,
     out_tx: mpsc::Sender<AgentOutput>,
 ) {
     let mut vad: Option<Box<dyn Vad>> = None;
     let (asr_tx, mut asr_rx) = mpsc::channel::<AsrMessage>(ASR_CHANNEL_CAPACITY);
     let (llm_tx, mut llm_rx) = mpsc::channel::<LlmMessage>(LLM_CHANNEL_CAPACITY);
+    let (tts_tx, mut tts_rx) = mpsc::channel::<TtsMessage>(TTS_CHANNEL_CAPACITY);
     let mut utterance: Option<Utterance> = None;
     let mut completion: Option<Completion> = None;
+    let mut synthesis: Option<Synthesis> = None;
     let mut history: Vec<ChatMessage> = Vec::new();
     let mut generation: u64 = 0;
 
@@ -106,6 +119,7 @@ async fn drive(
                         generation += 1;
                         utterance = None;
                         completion = None;
+                        synthesis = None;
                     }
                     AgentInput::ListenStop => {
                         info!(session_id = %session.id, "listen stop");
@@ -139,6 +153,7 @@ async fn drive(
                         generation += 1;
                         utterance = None;
                         completion = None;
+                        synthesis = None;
                         if out_tx.send(AgentOutput::TtsStop).await.is_err() {
                             break;
                         }
@@ -191,6 +206,7 @@ async fn drive(
                         }
                         match llm.as_ref() {
                             Some(llm) => {
+                                synthesis = None;
                                 history.push(ChatMessage::user(text));
                                 completion = Some(spawn_llm(
                                     llm,
@@ -229,6 +245,29 @@ async fn drive(
                 match message {
                     LlmMessage::Delta { text, .. } => {
                         trace!(session_id = %session.id, %text, "llm delta");
+                        if text.is_empty() {
+                            continue;
+                        }
+                        match synthesis.as_mut() {
+                            Some(current) => {
+                                if current.tx.try_send(text).is_err() {
+                                    trace!(session_id = %session.id, "tts input full, dropping delta");
+                                }
+                            }
+                            None => {
+                                if let Some(tts) = tts.as_ref() {
+                                    if out_tx.send(AgentOutput::TtsStart).await.is_err() {
+                                        break;
+                                    }
+                                    let current =
+                                        spawn_tts(tts, &tts_tx, session.id.clone(), generation);
+                                    if current.tx.try_send(text).is_err() {
+                                        trace!(session_id = %session.id, "tts input full, dropping delta");
+                                    }
+                                    synthesis = Some(current);
+                                }
+                            }
+                        }
                     }
                     LlmMessage::Done { text, .. } => {
                         completion = None;
@@ -236,11 +275,56 @@ async fn drive(
                         if !text.is_empty() {
                             history.push(ChatMessage::assistant(text));
                         }
+                        if let Some(current) = synthesis.take() {
+                            current.detach();
+                        }
                     }
                     LlmMessage::Error { message, .. } => {
                         completion = None;
+                        let tts_active = synthesis.take().is_some();
                         warn!(session_id = %session.id, %message, "llm failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err() {
+                            break;
+                        }
+                        if tts_active && out_tx.send(AgentOutput::TtsStop).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Some(message) = tts_rx.recv() => {
+                let current = match &message {
+                    TtsMessage::SentenceStart { generation, .. }
+                    | TtsMessage::Audio { generation, .. }
+                    | TtsMessage::Done { generation, .. }
+                    | TtsMessage::Error { generation, .. } => *generation,
+                };
+                if current != generation {
+                    continue;
+                }
+                match message {
+                    TtsMessage::SentenceStart { text, .. } => {
+                        if out_tx.send(AgentOutput::TtsSentence { text }).await.is_err() {
+                            break;
+                        }
+                    }
+                    TtsMessage::Audio { samples, .. } => {
+                        if out_tx.send(AgentOutput::Audio(samples)).await.is_err() {
+                            break;
+                        }
+                    }
+                    TtsMessage::Done { .. } => {
+                        synthesis = None;
+                        if out_tx.send(AgentOutput::TtsStop).await.is_err() {
+                            break;
+                        }
+                    }
+                    TtsMessage::Error { message, .. } => {
+                        synthesis = None;
+                        warn!(session_id = %session.id, %message, "tts failed");
+                        if out_tx.send(AgentOutput::Error { message }).await.is_err()
+                            || out_tx.send(AgentOutput::TtsStop).await.is_err()
+                        {
                             break;
                         }
                     }
@@ -251,6 +335,7 @@ async fn drive(
 
     drop(utterance.take());
     drop(completion.take());
+    drop(synthesis.take());
 }
 
 struct Utterance {
@@ -279,6 +364,25 @@ struct Completion {
 impl Drop for Completion {
     fn drop(&mut self) {
         self.handle.abort();
+    }
+}
+
+struct Synthesis {
+    tx: mpsc::Sender<String>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Synthesis {
+    fn detach(mut self) {
+        self.handle.take();
+    }
+}
+
+impl Drop for Synthesis {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -417,6 +521,63 @@ async fn run_llm(
     let _ = llm_tx.send(LlmMessage::Done { generation, text }).await;
 }
 
+fn spawn_tts(
+    tts: &Arc<dyn Tts>,
+    tts_tx: &mpsc::Sender<TtsMessage>,
+    session_id: String,
+    generation: u64,
+) -> Synthesis {
+    let (tx, rx) = mpsc::channel::<String>(TTS_TEXT_CHANNEL_CAPACITY);
+    let text: TextStream = Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (chunk, rx))
+    }));
+    let tts = tts.clone();
+    let tts_tx = tts_tx.clone();
+    let handle = tokio::spawn(async move {
+        run_tts(tts, text, tts_tx, session_id, generation).await;
+    });
+    Synthesis {
+        tx,
+        handle: Some(handle),
+    }
+}
+
+async fn run_tts(
+    tts: Arc<dyn Tts>,
+    text: TextStream,
+    tts_tx: mpsc::Sender<TtsMessage>,
+    session_id: String,
+    generation: u64,
+) {
+    let mut events = tts.synthesize(text);
+    while let Some(result) = events.next().await {
+        let message = match result {
+            Ok(TtsEvent::SentenceStart { text }) => TtsMessage::SentenceStart { generation, text },
+            Ok(TtsEvent::Audio(samples)) => TtsMessage::Audio {
+                generation,
+                samples,
+            },
+            Ok(TtsEvent::Done) => {
+                let _ = tts_tx.send(TtsMessage::Done { generation }).await;
+                return;
+            }
+            Err(err) => {
+                let _ = tts_tx
+                    .send(TtsMessage::Error {
+                        generation,
+                        message: err.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        };
+        if tts_tx.send(message).await.is_err() {
+            debug!(session_id, "tts output closed");
+            return;
+        }
+    }
+}
+
 fn response(text: &str) -> Vec<AgentOutput> {
     vec![
         AgentOutput::TtsStart,
@@ -432,9 +593,30 @@ mod tests {
     use super::*;
     use crate::asr::StubAsr;
     use crate::llm::LlmEvents;
+    use crate::tts::{Tts, TtsError, TtsEvent, TtsEvents};
     use crate::vad::{Vad, VadError, VadEvent};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    struct ScriptedTts;
+
+    impl Tts for ScriptedTts {
+        fn synthesize(&self, mut text: TextStream) -> TtsEvents<'_> {
+            let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
+            tokio::spawn(async move {
+                let mut acc = String::new();
+                while let Some(chunk) = text.next().await {
+                    acc.push_str(&chunk);
+                }
+                let _ = tx.send(Ok(TtsEvent::SentenceStart { text: acc }));
+                let _ = tx.send(Ok(TtsEvent::Audio(vec![0.25; 960])));
+                let _ = tx.send(Ok(TtsEvent::Done));
+            });
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }))
+        }
+    }
 
     struct ScriptedLlm {
         reply: String,
@@ -618,5 +800,55 @@ mod tests {
                 ChatMessage::user("hello"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn tts_streams_sentence_audio_then_stop() {
+        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
+            reply: "hi".into(),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let agent = CompositeAgent::new(
+            Arc::new(StubAsr::new("hello")),
+            Some(llm),
+            Some(Arc::new(ScriptedTts)),
+            Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+        );
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let mut seen = Vec::new();
+        while let Some(item) = output.next().await {
+            let done = matches!(item, AgentOutput::TtsStop);
+            seen.push(item);
+            if done {
+                break;
+            }
+        }
+
+        assert!(matches!(seen.first(), Some(AgentOutput::Stt { .. })));
+        assert!(
+            seen.iter()
+                .any(|item| matches!(item, AgentOutput::TtsStart))
+        );
+        assert!(
+            seen.iter()
+                .any(|item| matches!(item, AgentOutput::TtsSentence { text } if text == "hi"))
+        );
+        assert!(
+            seen.iter()
+                .any(|item| matches!(item, AgentOutput::Audio(s) if s.len() == 960))
+        );
+        assert!(matches!(seen.last(), Some(AgentOutput::TtsStop)));
     }
 }

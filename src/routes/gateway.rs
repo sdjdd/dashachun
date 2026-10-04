@@ -13,7 +13,7 @@ use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
-use crate::audio::OpusDecoder;
+use crate::audio::{OpusDecoder, OpusEncoder};
 use crate::dto::ws::{
     Abort, AudioParams, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage,
     TtsMessage,
@@ -179,7 +179,14 @@ impl Session {
         let output = self.agent.run(session, input);
         let tx = self.tx.clone();
         let session_id = self.id.clone().unwrap_or_default();
-        self.agent_task = Some(tokio::spawn(run_agent(output, tx, session_id)));
+        let encoder = OpusEncoder::new(
+            audio_params.sample_rate,
+            audio_params.channels as u16,
+            audio_params.frame_duration,
+        )
+        .map_err(|err| warn!(%err, "failed to create opus encoder"))
+        .ok();
+        self.agent_task = Some(tokio::spawn(run_agent(output, tx, session_id, encoder)));
         self.agent_tx = Some(agent_tx);
     }
 
@@ -247,7 +254,12 @@ impl Session {
     }
 }
 
-async fn run_agent(mut output: AgentOutputStream, tx: mpsc::Sender<Message>, session_id: String) {
+async fn run_agent(
+    mut output: AgentOutputStream,
+    tx: mpsc::Sender<Message>,
+    session_id: String,
+    mut encoder: Option<OpusEncoder>,
+) {
     use crate::agent::AgentOutput;
     while let Some(item) = output.next().await {
         match item {
@@ -266,10 +278,17 @@ async fn run_agent(mut output: AgentOutputStream, tx: mpsc::Sender<Message>, ses
                 send_json(&tx, &TtsMessage::sentence_start(session_id.clone(), text)).await;
             }
             AgentOutput::TtsStop => {
+                if let Some(encoder) = encoder.as_mut() {
+                    send_audio(encoder.flush(), &tx).await;
+                }
                 send_json(&tx, &TtsMessage::stop(session_id.clone())).await;
             }
             AgentOutput::Audio(samples) => {
-                debug!(samples = samples.len(), "agent audio (codec not wired yet)");
+                if let Some(encoder) = encoder.as_mut() {
+                    for packet in encoder.push(&samples) {
+                        send_binary(&tx, packet).await;
+                    }
+                }
             }
             AgentOutput::Mcp(payload) => {
                 debug!(%payload, "agent mcp output");
@@ -279,6 +298,16 @@ async fn run_agent(mut output: AgentOutputStream, tx: mpsc::Sender<Message>, ses
             }
         }
     }
+}
+
+async fn send_audio(packet: Option<Vec<u8>>, tx: &mpsc::Sender<Message>) {
+    if let Some(packet) = packet {
+        send_binary(tx, packet).await;
+    }
+}
+
+async fn send_binary(tx: &mpsc::Sender<Message>, packet: Vec<u8>) {
+    let _ = tx.send(Message::Binary(packet.into())).await;
 }
 
 async fn send_json<T: serde::Serialize>(tx: &mpsc::Sender<Message>, value: &T) {

@@ -11,6 +11,8 @@ use xiaozhi_server_rs::asr::{Asr, StubAsr};
 use xiaozhi_server_rs::config::AppConfig;
 use xiaozhi_server_rs::llm::{Llm, OpenAiConfig, OpenAiLlm};
 use xiaozhi_server_rs::state::AppState;
+use xiaozhi_server_rs::tts::Tts;
+use xiaozhi_server_rs::tts::volc::VolcTts;
 use xiaozhi_server_rs::vad::SileroVadFactory;
 
 #[tokio::main]
@@ -44,7 +46,17 @@ async fn main() {
             None
         }
     };
-    let agent: Arc<dyn Agent> = Arc::new(CompositeAgent::new(asr, llm, None, vad));
+    let tts: Option<Arc<dyn Tts>> = match VolcTts::from_env() {
+        Some(volc) => {
+            tracing::info!("using volc tts provider");
+            Some(Arc::new(volc))
+        }
+        None => {
+            tracing::info!("no tts provider configured");
+            None
+        }
+    };
+    let agent: Arc<dyn Agent> = Arc::new(CompositeAgent::new(asr, llm, tts, vad));
     let app = xiaozhi_server_rs::app(AppState { config, agent });
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
