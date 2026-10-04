@@ -1,15 +1,17 @@
 use axum::Router;
 use axum::extract::State;
-use axum::extract::ws::{Message, Utf8Bytes, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::dto::ws::{
-    Abort, AudioParams, InboundMessage, Listen, Mcp, ServerHello, SttMessage, TtsMessage,
+    Abort, AudioParams, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage,
+    TtsMessage,
 };
 use crate::state::AppState;
 
@@ -34,7 +36,7 @@ async fn handle_device_socket(socket: WebSocket, _state: AppState) {
         }
     });
 
-    let mut session_id: Option<String> = None;
+    let mut session = Session::new(tx.clone());
     while let Some(result) = stream.next().await {
         let msg = match result {
             Ok(Message::Close(_)) => break,
@@ -46,95 +48,157 @@ async fn handle_device_socket(socket: WebSocket, _state: AppState) {
         };
 
         match msg {
-            Message::Text(txt) => {
-                if let Err(err) = handle_text(&txt, &mut session_id, &tx).await {
-                    warn!(%err, "invalid message");
-                }
-            }
-            Message::Binary(data) => {
-                trace!(len = data.len(), "received binary audio frame");
-            }
+            Message::Text(txt) => match serde_json::from_str::<InboundMessage>(txt.as_str()) {
+                Ok(message) => session.handle(message).await,
+                Err(err) => warn!(%err, "invalid message"),
+            },
+            Message::Binary(data) => session.handle_binary(data.len()),
             _ => {}
         }
     }
 
+    session.shutdown();
+    drop(session);
     drop(tx);
     let _ = writer.await;
     info!("device disconnected");
 }
 
-async fn handle_text(
-    txt: &Utf8Bytes,
-    session_id: &mut Option<String>,
-    tx: &mpsc::Sender<Message>,
-) -> Result<(), serde_json::Error> {
-    let message: InboundMessage = serde_json::from_str(txt.as_str())?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    Idle,
+    Listening,
+    Speaking,
+}
 
-    match message {
-        InboundMessage::Hello(hello) => {
-            let id = Uuid::new_v4().to_string();
-            info!(
-                session_id = %id,
-                version = hello.version,
-                transport = %hello.transport,
-                mcp = hello.features.mcp,
-                aec = hello.features.aec,
-                "device hello"
-            );
-            send_json(tx, &ServerHello::new(id.clone(), AudioParams::default())).await;
-            *session_id = Some(id);
+struct Session {
+    id: Option<String>,
+    state: SessionState,
+    tx: mpsc::Sender<Message>,
+    pipeline: Option<JoinHandle<()>>,
+}
+
+impl Session {
+    fn new(tx: mpsc::Sender<Message>) -> Self {
+        Self {
+            id: None,
+            state: SessionState::Idle,
+            tx,
+            pipeline: None,
         }
-        InboundMessage::Listen(listen) => handle_listen(listen, session_id, tx).await,
-        InboundMessage::Abort(abort) => handle_abort(abort, session_id, tx).await,
-        InboundMessage::Mcp(mcp) => handle_mcp(mcp, session_id),
     }
 
-    Ok(())
-}
-
-async fn handle_listen(listen: Listen, session_id: &Option<String>, tx: &mpsc::Sender<Message>) {
-    let Some(session_id) = session_id else {
-        warn!("listen message before hello, ignoring");
-        return;
-    };
-
-    match listen.state.as_str() {
-        "start" => {
-            info!(session_id, mode = ?listen.mode, "device started listening");
+    async fn handle(&mut self, message: InboundMessage) {
+        match message {
+            InboundMessage::Hello(hello) => self.on_hello(hello).await,
+            InboundMessage::Listen(listen) => self.on_listen(listen).await,
+            InboundMessage::Abort(abort) => self.on_abort(abort),
+            InboundMessage::Mcp(mcp) => self.on_mcp(mcp),
         }
-        "detect" => {
-            info!(session_id, text = ?listen.text, "wake word detected");
-        }
-        "stop" => {
-            info!(session_id, "device stopped listening");
-            run_stub_pipeline(session_id, tx).await;
-        }
-        other => warn!(%other, "unknown listen state"),
     }
-}
 
-async fn handle_abort(abort: Abort, session_id: &Option<String>, _tx: &mpsc::Sender<Message>) {
-    info!(session_id = ?session_id, reason = ?abort.reason, "abort requested");
-}
+    async fn on_hello(&mut self, hello: ClientHello) {
+        if self.id.is_some() {
+            warn!("duplicate hello, ignoring");
+            return;
+        }
 
-fn handle_mcp(mcp: Mcp, session_id: &Option<String>) {
-    debug!(session_id = ?session_id, payload = %mcp.payload, "mcp message");
+        let id = Uuid::new_v4().to_string();
+        info!(
+            session_id = %id,
+            version = hello.version,
+            transport = %hello.transport,
+            mcp = hello.features.mcp,
+            aec = hello.features.aec,
+            "device hello"
+        );
+        self.send_json(&ServerHello::new(id.clone(), AudioParams::default()))
+            .await;
+        self.id = Some(id);
+    }
+
+    async fn on_listen(&mut self, listen: Listen) {
+        let Some(session_id) = self.id.clone() else {
+            warn!("listen message before hello, ignoring");
+            return;
+        };
+
+        match listen.state.as_str() {
+            "start" => {
+                self.stop_pipeline();
+                self.state = SessionState::Listening;
+                info!(session_id, mode = ?listen.mode, "device started listening");
+            }
+            "detect" => {
+                info!(session_id, text = ?listen.text, "wake word detected");
+            }
+            "stop" => {
+                info!(session_id, "device stopped listening");
+                self.start_pipeline(session_id);
+            }
+            other => warn!(%other, "unknown listen state"),
+        }
+    }
+
+    fn on_abort(&mut self, abort: Abort) {
+        self.stop_pipeline();
+        self.state = SessionState::Idle;
+        info!(session_id = ?self.id, reason = ?abort.reason, "abort requested");
+    }
+
+    fn on_mcp(&self, mcp: Mcp) {
+        debug!(session_id = ?self.id, payload = %mcp.payload, "mcp message");
+    }
+
+    fn handle_binary(&self, len: usize) {
+        match self.state {
+            SessionState::Listening => trace!(len, "received audio frame"),
+            state => debug!(len, ?state, "unexpected binary frame"),
+        }
+    }
+
+    fn start_pipeline(&mut self, session_id: String) {
+        self.stop_pipeline();
+        self.state = SessionState::Speaking;
+        let tx = self.tx.clone();
+        self.pipeline = Some(tokio::spawn(async move {
+            run_stub_pipeline(&session_id, &tx).await;
+        }));
+    }
+
+    fn stop_pipeline(&mut self) {
+        if let Some(handle) = self.pipeline.take() {
+            handle.abort();
+        }
+    }
+
+    fn shutdown(&mut self) {
+        self.stop_pipeline();
+    }
+
+    async fn send_json<T: serde::Serialize>(&self, value: &T) {
+        send_json(&self.tx, value).await;
+    }
 }
 
 async fn run_stub_pipeline(session_id: &str, tx: &mpsc::Sender<Message>) {
     info!(session_id, "stub pipeline: stt -> tts start/stop");
+    let session = session_id.to_string();
     send_json(
         tx,
         &SttMessage::new(session_id.to_string(), "你好".to_string()),
     )
     .await;
-    send_json(tx, &TtsMessage::start(session_id.to_string())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    send_json(tx, &TtsMessage::start(session.clone())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     send_json(
         tx,
-        &TtsMessage::sentence_start(session_id.to_string(), "你好".to_string()),
+        &TtsMessage::sentence_start(session.clone(), "你好".to_string()),
     )
     .await;
-    send_json(tx, &TtsMessage::stop(session_id.to_string())).await;
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    send_json(tx, &TtsMessage::stop(session)).await;
 }
 
 async fn send_json<T: serde::Serialize>(tx: &mpsc::Sender<Message>, value: &T) {
