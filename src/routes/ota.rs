@@ -1,10 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::http::HeaderMap;
 use axum::{Json, Router, extract::State, routing::post};
 use tracing::{debug, info};
 
 use crate::{
     dto::ota::{Firmware, OtaRequest, OtaResponse, ServerTime, Websocket},
+    error::AppError,
     extract::{ClientId, DeviceId},
     state::AppState,
 };
@@ -17,12 +19,25 @@ async fn handle_ota(
     State(state): State<AppState>,
     DeviceId(device_id): DeviceId,
     ClientId(client_id): ClientId,
+    headers: HeaderMap,
     Json(body): Json<OtaRequest>,
-) -> Json<OtaResponse> {
+) -> Result<Json<OtaResponse>, AppError> {
     let version = body.application.version;
     let board_type = body.board.board_type;
 
     info!(device_id, client_id, %version, %board_type, "OTA request");
+
+    let websocket_url = match &state.config.ota.websocket_url {
+        Some(url) => url.clone(),
+        None => {
+            let host = headers
+                .get(axum::http::header::HOST)
+                .ok_or(AppError::MissingHeader("host"))?
+                .to_str()
+                .map_err(|_| AppError::InvalidHeader("host"))?;
+            format!("ws://{host}/gateway")
+        }
+    };
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -35,9 +50,9 @@ async fn handle_ota(
         version
     };
 
-    debug!(firmware_version, "OTA response");
+    debug!(%websocket_url, firmware_version, "OTA response");
 
-    Json(OtaResponse {
+    Ok(Json(OtaResponse {
         server_time: ServerTime {
             timestamp,
             timezone_offset: state.config.ota.timezone_offset,
@@ -47,8 +62,8 @@ async fn handle_ota(
             url: String::new(),
         },
         websocket: Websocket {
-            url: state.config.ota.websocket_url.clone(),
+            url: websocket_url,
             token: state.config.ota.token.clone(),
         },
-    })
+    }))
 }
