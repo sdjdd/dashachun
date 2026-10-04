@@ -9,9 +9,9 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
+use crate::audio::OpusDecoder;
 use crate::dto::ws::{
-    Abort, AudioParams, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage,
-    TtsMessage,
+    Abort, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage, TtsMessage,
 };
 use crate::state::AppState;
 
@@ -52,7 +52,7 @@ async fn handle_device_socket(socket: WebSocket, _state: AppState) {
                 Ok(message) => session.handle(message).await,
                 Err(err) => warn!(%err, "invalid message"),
             },
-            Message::Binary(data) => session.handle_binary(data.len()),
+            Message::Binary(data) => session.handle_binary(&data),
             _ => {}
         }
     }
@@ -76,6 +76,7 @@ struct Session {
     state: SessionState,
     tx: mpsc::Sender<Message>,
     pipeline: Option<JoinHandle<()>>,
+    decoder: Option<OpusDecoder>,
 }
 
 impl Session {
@@ -85,6 +86,7 @@ impl Session {
             state: SessionState::Idle,
             tx,
             pipeline: None,
+            decoder: None,
         }
     }
 
@@ -104,16 +106,28 @@ impl Session {
         }
 
         let id = Uuid::new_v4().to_string();
+        let audio_params = hello.audio_params.unwrap_or_default();
         info!(
             session_id = %id,
             version = hello.version,
             transport = %hello.transport,
             mcp = hello.features.mcp,
             aec = hello.features.aec,
+            format = %audio_params.format,
+            sample_rate = audio_params.sample_rate,
+            channels = audio_params.channels,
+            frame_duration = audio_params.frame_duration,
             "device hello"
         );
-        self.send_json(&ServerHello::new(id.clone(), AudioParams::default()))
-            .await;
+        self.decoder =
+            match OpusDecoder::new(audio_params.sample_rate, audio_params.channels as u16) {
+                Ok(decoder) => Some(decoder),
+                Err(err) => {
+                    warn!(%err, "failed to create opus decoder");
+                    None
+                }
+            };
+        send_json(&self.tx, &ServerHello::new(id.clone(), audio_params)).await;
         self.id = Some(id);
     }
 
@@ -150,10 +164,19 @@ impl Session {
         debug!(session_id = ?self.id, payload = %mcp.payload, "mcp message");
     }
 
-    fn handle_binary(&self, len: usize) {
-        match self.state {
-            SessionState::Listening => trace!(len, "received audio frame"),
-            state => debug!(len, ?state, "unexpected binary frame"),
+    fn handle_binary(&mut self, data: &[u8]) {
+        if self.state != SessionState::Listening {
+            let state = self.state;
+            debug!(len = data.len(), ?state, "unexpected binary frame");
+            return;
+        }
+        let Some(decoder) = self.decoder.as_mut() else {
+            debug!(len = data.len(), "binary frame before decoder ready");
+            return;
+        };
+        match decoder.decode(data) {
+            Ok(samples) => trace!(samples = samples.len(), "decoded opus frame"),
+            Err(err) => warn!(%err, "failed to decode opus frame"),
         }
     }
 
@@ -174,10 +197,6 @@ impl Session {
 
     fn shutdown(&mut self) {
         self.stop_pipeline();
-    }
-
-    async fn send_json<T: serde::Serialize>(&self, value: &T) {
-        send_json(&self.tx, value).await;
     }
 }
 
