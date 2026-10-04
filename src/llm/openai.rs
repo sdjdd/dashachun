@@ -13,6 +13,21 @@ use tracing::info;
 
 use super::{ChatMessage, ChatRole, Llm, LlmError, LlmEvent, LlmEvents};
 
+fn parse_reasoning_effort(
+    value: &str,
+) -> Result<async_openai::types::chat::ReasoningEffort, LlmError> {
+    use async_openai::types::chat::ReasoningEffort;
+    match value.to_ascii_lowercase().as_str() {
+        "none" => Ok(ReasoningEffort::None),
+        "low" => Ok(ReasoningEffort::Low),
+        "medium" => Ok(ReasoningEffort::Medium),
+        "high" => Ok(ReasoningEffort::High),
+        other => Err(LlmError::from(format!(
+            "invalid reasoning effort {other}: expected none/low/medium/high"
+        ))),
+    }
+}
+
 const DEFAULT_SYSTEM_PROMPT: &str =
     "You are a helpful voice assistant. Keep replies short and conversational.";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -24,6 +39,7 @@ pub struct OpenAiConfig {
     pub model: String,
     pub system_prompt: String,
     pub max_tokens: Option<u32>,
+    pub reasoning_effort: Option<String>,
 }
 
 impl OpenAiConfig {
@@ -37,12 +53,16 @@ impl OpenAiConfig {
             .or_else(|_| std::env::var("LLM_MAX_OUTPUT_TOKENS"))
             .ok()
             .and_then(|value| value.parse().ok());
+        let reasoning_effort = std::env::var("LLM_REASONING_EFFORT")
+            .ok()
+            .filter(|value| !value.is_empty());
         Some(Self {
             base_url,
             api_key,
             model,
             system_prompt,
             max_tokens,
+            reasoning_effort,
         })
     }
 }
@@ -95,6 +115,9 @@ impl OpenAiLlm {
             .stream(true);
         if let Some(max_tokens) = self.config.max_tokens {
             request.max_tokens(max_tokens);
+        }
+        if let Some(effort) = self.config.reasoning_effort.as_deref() {
+            request.reasoning_effort(parse_reasoning_effort(effort)?);
         }
         request
             .build()
@@ -150,4 +173,22 @@ async fn run(
     info!("llm stream ended");
     let _ = tx.send(Ok(LlmEvent::Done));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_reasoning_effort_case_insensitively() {
+        assert_eq!(
+            parse_reasoning_effort("none").unwrap(),
+            async_openai::types::chat::ReasoningEffort::None
+        );
+        assert_eq!(
+            parse_reasoning_effort("HIGH").unwrap(),
+            async_openai::types::chat::ReasoningEffort::High
+        );
+        assert!(parse_reasoning_effort("bogus").is_err());
+    }
 }
