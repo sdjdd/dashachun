@@ -9,11 +9,12 @@ use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession,
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
-use crate::llm::Llm;
+use crate::llm::{ChatMessage, Llm, LlmEvent};
 use crate::tts::Tts;
 use crate::vad::{Vad, VadEvent, VadFactory};
 
 const ASR_CHANNEL_CAPACITY: usize = 64;
+const LLM_CHANNEL_CAPACITY: usize = 64;
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 
 pub struct CompositeAgent {
@@ -46,11 +47,12 @@ impl Agent for CompositeAgent {
     fn run(&self, session: AgentSession, input: AgentInputStream) -> AgentOutputStream {
         let (out_tx, out_rx) = mpsc::channel::<AgentOutput>(OUTPUT_CHANNEL_CAPACITY);
         let asr = self.asr.clone();
+        let llm = self.llm.clone();
         let vad_factory = self.vad.clone();
         let session_id = session.id.clone();
         info!(session_id, "agent started");
         tokio::spawn(async move {
-            drive(&session, input, asr, vad_factory, out_tx).await;
+            drive(&session, input, asr, llm, vad_factory, out_tx).await;
             info!(session_id, "agent stopped");
         });
         Box::pin(futures_util::stream::unfold(out_rx, |mut rx| async move {
@@ -65,16 +67,26 @@ enum AsrMessage {
     Error { generation: u64, message: String },
 }
 
+enum LlmMessage {
+    Delta { generation: u64, text: String },
+    Done { generation: u64, text: String },
+    Error { generation: u64, message: String },
+}
+
 async fn drive(
     session: &AgentSession,
     mut input: AgentInputStream,
     asr: Arc<dyn Asr>,
+    llm: Option<Arc<dyn Llm>>,
     vad_factory: Arc<dyn VadFactory>,
     out_tx: mpsc::Sender<AgentOutput>,
 ) {
     let mut vad: Option<Box<dyn Vad>> = None;
     let (asr_tx, mut asr_rx) = mpsc::channel::<AsrMessage>(ASR_CHANNEL_CAPACITY);
+    let (llm_tx, mut llm_rx) = mpsc::channel::<LlmMessage>(LLM_CHANNEL_CAPACITY);
     let mut utterance: Option<Utterance> = None;
+    let mut completion: Option<Completion> = None;
+    let mut history: Vec<ChatMessage> = Vec::new();
     let mut generation: u64 = 0;
 
     loop {
@@ -93,6 +105,7 @@ async fn drive(
                         };
                         generation += 1;
                         utterance = None;
+                        completion = None;
                     }
                     AgentInput::ListenStop => {
                         info!(session_id = %session.id, "listen stop");
@@ -125,6 +138,7 @@ async fn drive(
                         info!(session_id = %session.id, reason = ?reason, "interrupt");
                         generation += 1;
                         utterance = None;
+                        completion = None;
                         if out_tx.send(AgentOutput::TtsStop).await.is_err() {
                             break;
                         }
@@ -172,10 +186,25 @@ async fn drive(
                         {
                             break;
                         }
-                        if !text.is_empty() {
-                            for output in response(&text) {
-                                if out_tx.send(output).await.is_err() {
-                                    return;
+                        if text.is_empty() {
+                            continue;
+                        }
+                        match llm.as_ref() {
+                            Some(llm) => {
+                                history.push(ChatMessage::user(text));
+                                completion = Some(spawn_llm(
+                                    llm,
+                                    &llm_tx,
+                                    session.id.clone(),
+                                    generation,
+                                    history.clone(),
+                                ));
+                            }
+                            None => {
+                                for output in response(&text) {
+                                    if out_tx.send(output).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -188,10 +217,40 @@ async fn drive(
                     }
                 }
             }
+            Some(message) = llm_rx.recv() => {
+                let current = match &message {
+                    LlmMessage::Delta { generation, .. }
+                    | LlmMessage::Done { generation, .. }
+                    | LlmMessage::Error { generation, .. } => *generation,
+                };
+                if current != generation {
+                    continue;
+                }
+                match message {
+                    LlmMessage::Delta { text, .. } => {
+                        trace!(session_id = %session.id, %text, "llm delta");
+                    }
+                    LlmMessage::Done { text, .. } => {
+                        completion = None;
+                        info!(session_id = %session.id, %text, "llm result");
+                        if !text.is_empty() {
+                            history.push(ChatMessage::assistant(text));
+                        }
+                    }
+                    LlmMessage::Error { message, .. } => {
+                        completion = None;
+                        warn!(session_id = %session.id, %message, "llm failed");
+                        if out_tx.send(AgentOutput::Error { message }).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
     drop(utterance.take());
+    drop(completion.take());
 }
 
 struct Utterance {
@@ -210,6 +269,16 @@ impl Drop for Utterance {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
+    }
+}
+
+struct Completion {
+    handle: JoinHandle<()>,
+}
+
+impl Drop for Completion {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
@@ -293,6 +362,61 @@ async fn run_asr(
     }
 }
 
+fn spawn_llm(
+    llm: &Arc<dyn Llm>,
+    llm_tx: &mpsc::Sender<LlmMessage>,
+    session_id: String,
+    generation: u64,
+    history: Vec<ChatMessage>,
+) -> Completion {
+    let llm = llm.clone();
+    let llm_tx = llm_tx.clone();
+    let handle = tokio::spawn(async move {
+        run_llm(llm, history, llm_tx, session_id, generation).await;
+    });
+    Completion { handle }
+}
+
+async fn run_llm(
+    llm: Arc<dyn Llm>,
+    history: Vec<ChatMessage>,
+    llm_tx: mpsc::Sender<LlmMessage>,
+    session_id: String,
+    generation: u64,
+) {
+    let mut events = llm.chat(history);
+    let mut text = String::new();
+    while let Some(result) = events.next().await {
+        let message = match result {
+            Ok(LlmEvent::Delta { text: delta }) => {
+                text.push_str(&delta);
+                LlmMessage::Delta {
+                    generation,
+                    text: delta,
+                }
+            }
+            Ok(LlmEvent::Done) => {
+                let _ = llm_tx.send(LlmMessage::Done { generation, text }).await;
+                return;
+            }
+            Err(err) => {
+                let _ = llm_tx
+                    .send(LlmMessage::Error {
+                        generation,
+                        message: err.to_string(),
+                    })
+                    .await;
+                return;
+            }
+        };
+        if llm_tx.send(message).await.is_err() {
+            debug!(session_id, "llm output closed");
+            return;
+        }
+    }
+    let _ = llm_tx.send(LlmMessage::Done { generation, text }).await;
+}
+
 fn response(text: &str) -> Vec<AgentOutput> {
     vec![
         AgentOutput::TtsStart,
@@ -307,7 +431,26 @@ fn response(text: &str) -> Vec<AgentOutput> {
 mod tests {
     use super::*;
     use crate::asr::StubAsr;
+    use crate::llm::LlmEvents;
     use crate::vad::{Vad, VadError, VadEvent};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct ScriptedLlm {
+        reply: String,
+        calls: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+    }
+
+    impl Llm for ScriptedLlm {
+        fn chat(&self, history: Vec<ChatMessage>) -> LlmEvents<'_> {
+            self.calls.lock().unwrap().push(history);
+            let text = self.reply.clone();
+            Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::Delta { text }),
+                Ok(LlmEvent::Done),
+            ]))
+        }
+    }
 
     struct ScriptedVad {
         events: std::collections::VecDeque<VadEvent>,
@@ -414,5 +557,66 @@ mod tests {
 
         let item = output.next().await;
         assert!(matches!(item, Some(AgentOutput::TtsStop)), "got {item:?}");
+    }
+
+    async fn wait_for_calls(
+        calls: &Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+        len: usize,
+    ) -> Vec<Vec<ChatMessage>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = calls.lock().unwrap().clone();
+            if snapshot.len() >= len {
+                return snapshot;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "llm not called");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_receives_history_and_reply_accumulates() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
+            reply: "hi".into(),
+            calls: calls.clone(),
+        });
+        let agent = CompositeAgent::new(
+            Arc::new(StubAsr::new("hello")),
+            Some(llm),
+            None,
+            Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                    VadEvent::SpeechStart { at_ms: 200 },
+                    VadEvent::SpeechEnd { at_ms: 300 },
+                ],
+            }),
+        );
+        let (tx, input) = input_channel();
+        let _output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let first = wait_for_calls(&calls, 1).await;
+        assert_eq!(first[0], vec![ChatMessage::user("hello")]);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let second = wait_for_calls(&calls, 2).await;
+        assert_eq!(
+            second[1],
+            vec![
+                ChatMessage::user("hello"),
+                ChatMessage::assistant("hi"),
+                ChatMessage::user("hello"),
+            ]
+        );
     }
 }
