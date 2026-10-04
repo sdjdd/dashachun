@@ -17,10 +17,6 @@ use xiaozhi_server_rs::vad::SileroVadFactory;
 async fn main() {
     dotenvy::dotenv().ok();
 
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("install rustls crypto provider");
-
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let filter = filter.add_directive("ort=off".parse().expect("valid directive"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
@@ -40,7 +36,7 @@ async fn main() {
     let vad = Arc::new(SileroVadFactory::from_env());
     let llm: Option<Arc<dyn Llm>> = match OpenAiConfig::from_env() {
         Some(config) => {
-            tracing::info!(model = %config.model, "using openai responses llm provider");
+            tracing::info!(model = %config.model, "using openai llm provider");
             Some(Arc::new(OpenAiLlm::new(config)))
         }
         None => {
