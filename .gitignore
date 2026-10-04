@@ -1,0 +1,5 @@
+/target
+/.env
+/.vscode
+/xiaozhi-esp32
+/AGENTS.md
