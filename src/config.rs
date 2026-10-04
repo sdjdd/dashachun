@@ -40,9 +40,7 @@ impl OtaConfig {
         Self {
             websocket_url: env_or("OTA_WEBSOCKET_URL", "ws://127.0.0.1:3000/gateway"),
             token: env_or("OTA_TOKEN", "test-token"),
-            timezone_offset: env_or("OTA_TIMEZONE_OFFSET", "480")
-                .parse()
-                .unwrap_or(480),
+            timezone_offset: env_or("OTA_TIMEZONE_OFFSET", "480").parse().unwrap_or(480),
         }
     }
 }
