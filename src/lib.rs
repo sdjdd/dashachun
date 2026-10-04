@@ -12,6 +12,7 @@ pub mod error;
 pub mod extract;
 pub mod routes;
 pub mod state;
+pub mod vad;
 
 pub fn app(state: AppState) -> NormalizePath<Router> {
     let router = Router::new()

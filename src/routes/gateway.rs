@@ -1,6 +1,7 @@
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
@@ -14,13 +15,30 @@ use crate::dto::ws::{
     Abort, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage, TtsMessage,
 };
 use crate::state::AppState;
+use crate::vad::{Vad, VadConfig, VadEvent};
+
+const AUDIO_STATS_INTERVAL: u64 = 50;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/gateway", get(handle_device_connect))
 }
 
-async fn handle_device_connect(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+async fn handle_device_connect(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    info!(
+        device_id = header_str(&headers, "device-id"),
+        client_id = header_str(&headers, "client-id"),
+        user_agent = header_str(&headers, "user-agent"),
+        "gateway upgrade"
+    );
     ws.on_upgrade(move |socket| handle_device_socket(socket, state))
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 async fn handle_device_socket(socket: WebSocket, _state: AppState) {
@@ -48,11 +66,17 @@ async fn handle_device_socket(socket: WebSocket, _state: AppState) {
         };
 
         match msg {
-            Message::Text(txt) => match serde_json::from_str::<InboundMessage>(txt.as_str()) {
-                Ok(message) => session.handle(message).await,
-                Err(err) => warn!(%err, "invalid message"),
-            },
-            Message::Binary(data) => session.handle_binary(&data),
+            Message::Text(txt) => {
+                trace!(%txt, "inbound text");
+                match serde_json::from_str::<InboundMessage>(txt.as_str()) {
+                    Ok(message) => session.handle(message).await,
+                    Err(err) => warn!(%err, %txt, "invalid message"),
+                }
+            }
+            Message::Binary(data) => {
+                trace!(len = data.len(), "inbound binary");
+                session.handle_binary(&data);
+            }
             _ => {}
         }
     }
@@ -71,12 +95,45 @@ enum SessionState {
     Speaking,
 }
 
+#[derive(Debug, Default)]
+struct AudioStats {
+    frames: u64,
+    samples: u64,
+    peak: f32,
+    rms_sum: f64,
+    vad_peak: f32,
+}
+
+impl AudioStats {
+    fn push(&mut self, samples: &[f32]) {
+        self.frames += 1;
+        self.samples += samples.len() as u64;
+        for &sample in samples {
+            let magnitude = sample.abs();
+            if magnitude > self.peak {
+                self.peak = magnitude;
+            }
+            self.rms_sum += (sample as f64) * (sample as f64);
+        }
+    }
+
+    fn rms(&self) -> f32 {
+        if self.samples == 0 {
+            0.0
+        } else {
+            (self.rms_sum / self.samples as f64).sqrt() as f32
+        }
+    }
+}
+
 struct Session {
     id: Option<String>,
     state: SessionState,
     tx: mpsc::Sender<Message>,
     pipeline: Option<JoinHandle<()>>,
     decoder: Option<OpusDecoder>,
+    vad: Option<Vad>,
+    audio: AudioStats,
 }
 
 impl Session {
@@ -87,6 +144,8 @@ impl Session {
             tx,
             pipeline: None,
             decoder: None,
+            vad: None,
+            audio: AudioStats::default(),
         }
     }
 
@@ -119,6 +178,12 @@ impl Session {
             frame_duration = audio_params.frame_duration,
             "device hello"
         );
+        if hello.version != 1 {
+            warn!(
+                version = hello.version,
+                "only protocol v1 raw opus frames are supported; audio will be garbled"
+            );
+        }
         self.decoder =
             match OpusDecoder::new(audio_params.sample_rate, audio_params.channels as u16) {
                 Ok(decoder) => Some(decoder),
@@ -127,6 +192,24 @@ impl Session {
                     None
                 }
             };
+        let vad_config = VadConfig::from_env();
+        self.vad = match Vad::new(audio_params.sample_rate, vad_config) {
+            Ok(vad) => Some(vad),
+            Err(err) => {
+                warn!(%err, "failed to create vad");
+                None
+            }
+        };
+        info!(
+            session_id = %id,
+            decoder = self.decoder.is_some(),
+            vad = self.vad.is_some(),
+            speech_threshold = vad_config.speech_threshold,
+            silence_threshold = vad_config.silence_threshold,
+            min_speech_ms = vad_config.min_speech_ms,
+            min_silence_ms = vad_config.min_silence_ms,
+            "audio pipeline ready"
+        );
         send_json(&self.tx, &ServerHello::new(id.clone(), audio_params)).await;
         self.id = Some(id);
     }
@@ -140,6 +223,8 @@ impl Session {
         match listen.state.as_str() {
             "start" => {
                 self.stop_pipeline();
+                self.reset_vad();
+                self.audio = AudioStats::default();
                 self.state = SessionState::Listening;
                 info!(session_id, mode = ?listen.mode, "device started listening");
             }
@@ -147,7 +232,9 @@ impl Session {
                 info!(session_id, text = ?listen.text, "wake word detected");
             }
             "stop" => {
+                self.flush_vad();
                 info!(session_id, "device stopped listening");
+                log_audio_stats(self.id.as_deref(), &self.audio);
                 self.start_pipeline(session_id);
             }
             other => warn!(%other, "unknown listen state"),
@@ -170,14 +257,44 @@ impl Session {
             debug!(len = data.len(), ?state, "unexpected binary frame");
             return;
         }
-        let Some(decoder) = self.decoder.as_mut() else {
+
+        let Session {
+            id,
+            decoder,
+            vad,
+            audio,
+            ..
+        } = self;
+
+        let Some(decoder) = decoder.as_mut() else {
             debug!(len = data.len(), "binary frame before decoder ready");
             return;
         };
-        match decoder.decode(data) {
-            Ok(samples) => trace!(samples = samples.len(), "decoded opus frame"),
-            Err(err) => warn!(%err, "failed to decode opus frame"),
+        let Ok(samples) = decoder.decode(data) else {
+            warn!(len = data.len(), "failed to decode opus frame");
+            return;
+        };
+        trace!(samples = samples.len(), "decoded opus frame");
+
+        audio.push(samples);
+        if let Some(vad) = vad.as_mut() {
+            let mut events = Vec::new();
+            let probability = vad.push(samples, &mut events);
+            audio.vad_peak = audio.vad_peak.max(probability);
+            log_vad_events(id.as_deref(), events);
         }
+        if audio.frames.is_multiple_of(AUDIO_STATS_INTERVAL) {
+            log_audio_stats(id.as_deref(), audio);
+        }
+    }
+
+    fn flush_vad(&mut self) {
+        let Some(vad) = self.vad.as_mut() else {
+            return;
+        };
+        let mut events = Vec::new();
+        vad.flush(&mut events);
+        log_vad_events(self.id.as_deref(), events);
     }
 
     fn start_pipeline(&mut self, session_id: String) {
@@ -196,7 +313,39 @@ impl Session {
     }
 
     fn shutdown(&mut self) {
+        self.flush_vad();
         self.stop_pipeline();
+    }
+
+    fn reset_vad(&mut self) {
+        if let Some(vad) = self.vad.as_mut() {
+            vad.reset();
+        }
+    }
+}
+
+fn log_audio_stats(session_id: Option<&str>, stats: &AudioStats) {
+    info!(
+        session_id,
+        frames = stats.frames,
+        samples = stats.samples,
+        peak = stats.peak,
+        rms = stats.rms(),
+        vad_peak = stats.vad_peak,
+        "audio stats"
+    );
+}
+
+fn log_vad_events(session_id: Option<&str>, events: Vec<VadEvent>) {
+    for event in events {
+        match event {
+            VadEvent::SpeechStart { at_ms } => {
+                info!(session_id, at_ms, "vad: speech start");
+            }
+            VadEvent::SpeechEnd { at_ms } => {
+                info!(session_id, at_ms, "vad: speech end");
+            }
+        }
     }
 }
 
