@@ -3,7 +3,7 @@ use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::get;
-use tracing::{info, warn};
+use tracing::{debug, error, info, trace, warn};
 use uuid::Uuid;
 
 use crate::dto::ws::{AudioParams, ClientHello, ServerHello};
@@ -32,7 +32,7 @@ async fn handle_device_socket(mut socket: WebSocket, _state: AppState) {
         };
 
         let Message::Text(txt) = &msg else {
-            info!("non-text message ignored");
+            trace!("non-text message ignored");
             continue;
         };
 
@@ -65,7 +65,7 @@ async fn handle_device_socket(mut socket: WebSocket, _state: AppState) {
 
                 let reply = ServerHello::new(id.clone(), AudioParams::default());
                 let Ok(payload) = serde_json::to_string(&reply) else {
-                    warn!("failed to serialize server hello");
+                    error!("failed to serialize server hello");
                     continue;
                 };
                 if socket.send(Message::text(payload)).await.is_err() {
@@ -74,7 +74,7 @@ async fn handle_device_socket(mut socket: WebSocket, _state: AppState) {
                 session_id = Some(id);
             }
             Some(other) => {
-                info!(session_id = ?session_id, %other, "unhandled message");
+                debug!(session_id = ?session_id, %other, "unhandled message");
             }
             None => {
                 warn!(%txt, "message missing type");
