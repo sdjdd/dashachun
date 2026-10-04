@@ -226,7 +226,6 @@ fn request_payload() -> serde_json::Value {
             "model_name": "bigmodel",
             "enable_itn": true,
             "enable_punc": true,
-            "enable_ddc": true,
             "show_utterances": true
         }
     })

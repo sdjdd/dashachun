@@ -1,14 +1,27 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::pin::Pin;
 
+use futures_util::{Stream, StreamExt};
 use voice_activity_detector::VoiceActivityDetector;
+
+use crate::audio::AudioStream;
 
 pub const SAMPLE_RATE: u32 = 16000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub type VadEvents = Pin<Box<dyn Stream<Item = VadEvent> + Send>>;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum VadEvent {
     SpeechStart { at_ms: u64 },
+    Speech { samples: Vec<f32> },
     SpeechEnd { at_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentEvent {
+    Start { at_ms: u64 },
+    End { at_ms: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -26,8 +39,8 @@ impl Default for VadConfig {
             speech_threshold: 0.4,
             silence_threshold: 0.3,
             min_speech_ms: 120,
-            min_silence_ms: 400,
-            pre_padding_ms: 300,
+            min_silence_ms: 500,
+            pre_padding_ms: 200,
         }
     }
 }
@@ -55,13 +68,13 @@ impl VadConfig {
 }
 
 #[derive(Debug)]
-pub struct PrePadding {
+struct PrePadding {
     capacity: usize,
     samples: VecDeque<f32>,
 }
 
 impl PrePadding {
-    pub fn new(pre_padding_ms: u32, sample_rate: u32) -> Self {
+    fn new(pre_padding_ms: u32, sample_rate: u32) -> Self {
         let capacity = (sample_rate as u64 * pre_padding_ms as u64 / 1000) as usize;
         Self {
             capacity,
@@ -69,7 +82,7 @@ impl PrePadding {
         }
     }
 
-    pub fn push(&mut self, frame: &[f32]) {
+    fn push(&mut self, frame: &[f32]) {
         if self.capacity == 0 {
             return;
         }
@@ -79,12 +92,8 @@ impl PrePadding {
         }
     }
 
-    pub fn take(&mut self) -> Vec<f32> {
+    fn take(&mut self) -> Vec<f32> {
         self.samples.drain(..).collect()
-    }
-
-    pub fn clear(&mut self) {
-        self.samples.clear();
     }
 }
 
@@ -124,7 +133,7 @@ impl From<voice_activity_detector::Error> for VadError {
     }
 }
 
-pub struct SpeechSegmenter {
+struct SpeechSegmenter {
     config: VadConfig,
     chunk_ms: u32,
     clock_ms: u64,
@@ -134,7 +143,7 @@ pub struct SpeechSegmenter {
 }
 
 impl SpeechSegmenter {
-    pub fn new(config: VadConfig, chunk_ms: u32) -> Self {
+    fn new(config: VadConfig, chunk_ms: u32) -> Self {
         Self {
             config,
             chunk_ms,
@@ -145,7 +154,7 @@ impl SpeechSegmenter {
         }
     }
 
-    pub fn push(&mut self, probability: f32) -> Option<VadEvent> {
+    fn push(&mut self, probability: f32) -> Option<SegmentEvent> {
         let at_ms = self.clock_ms;
         self.clock_ms += self.chunk_ms as u64;
 
@@ -156,7 +165,7 @@ impl SpeechSegmenter {
                     self.in_speech = false;
                     self.speech_run_ms = 0;
                     self.silence_run_ms = 0;
-                    return Some(VadEvent::SpeechEnd { at_ms });
+                    return Some(SegmentEvent::End { at_ms });
                 }
             } else {
                 self.silence_run_ms = 0;
@@ -167,7 +176,7 @@ impl SpeechSegmenter {
                 self.in_speech = true;
                 self.silence_run_ms = 0;
                 self.speech_run_ms = 0;
-                return Some(VadEvent::SpeechStart { at_ms });
+                return Some(SegmentEvent::Start { at_ms });
             }
         } else {
             self.speech_run_ms = 0;
@@ -176,23 +185,16 @@ impl SpeechSegmenter {
         None
     }
 
-    pub fn flush(&mut self) -> Option<VadEvent> {
+    fn flush(&mut self) -> Option<SegmentEvent> {
         if !self.in_speech {
             return None;
         }
         self.in_speech = false;
         self.speech_run_ms = 0;
         self.silence_run_ms = 0;
-        Some(VadEvent::SpeechEnd {
+        Some(SegmentEvent::End {
             at_ms: self.clock_ms,
         })
-    }
-
-    pub fn reset(&mut self) {
-        self.clock_ms = 0;
-        self.in_speech = false;
-        self.speech_run_ms = 0;
-        self.silence_run_ms = 0;
     }
 }
 
@@ -202,6 +204,7 @@ pub struct Vad {
     buffer: VecDeque<f32>,
     chunk: Vec<f32>,
     segmenter: SpeechSegmenter,
+    pre_padding: PrePadding,
 }
 
 impl Vad {
@@ -222,46 +225,113 @@ impl Vad {
             buffer: VecDeque::with_capacity(chunk_size * 2),
             chunk: vec![0.0; chunk_size],
             segmenter: SpeechSegmenter::new(config, chunk_ms),
+            pre_padding: PrePadding::new(config.pre_padding_ms, sample_rate),
         })
     }
 
-    pub fn push(&mut self, samples: &[f32], events: &mut Vec<VadEvent>) -> f32 {
+    pub fn segment(self, audio: AudioStream) -> VadEvents {
+        let state = SegmentState {
+            vad: self,
+            audio,
+            pending: VecDeque::new(),
+            active: false,
+            finished: false,
+        };
+        Box::pin(futures_util::stream::unfold(
+            state,
+            |mut state| async move {
+                loop {
+                    if let Some(event) = state.pending.pop_front() {
+                        return Some((event, state));
+                    }
+                    if state.finished {
+                        return None;
+                    }
+                    match state.audio.next().await {
+                        Some(frame) => state.process(frame),
+                        None => state.finish(),
+                    }
+                }
+            },
+        ))
+    }
+
+    fn push(&mut self, samples: &[f32], events: &mut Vec<SegmentEvent>) {
         self.buffer.extend(samples.iter().copied());
-        let mut peak_probability = 0.0f32;
         while self.buffer.len() >= self.chunk_size {
             for slot in self.chunk.iter_mut() {
                 *slot = self.buffer.pop_front().unwrap();
             }
-            peak_probability = peak_probability.max(self.process_chunk(events));
+            let probability = self.model.predict(self.chunk.iter().copied());
+            if let Some(event) = self.segmenter.push(probability) {
+                events.push(event);
+            }
         }
-        peak_probability
     }
 
-    pub fn flush(&mut self, events: &mut Vec<VadEvent>) {
+    fn flush(&mut self, events: &mut Vec<SegmentEvent>) {
         while !self.buffer.is_empty() {
             for slot in self.chunk.iter_mut() {
                 *slot = self.buffer.pop_front().unwrap_or(0.0);
             }
-            self.process_chunk(events);
+            let probability = self.model.predict(self.chunk.iter().copied());
+            if let Some(event) = self.segmenter.push(probability) {
+                events.push(event);
+            }
         }
         if let Some(event) = self.segmenter.flush() {
             events.push(event);
         }
     }
+}
 
-    pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.chunk.fill(0.0);
-        self.model.reset();
-        self.segmenter.reset();
+struct SegmentState {
+    vad: Vad,
+    audio: AudioStream,
+    pending: VecDeque<VadEvent>,
+    active: bool,
+    finished: bool,
+}
+
+impl SegmentState {
+    fn process(&mut self, frame: Vec<f32>) {
+        let mut boundaries = Vec::new();
+        self.vad.push(&frame, &mut boundaries);
+        for event in boundaries {
+            match event {
+                SegmentEvent::Start { at_ms } => {
+                    self.active = true;
+                    let pre_padding = self.vad.pre_padding.take();
+                    self.pending.push_back(VadEvent::SpeechStart { at_ms });
+                    if !pre_padding.is_empty() {
+                        self.pending.push_back(VadEvent::Speech {
+                            samples: pre_padding,
+                        });
+                    }
+                }
+                SegmentEvent::End { at_ms } => {
+                    self.active = false;
+                    self.pending.push_back(VadEvent::SpeechEnd { at_ms });
+                }
+            }
+        }
+        if self.active {
+            self.pending.push_back(VadEvent::Speech { samples: frame });
+        } else {
+            self.vad.pre_padding.push(&frame);
+        }
     }
 
-    fn process_chunk(&mut self, events: &mut Vec<VadEvent>) -> f32 {
-        let probability = self.model.predict(self.chunk.iter().copied());
-        if let Some(event) = self.segmenter.push(probability) {
-            events.push(event);
+    fn finish(&mut self) {
+        let mut boundaries = Vec::new();
+        self.vad.flush(&mut boundaries);
+        for event in boundaries {
+            if let SegmentEvent::End { at_ms } = event {
+                self.active = false;
+                self.pending.push_back(VadEvent::SpeechEnd { at_ms });
+            }
         }
-        probability
+        self.finished = true;
     }
 }
 
@@ -303,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn pre_padding_take_then_clear() {
+    fn pre_padding_take_drains() {
         let mut pre_padding = PrePadding::new(300, 16000);
         pre_padding.push(&[0.5; 4800]);
         assert_eq!(pre_padding.take().len(), 4800);
-        pre_padding.push(&[0.1; 100]);
-        pre_padding.clear();
         assert!(pre_padding.take().is_empty());
+        pre_padding.push(&[0.1; 100]);
+        assert_eq!(pre_padding.take(), vec![0.1; 100]);
     }
 
     #[test]
@@ -338,13 +408,13 @@ mod tests {
         for _ in 0..10 {
             events.extend(seg.push(0.9));
         }
-        assert_eq!(events, vec![VadEvent::SpeechStart { at_ms: 224 }]);
+        assert_eq!(events, vec![SegmentEvent::Start { at_ms: 224 }]);
 
         events.clear();
         for _ in 0..20 {
             events.extend(seg.push(0.05));
         }
-        assert_eq!(events, vec![VadEvent::SpeechEnd { at_ms: 800 }]);
+        assert_eq!(events, vec![SegmentEvent::End { at_ms: 800 }]);
     }
 
     #[test]
@@ -353,7 +423,7 @@ mod tests {
         for _ in 0..10 {
             seg.push(0.9);
         }
-        assert_eq!(seg.flush(), Some(VadEvent::SpeechEnd { at_ms: 320 }),);
+        assert_eq!(seg.flush(), Some(SegmentEvent::End { at_ms: 320 }),);
     }
 
     #[test]
@@ -364,15 +434,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn real_model_silence_produces_no_events() {
-        let mut vad = Vad::new(SAMPLE_RATE, VadConfig::default()).unwrap();
-        let mut events = Vec::new();
-        let frame = vec![0.0f32; 960];
-        for _ in 0..20 {
-            vad.push(&frame, &mut events);
-        }
-        vad.flush(&mut events);
+    #[tokio::test]
+    async fn real_model_silence_produces_no_events() {
+        let vad = Vad::new(SAMPLE_RATE, VadConfig::default()).unwrap();
+        let frames = (0..20).map(|_| vec![0.0f32; 960]).collect();
+        let events: Vec<_> = vad.segment(audio_stream(frames)).collect().await;
         assert!(events.is_empty(), "unexpected events: {events:?}");
+    }
+
+    fn audio_stream(frames: Vec<Vec<f32>>) -> AudioStream {
+        Box::pin(futures_util::stream::iter(frames))
     }
 }

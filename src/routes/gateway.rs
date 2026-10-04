@@ -15,10 +15,11 @@ use uuid::Uuid;
 use crate::asr::{Asr, AsrEvent, AudioStream};
 use crate::audio::OpusDecoder;
 use crate::dto::ws::{
-    Abort, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage, TtsMessage,
+    Abort, AudioParams, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage,
+    TtsMessage,
 };
 use crate::state::AppState;
-use crate::vad::{PrePadding, Vad, VadConfig, VadEvent};
+use crate::vad::{Vad, VadConfig, VadEvent, VadEvents};
 
 const ASR_CHANNEL_CAPACITY: usize = 64;
 
@@ -102,12 +103,11 @@ struct Session {
     id: Option<String>,
     state: SessionState,
     tx: mpsc::Sender<Message>,
-    asr_task: Option<JoinHandle<()>>,
     decoder: Option<OpusDecoder>,
-    vad: Option<Vad>,
-    pre_padding: Option<PrePadding>,
+    audio_params: AudioParams,
     asr: Arc<dyn Asr>,
-    asr_tx: Option<mpsc::Sender<Vec<f32>>>,
+    vad_task: Option<JoinHandle<()>>,
+    audio_tx: Option<mpsc::Sender<Vec<f32>>>,
 }
 
 impl Session {
@@ -116,12 +116,11 @@ impl Session {
             id: None,
             state: SessionState::Idle,
             tx,
-            asr_task: None,
             decoder: None,
-            vad: None,
-            pre_padding: None,
+            audio_params: AudioParams::default(),
             asr,
-            asr_tx: None,
+            vad_task: None,
+            audio_tx: None,
         }
     }
 
@@ -169,21 +168,9 @@ impl Session {
                 }
             };
         let vad_config = VadConfig::from_env();
-        self.vad = match Vad::new(audio_params.sample_rate, vad_config) {
-            Ok(vad) => Some(vad),
-            Err(err) => {
-                warn!(%err, "failed to create vad");
-                None
-            }
-        };
-        self.pre_padding = Some(PrePadding::new(
-            vad_config.pre_padding_ms,
-            audio_params.sample_rate,
-        ));
         info!(
             session_id = %id,
             decoder = self.decoder.is_some(),
-            vad = self.vad.is_some(),
             speech_threshold = vad_config.speech_threshold,
             silence_threshold = vad_config.silence_threshold,
             min_speech_ms = vad_config.min_speech_ms,
@@ -191,7 +178,12 @@ impl Session {
             pre_padding_ms = vad_config.pre_padding_ms,
             "audio pipeline ready"
         );
-        send_json(&self.tx, &ServerHello::new(id.clone(), audio_params)).await;
+        send_json(
+            &self.tx,
+            &ServerHello::new(id.clone(), audio_params.clone()),
+        )
+        .await;
+        self.audio_params = audio_params;
         self.id = Some(id);
     }
 
@@ -216,7 +208,7 @@ impl Session {
     }
 
     fn on_abort(&mut self, abort: Abort) {
-        self.stop_asr();
+        self.stop_vad();
         self.state = SessionState::Idle;
         info!(session_id = ?self.id, reason = ?abort.reason, "abort requested");
     }
@@ -241,117 +233,114 @@ impl Session {
             return;
         };
         trace!(samples = samples.len(), "decoded opus frame");
-        let samples = samples.to_vec();
 
-        let events = {
-            let Some(vad) = self.vad.as_mut() else {
-                return;
-            };
-            let mut events = Vec::new();
-            vad.push(&samples, &mut events);
-            events
-        };
-
-        for event in events {
-            match event {
-                VadEvent::SpeechStart { at_ms } => {
-                    info!(session_id = ?self.id, at_ms, "speech start");
-                    self.start_asr();
-                    if let Some(pre_padding) = self.pre_padding.as_mut() {
-                        Self::feed(&self.asr_tx, pre_padding.take());
-                    }
-                }
-                VadEvent::SpeechEnd { at_ms } => {
-                    info!(session_id = ?self.id, at_ms, "speech end");
-                    self.finish_utterance();
-                }
-            }
-        }
-
-        if self.asr_tx.is_some() {
-            Self::feed(&self.asr_tx, samples);
-        } else if let Some(pre_padding) = self.pre_padding.as_mut() {
-            pre_padding.push(&samples);
-        }
-    }
-
-    fn feed(tx: &Option<mpsc::Sender<Vec<f32>>>, samples: Vec<f32>) {
-        if let Some(tx) = tx
-            && tx.try_send(samples).is_err()
+        if let Some(tx) = self.audio_tx.as_ref()
+            && tx.try_send(samples.to_vec()).is_err()
         {
-            trace!("asr input full, dropping frame");
+            trace!("vad input full, dropping frame");
         }
-    }
-
-    fn start_asr(&mut self) {
-        let Some(session_id) = self.id.clone() else {
-            return;
-        };
-        let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
-        let tx = self.tx.clone();
-        let asr = self.asr.clone();
-        self.asr_task = Some(tokio::spawn(run_asr(
-            session_id,
-            tx,
-            asr,
-            asr_stream(audio_rx),
-        )));
-        self.asr_tx = Some(audio_tx);
-    }
-
-    fn finish_utterance(&mut self) {
-        self.asr_tx = None;
-    }
-
-    fn flush_vad(&mut self) {
-        let Some(vad) = self.vad.as_mut() else {
-            return;
-        };
-        let mut events = Vec::new();
-        vad.flush(&mut events);
-        for event in events {
-            if let VadEvent::SpeechEnd { at_ms } = event {
-                info!(session_id = ?self.id, at_ms, "speech end");
-            }
-        }
-        self.finish_utterance();
     }
 
     fn start_listening(&mut self, session_id: String, mode: Option<String>) {
-        self.stop_asr();
-        self.reset_vad();
-        self.state = SessionState::Listening;
-        info!(session_id, mode = ?mode, "device started listening");
+        self.stop_vad();
+        if self.decoder.is_none() {
+            self.state = SessionState::Listening;
+            info!(session_id, mode = ?mode, "device started listening");
+            return;
+        }
+        match Vad::new(self.audio_params.sample_rate, VadConfig::from_env()) {
+            Ok(vad) => {
+                let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
+                let audio: AudioStream = Box::pin(futures_util::stream::unfold(
+                    audio_rx,
+                    |mut rx| async move { rx.recv().await.map(|chunk| (chunk, rx)) },
+                ));
+                let events = vad.segment(audio);
+                let tx = self.tx.clone();
+                let asr = self.asr.clone();
+                self.vad_task = Some(tokio::spawn(run_vad(session_id.clone(), tx, asr, events)));
+                self.audio_tx = Some(audio_tx);
+                self.state = SessionState::Listening;
+                info!(session_id, mode = ?mode, "device started listening");
+            }
+            Err(err) => {
+                warn!(%err, "failed to create vad");
+                self.state = SessionState::Listening;
+            }
+        }
     }
 
     fn stop_listening(&mut self) {
-        self.flush_vad();
+        self.audio_tx = None;
         self.state = SessionState::Speaking;
     }
 
-    fn stop_asr(&mut self) {
-        self.asr_tx = None;
-        if let Some(handle) = self.asr_task.take() {
+    fn stop_vad(&mut self) {
+        self.audio_tx = None;
+        if let Some(handle) = self.vad_task.take() {
             handle.abort();
         }
     }
 
     fn shutdown(&mut self) {
-        self.flush_vad();
-        self.stop_asr();
+        self.stop_vad();
     }
+}
 
-    fn reset_vad(&mut self) {
-        if let Some(vad) = self.vad.as_mut() {
-            vad.reset();
+async fn run_vad(
+    session_id: String,
+    tx: mpsc::Sender<Message>,
+    asr: Arc<dyn Asr>,
+    mut events: VadEvents,
+) {
+    let mut utterance: Option<(mpsc::Sender<Vec<f32>>, UtteranceTask)> = None;
+
+    while let Some(event) = events.next().await {
+        match event {
+            VadEvent::SpeechStart { at_ms } => {
+                info!(session_id, at_ms, "speech start");
+                let (audio_tx, audio_rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
+                let audio: AudioStream = Box::pin(futures_util::stream::unfold(
+                    audio_rx,
+                    |mut rx| async move { rx.recv().await.map(|chunk| (chunk, rx)) },
+                ));
+                let handle =
+                    tokio::spawn(run_asr(session_id.clone(), tx.clone(), asr.clone(), audio));
+                utterance = Some((audio_tx, UtteranceTask(Some(handle))));
+            }
+            VadEvent::Speech { samples } => {
+                if let Some((tx, _)) = utterance.as_ref()
+                    && tx.try_send(samples).is_err()
+                {
+                    trace!("asr input full, dropping frame");
+                }
+            }
+            VadEvent::SpeechEnd { at_ms } => {
+                info!(session_id, at_ms, "speech end");
+                if let Some((_, task)) = utterance.take() {
+                    task.detach();
+                }
+            }
         }
     }
 }
 
-fn asr_stream(rx: mpsc::Receiver<Vec<f32>>) -> AudioStream {
-    Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|chunk| (chunk, rx))
-    }))
+struct UtteranceTask(Option<JoinHandle<()>>);
+
+impl UtteranceTask {
+    fn detach(mut self) {
+        if let Some(handle) = self.0.take() {
+            drop(handle);
+        }
+    }
+}
+
+impl Drop for UtteranceTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
 }
 
 async fn run_asr(

@@ -1,6 +1,10 @@
 use std::fmt;
+use std::pin::Pin;
 
+use futures_util::Stream;
 use opus::{Channels, Decoder};
+
+pub type AudioStream = Pin<Box<dyn Stream<Item = Vec<f32>> + Send>>;
 
 pub const SAMPLE_RATE: u32 = 16000;
 pub const CHANNELS: u16 = 1;

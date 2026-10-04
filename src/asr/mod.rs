@@ -5,7 +5,8 @@ use futures_util::{Stream, StreamExt};
 
 pub mod volc;
 
-pub type AudioStream = Pin<Box<dyn Stream<Item = Vec<f32>> + Send>>;
+pub use crate::audio::AudioStream;
+
 pub type AsrEvents<'a> = Pin<Box<dyn Stream<Item = Result<AsrEvent, AsrError>> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

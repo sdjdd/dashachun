@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use futures_util::StreamExt;
+use xiaozhi_server_rs::audio::AudioStream;
 use xiaozhi_server_rs::vad::{Vad, VadConfig, VadEvent};
 
 const FRAME_SAMPLES: usize = 960;
@@ -51,7 +53,8 @@ fn read_wav(path: &std::path::Path) -> Result<(u32, Vec<f32>), String> {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let Some(path) = std::env::args().nth(1).map(PathBuf::from) else {
         eprintln!("usage: cargo run --example vad_pcm -- <16k-mono-pcm16.wav> [threshold]");
         std::process::exit(2);
@@ -75,7 +78,7 @@ fn main() {
         config.speech_threshold = threshold;
     }
 
-    let mut vad = match Vad::new(rate, config) {
+    let vad = match Vad::new(rate, config) {
         Ok(vad) => vad,
         Err(err) => {
             eprintln!("failed to create vad: {err}");
@@ -83,35 +86,26 @@ fn main() {
         }
     };
 
-    let mut events = Vec::new();
+    let frames: Vec<Vec<f32>> = samples.chunks(FRAME_SAMPLES).map(<[f32]>::to_vec).collect();
+    let audio: AudioStream = Box::pin(futures_util::stream::iter(frames));
+    let mut events = vad.segment(audio);
+
     let mut speech_ms = 0u64;
     let mut speech_start = 0u64;
-    for frame in samples.chunks(FRAME_SAMPLES) {
-        vad.push(frame, &mut events);
-        for event in events.drain(..) {
-            match event {
-                VadEvent::SpeechStart { at_ms } => {
-                    speech_start = at_ms;
-                    println!("[{at_ms:>7} ms] speech start");
-                }
-                VadEvent::SpeechEnd { at_ms } => {
-                    speech_ms += at_ms - speech_start;
-                    println!(
-                        "[{at_ms:>7} ms] speech end (segment {:.2}s)",
-                        (at_ms - speech_start) as f32 / 1000.0
-                    );
-                }
+    while let Some(event) = events.next().await {
+        match event {
+            VadEvent::SpeechStart { at_ms, .. } => {
+                speech_start = at_ms;
+                println!("[{at_ms:>7} ms] speech start");
             }
-        }
-    }
-    vad.flush(&mut events);
-    for event in events {
-        if let VadEvent::SpeechEnd { at_ms } = event {
-            speech_ms += at_ms - speech_start;
-            println!(
-                "[{at_ms:>7} ms] speech end (segment {:.2}s, flushed)",
-                (at_ms - speech_start) as f32 / 1000.0
-            );
+            VadEvent::Speech { .. } => {}
+            VadEvent::SpeechEnd { at_ms } => {
+                speech_ms += at_ms - speech_start;
+                println!(
+                    "[{at_ms:>7} ms] speech end (segment {:.2}s)",
+                    (at_ms - speech_start) as f32 / 1000.0
+                );
+            }
         }
     }
     println!("speech total: {:.2}s", speech_ms as f32 / 1000.0);
