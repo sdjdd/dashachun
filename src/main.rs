@@ -12,7 +12,7 @@ use xiaozhi_server_rs::state::AppState;
 
 #[tokio::main]
 async fn main() {
-    let _ = dotenvy::dotenv();
+    dotenvy::dotenv().ok();
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let filter = filter.add_directive("ort=off".parse().expect("valid directive"));
