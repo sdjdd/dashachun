@@ -109,6 +109,24 @@ impl SttMessage {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LlmMessage {
+    #[serde(rename = "type")]
+    pub type_: &'static str,
+    pub session_id: String,
+    pub emotion: String,
+}
+
+impl LlmMessage {
+    pub fn new(session_id: String, emotion: String) -> Self {
+        Self {
+            type_: "llm",
+            session_id,
+            emotion,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct TtsMessage {
     #[serde(rename = "type")]
     pub type_: &'static str,
@@ -144,5 +162,19 @@ impl TtsMessage {
             state: "sentence_start",
             text: Some(text),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_message_serializes_emotion() {
+        let value = serde_json::to_value(LlmMessage::new("s1".into(), "happy".into())).unwrap();
+        assert_eq!(value["type"], "llm");
+        assert_eq!(value["session_id"], "s1");
+        assert_eq!(value["emotion"], "happy");
+        assert!(value.get("text").is_none());
     }
 }

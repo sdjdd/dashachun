@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use xiaozhi_server_rs::agent::{Agent, CompositeAgent};
+use xiaozhi_server_rs::agent::{
+    Agent, CompositeAgent, ToolRegistry, tool::GetWeather, tool::SetEmotion,
+};
 use xiaozhi_server_rs::asr::volc::VolcAsr;
 use xiaozhi_server_rs::asr::{Asr, StubAsr};
 use xiaozhi_server_rs::config::AppConfig;
@@ -51,7 +53,17 @@ async fn main() {
             None
         }
     };
-    let agent: Arc<dyn Agent> = Arc::new(CompositeAgent::new(asr, llm, tts, vad));
+    let tools = Arc::new(ToolRegistry::new(vec![
+        Arc::new(SetEmotion),
+        Arc::new(GetWeather::new()),
+    ]));
+    let agent: Arc<dyn Agent> = Arc::new(CompositeAgent {
+        asr,
+        llm,
+        tts,
+        vad,
+        tools,
+    });
     let state = AppState::new(config, agent);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();

@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
-    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession,
+    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, ToolRegistry,
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
-use crate::llm::{ChatMessage, Llm, LlmEvent};
+use crate::llm::{ChatItem, Llm, LlmEvent, ToolCall};
 use crate::tts::{Subtitle, TextStream, Tts, TtsEvent};
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -23,29 +23,11 @@ const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct CompositeAgent {
-    asr: Arc<dyn Asr>,
-    llm: Option<Arc<dyn Llm>>,
-    tts: Option<Arc<dyn Tts>>,
-    vad: Arc<dyn VadFactory>,
-}
-
-impl CompositeAgent {
-    pub fn new(
-        asr: Arc<dyn Asr>,
-        llm: Option<Arc<dyn Llm>>,
-        tts: Option<Arc<dyn Tts>>,
-        vad: Arc<dyn VadFactory>,
-    ) -> Self {
-        Self { asr, llm, tts, vad }
-    }
-
-    pub fn llm(&self) -> Option<&Arc<dyn Llm>> {
-        self.llm.as_ref()
-    }
-
-    pub fn tts(&self) -> Option<&Arc<dyn Tts>> {
-        self.tts.as_ref()
-    }
+    pub asr: Arc<dyn Asr>,
+    pub llm: Option<Arc<dyn Llm>>,
+    pub tts: Option<Arc<dyn Tts>>,
+    pub vad: Arc<dyn VadFactory>,
+    pub tools: Arc<ToolRegistry>,
 }
 
 impl Agent for CompositeAgent {
@@ -55,10 +37,11 @@ impl Agent for CompositeAgent {
         let llm = self.llm.clone();
         let tts = self.tts.clone();
         let vad_factory = self.vad.clone();
+        let tools = self.tools.clone();
         let session_id = session.id.clone();
         info!(session_id, "agent started");
         tokio::spawn(async move {
-            drive(&session, input, asr, llm, tts, vad_factory, out_tx).await;
+            drive(&session, input, asr, llm, tts, vad_factory, tools, out_tx).await;
             info!(session_id, "agent stopped");
         });
         Box::pin(futures_util::stream::unfold(out_rx, |mut rx| async move {
@@ -74,9 +57,23 @@ enum AsrMessage {
 }
 
 enum LlmMessage {
-    Delta { generation: u64, text: String },
-    Done { generation: u64, text: String },
-    Error { generation: u64, message: String },
+    Delta {
+        generation: u64,
+        text: String,
+    },
+    Output {
+        generation: u64,
+        output: AgentOutput,
+    },
+    Done {
+        generation: u64,
+        reply: String,
+        history: Vec<ChatItem>,
+    },
+    Error {
+        generation: u64,
+        message: String,
+    },
 }
 
 enum TtsMessage {
@@ -87,6 +84,7 @@ enum TtsMessage {
     Error { generation: u64, message: String },
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     session: &AgentSession,
     mut input: AgentInputStream,
@@ -94,6 +92,7 @@ async fn drive(
     llm: Option<Arc<dyn Llm>>,
     tts: Option<Arc<dyn Tts>>,
     vad_factory: Arc<dyn VadFactory>,
+    tools: Arc<ToolRegistry>,
     out_tx: mpsc::Sender<AgentOutput>,
 ) {
     let mut vad: Option<Box<dyn Vad>> = None;
@@ -103,7 +102,7 @@ async fn drive(
     let mut utterance: Option<Utterance> = None;
     let mut completion: Option<Completion> = None;
     let mut synthesis: Option<Synthesis> = None;
-    let mut history: Vec<ChatMessage> = Vec::new();
+    let mut history: Vec<ChatItem> = Vec::new();
     let mut generation: u64 = 0;
 
     loop {
@@ -215,9 +214,10 @@ async fn drive(
                                 if let Some(current) = synthesis.take() {
                                     current.cancel().await;
                                 }
-                                history.push(ChatMessage::user(text));
+                                history.push(ChatItem::user(text));
                                 completion = Some(spawn_llm(
                                     llm,
+                                    &tools,
                                     &llm_tx,
                                     session.id.clone(),
                                     generation,
@@ -244,6 +244,7 @@ async fn drive(
             Some(message) = llm_rx.recv() => {
                 let current = match &message {
                     LlmMessage::Delta { generation, .. }
+                    | LlmMessage::Output { generation, .. }
                     | LlmMessage::Done { generation, .. }
                     | LlmMessage::Error { generation, .. } => *generation,
                 };
@@ -277,14 +278,17 @@ async fn drive(
                             }
                         }
                     }
-                    LlmMessage::Done { text, .. } => {
+                    LlmMessage::Done { reply, history: items, .. } => {
                         completion = None;
-                        info!(session_id = %session.id, %text, "llm result");
-                        if !text.is_empty() {
-                            history.push(ChatMessage::assistant(text));
-                        }
+                        info!(session_id = %session.id, %reply, "llm result");
+                        history.extend(items);
                         if let Some(current) = synthesis.take() {
                             current.detach();
+                        }
+                    }
+                    LlmMessage::Output { output, .. } => {
+                        if out_tx.send(output).await.is_err() {
+                            break;
                         }
                     }
                     LlmMessage::Error { message, .. } => {
@@ -545,60 +549,159 @@ async fn run_asr(
 
 fn spawn_llm(
     llm: &Arc<dyn Llm>,
+    tools: &Arc<ToolRegistry>,
     llm_tx: &mpsc::Sender<LlmMessage>,
     session_id: String,
     generation: u64,
-    history: Vec<ChatMessage>,
+    history: Vec<ChatItem>,
 ) -> Completion {
     let llm = llm.clone();
+    let tools = tools.clone();
     let llm_tx = llm_tx.clone();
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
-        run_llm(llm, history, llm_tx, session_id, generation, task_cancel).await;
+        run_llm(
+            llm,
+            tools,
+            history,
+            llm_tx,
+            session_id,
+            generation,
+            task_cancel,
+        )
+        .await;
     });
     Completion { handle, cancel }
 }
 
 async fn run_llm(
     llm: Arc<dyn Llm>,
-    history: Vec<ChatMessage>,
+    tools: Arc<ToolRegistry>,
+    history: Vec<ChatItem>,
     llm_tx: mpsc::Sender<LlmMessage>,
     session_id: String,
     generation: u64,
     cancel: CancellationToken,
 ) {
-    let mut events = llm.chat(history, cancel);
-    let mut text = String::new();
-    while let Some(result) = events.next().await {
-        let message = match result {
-            Ok(LlmEvent::Delta { text: delta }) => {
-                text.push_str(&delta);
-                LlmMessage::Delta {
-                    generation,
-                    text: delta,
-                }
-            }
-            Ok(LlmEvent::Done) => {
-                let _ = llm_tx.send(LlmMessage::Done { generation, text }).await;
-                return;
-            }
-            Err(err) => {
-                let _ = llm_tx
-                    .send(LlmMessage::Error {
-                        generation,
-                        message: err.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-        if llm_tx.send(message).await.is_err() {
-            debug!(session_id, "llm output closed");
+    let mut working = history;
+    let mut new_items: Vec<ChatItem> = Vec::new();
+    let mut reply = String::new();
+
+    loop {
+        if cancel.is_cancelled() {
             return;
         }
+        let mut calls: Vec<ToolCall> = Vec::new();
+        let mut text = String::new();
+        let mut events = llm.chat(working.clone(), tools.specs(), cancel.clone());
+        while let Some(result) = events.next().await {
+            match result {
+                Ok(LlmEvent::Delta { text: delta }) => {
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    text.push_str(&delta);
+                    if llm_tx
+                        .send(LlmMessage::Delta {
+                            generation,
+                            text: delta,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        debug!(session_id, "llm output closed");
+                        return;
+                    }
+                }
+                Ok(LlmEvent::ToolCall(call)) => calls.push(call),
+                Ok(LlmEvent::Done) => break,
+                Err(err) => {
+                    let _ = llm_tx
+                        .send(LlmMessage::Error {
+                            generation,
+                            message: err.to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        if calls.is_empty() {
+            if !text.is_empty() {
+                reply.push_str(&text);
+                new_items.push(ChatItem::assistant(text));
+            }
+            let _ = llm_tx
+                .send(LlmMessage::Done {
+                    generation,
+                    reply,
+                    history: new_items,
+                })
+                .await;
+            return;
+        }
+
+        new_items.push(ChatItem::assistant_tool_calls(calls.clone()));
+        working.push(ChatItem::assistant_tool_calls(calls.clone()));
+        for call in calls {
+            let (content, output) = execute_tool(&tools, &call, &session_id).await;
+            if let Some(output) = output
+                && llm_tx
+                    .send(LlmMessage::Output { generation, output })
+                    .await
+                    .is_err()
+            {
+                debug!(session_id, "llm output closed");
+                return;
+            }
+            new_items.push(ChatItem::tool(call.id.clone(), content.clone()));
+            working.push(ChatItem::tool(call.id, content));
+        }
     }
-    let _ = llm_tx.send(LlmMessage::Done { generation, text }).await;
+}
+
+async fn execute_tool(
+    tools: &ToolRegistry,
+    call: &ToolCall,
+    session_id: &str,
+) -> (String, Option<AgentOutput>) {
+    debug!(
+        session_id,
+        tool = %call.name,
+        args = %call.arguments,
+        "tool call"
+    );
+    let Some(handler) = tools.get(&call.name) else {
+        warn!(session_id, tool = %call.name, "unknown tool requested");
+        return (format!("error: unknown tool `{}`", call.name), None);
+    };
+    let args = if call.arguments.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_str(&call.arguments) {
+            Ok(args) => args,
+            Err(err) => {
+                warn!(session_id, tool = %call.name, %err, "invalid tool arguments");
+                return (format!("error: invalid arguments: {err}"), None);
+            }
+        }
+    };
+    let result = match handler.call(&args).await {
+        Ok(outcome) => (outcome.content, outcome.output),
+        Err(err) => {
+            warn!(session_id, tool = %call.name, %err, "tool failed");
+            (format!("error: {err}"), None)
+        }
+    };
+    debug!(
+        session_id,
+        tool = %call.name,
+        result = %result.0,
+        "tool result"
+    );
+    result
 }
 
 fn spawn_tts(
@@ -713,16 +816,58 @@ mod tests {
 
     struct ScriptedLlm {
         reply: String,
-        calls: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+        calls: Arc<Mutex<Vec<Vec<ChatItem>>>>,
     }
     impl Llm for ScriptedLlm {
-        fn chat(&self, history: Vec<ChatMessage>, _cancel: CancellationToken) -> LlmEvents<'_> {
+        fn chat(
+            &self,
+            history: Vec<ChatItem>,
+            _tools: Vec<crate::llm::ToolSpec>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
             self.calls.lock().unwrap().push(history);
             let text = self.reply.clone();
             Box::pin(futures_util::stream::iter([
                 Ok(LlmEvent::Delta { text }),
                 Ok(LlmEvent::Done),
             ]))
+        }
+    }
+
+    struct ToolCallingLlm {
+        calls: Arc<Mutex<Vec<Vec<ChatItem>>>>,
+        tool_calls: Vec<ToolCall>,
+        reply: String,
+    }
+
+    impl Llm for ToolCallingLlm {
+        fn chat(
+            &self,
+            history: Vec<ChatItem>,
+            _tools: Vec<crate::llm::ToolSpec>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            let round = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(history);
+                calls.len()
+            };
+            if round == 1 {
+                let mut events: Vec<Result<LlmEvent, crate::llm::LlmError>> = self
+                    .tool_calls
+                    .iter()
+                    .cloned()
+                    .map(|call| Ok(LlmEvent::ToolCall(call)))
+                    .collect();
+                events.push(Ok(LlmEvent::Done));
+                Box::pin(futures_util::stream::iter(events))
+            } else {
+                let text = self.reply.clone();
+                Box::pin(futures_util::stream::iter([
+                    Ok(LlmEvent::Delta { text }),
+                    Ok(LlmEvent::Done),
+                ]))
+            }
         }
     }
 
@@ -780,19 +925,24 @@ mod tests {
         }
     }
 
+    fn empty_tools() -> Arc<ToolRegistry> {
+        Arc::new(ToolRegistry::new(Vec::new()))
+    }
+
     #[tokio::test]
     async fn audio_drives_vad_asr_to_stt() {
-        let agent = CompositeAgent::new(
-            Arc::new(StubAsr::new("hello")),
-            None,
-            None,
-            Arc::new(ScriptedVadFactory {
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: None,
+            tts: None,
+            vad: Arc::new(ScriptedVadFactory {
                 events: vec![
                     VadEvent::SpeechStart { at_ms: 0 },
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
-        );
+            tools: empty_tools(),
+        };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
 
@@ -815,12 +965,13 @@ mod tests {
 
     #[tokio::test]
     async fn interrupt_emits_tts_stop() {
-        let agent = CompositeAgent::new(
-            Arc::new(StubAsr::new("hello")),
-            None,
-            None,
-            Arc::new(ScriptedVadFactory { events: vec![] }),
-        );
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: None,
+            tts: None,
+            vad: Arc::new(ScriptedVadFactory { events: vec![] }),
+            tools: empty_tools(),
+        };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
 
@@ -833,9 +984,9 @@ mod tests {
     }
 
     async fn wait_for_calls(
-        calls: &Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+        calls: &Arc<Mutex<Vec<Vec<ChatItem>>>>,
         len: usize,
-    ) -> Vec<Vec<ChatMessage>> {
+    ) -> Vec<Vec<ChatItem>> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let snapshot = calls.lock().unwrap().clone();
@@ -854,11 +1005,11 @@ mod tests {
             reply: "hi".into(),
             calls: calls.clone(),
         });
-        let agent = CompositeAgent::new(
-            Arc::new(StubAsr::new("hello")),
-            Some(llm),
-            None,
-            Arc::new(ScriptedVadFactory {
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: None,
+            vad: Arc::new(ScriptedVadFactory {
                 events: vec![
                     VadEvent::SpeechStart { at_ms: 0 },
                     VadEvent::SpeechEnd { at_ms: 100 },
@@ -866,7 +1017,8 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 300 },
                 ],
             }),
-        );
+            tools: empty_tools(),
+        };
         let (tx, input) = input_channel();
         let _output = agent.run(session(), input);
 
@@ -876,7 +1028,7 @@ mod tests {
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
         let first = wait_for_calls(&calls, 1).await;
-        assert_eq!(first[0], vec![ChatMessage::user("hello")]);
+        assert_eq!(first[0], vec![ChatItem::user("hello")]);
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -886,9 +1038,117 @@ mod tests {
         assert_eq!(
             second[1],
             vec![
-                ChatMessage::user("hello"),
-                ChatMessage::assistant("hi"),
-                ChatMessage::user("hello"),
+                ChatItem::user("hello"),
+                ChatItem::assistant("hi"),
+                ChatItem::user("hello"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_emits_emotion_before_reply() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
+            calls: calls.clone(),
+            tool_calls: vec![ToolCall {
+                id: "call_1".into(),
+                name: "set_emotion".into(),
+                arguments: r#"{"emotion":"happy"}"#.into(),
+            }],
+            reply: "你好呀".into(),
+        });
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: None,
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            tools: Arc::new(ToolRegistry::new(vec![Arc::new(
+                crate::agent::tool::SetEmotion,
+            )])),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let mut emotion_pos = None;
+        let mut seen = 0usize;
+        while let Some(item) = output.next().await {
+            if matches!(&item, AgentOutput::Emotion { emotion } if emotion == "happy") {
+                emotion_pos = Some(seen);
+                break;
+            }
+            seen += 1;
+        }
+        assert_eq!(emotion_pos, Some(1), "emotion should follow the final stt");
+
+        let rounds = wait_for_calls(&calls, 2).await;
+        assert_eq!(rounds[0], vec![ChatItem::user("hello")]);
+        assert_eq!(
+            rounds[1],
+            vec![
+                ChatItem::user("hello"),
+                ChatItem::assistant_tool_calls(vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "set_emotion".into(),
+                    arguments: r#"{"emotion":"happy"}"#.into(),
+                }]),
+                ChatItem::tool("call_1", "emotion set to happy"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_degrades_gracefully() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
+            calls: calls.clone(),
+            tool_calls: vec![ToolCall {
+                id: "call_x".into(),
+                name: "nonexistent".into(),
+                arguments: "{}".into(),
+            }],
+            reply: "ok".into(),
+        });
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: None,
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            tools: empty_tools(),
+        };
+        let (tx, input) = input_channel();
+        let _output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let rounds = wait_for_calls(&calls, 2).await;
+        assert_eq!(
+            rounds[1],
+            vec![
+                ChatItem::user("hello"),
+                ChatItem::assistant_tool_calls(vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }]),
+                ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
             ]
         );
     }
@@ -899,17 +1159,18 @@ mod tests {
             reply: "hi".into(),
             calls: Arc::new(Mutex::new(Vec::new())),
         });
-        let agent = CompositeAgent::new(
-            Arc::new(StubAsr::new("hello")),
-            Some(llm),
-            Some(Arc::new(ScriptedTts)),
-            Arc::new(ScriptedVadFactory {
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: Some(Arc::new(ScriptedTts)),
+            vad: Arc::new(ScriptedVadFactory {
                 events: vec![
                     VadEvent::SpeechStart { at_ms: 0 },
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
-        );
+            tools: empty_tools(),
+        };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
 
@@ -972,7 +1233,12 @@ mod tests {
     struct HangingLlm;
 
     impl Llm for HangingLlm {
-        fn chat(&self, _history: Vec<ChatMessage>, cancel: CancellationToken) -> LlmEvents<'_> {
+        fn chat(
+            &self,
+            _history: Vec<ChatItem>,
+            _tools: Vec<crate::llm::ToolSpec>,
+            cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::unfold(false, move |delivered| {
                 let cancel = cancel.clone();
                 async move {
@@ -989,19 +1255,20 @@ mod tests {
     #[tokio::test]
     async fn interrupt_cancels_in_flight_tts_instead_of_aborting() {
         let cancelled = Arc::new(Mutex::new(false));
-        let agent = CompositeAgent::new(
-            Arc::new(StubAsr::new("hello")),
-            Some(Arc::new(HangingLlm)),
-            Some(Arc::new(CancelAwareTts {
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(Arc::new(HangingLlm)),
+            tts: Some(Arc::new(CancelAwareTts {
                 cancelled: cancelled.clone(),
             })),
-            Arc::new(ScriptedVadFactory {
+            vad: Arc::new(ScriptedVadFactory {
                 events: vec![
                     VadEvent::SpeechStart { at_ms: 0 },
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
-        );
+            tools: empty_tools(),
+        };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
 

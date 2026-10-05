@@ -1,18 +1,21 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
-    ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
-    CreateChatCompletionRequestArgs,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage, ChatCompletionTool,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
 };
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use super::{ChatMessage, ChatRole, Llm, LlmError, LlmEvent, LlmEvents};
+use super::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
 
 fn parse_reasoning_effort(
     value: &str,
@@ -85,7 +88,8 @@ impl OpenAiLlm {
 
     fn build_request(
         &self,
-        history: Vec<ChatMessage>,
+        history: Vec<ChatItem>,
+        tools: Vec<ToolSpec>,
     ) -> Result<async_openai::types::chat::CreateChatCompletionRequest, LlmError> {
         let mut messages = Vec::with_capacity(history.len() + 1);
         messages.push(ChatCompletionRequestMessage::System(
@@ -94,19 +98,50 @@ impl OpenAiLlm {
                 name: None,
             },
         ));
-        messages.extend(history.into_iter().map(|message| match message.role {
-            ChatRole::User => {
+        messages.extend(history.into_iter().map(|item| match item {
+            ChatItem::User { content } => {
                 ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: message.content.into(),
+                    content: content.into(),
                     name: None,
                 })
             }
-            ChatRole::Assistant => {
+            ChatItem::Assistant {
+                content,
+                tool_calls,
+            } => {
+                let tool_calls = if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(
+                        tool_calls
+                            .into_iter()
+                            .map(|call| {
+                                ChatCompletionMessageToolCalls::Function(
+                                    ChatCompletionMessageToolCall {
+                                        id: call.id,
+                                        function: FunctionCall {
+                                            name: call.name,
+                                            arguments: call.arguments,
+                                        },
+                                    },
+                                )
+                            })
+                            .collect(),
+                    )
+                };
                 ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: Some(message.content.into()),
+                    content: content.map(Into::into),
+                    tool_calls,
                     ..Default::default()
                 })
             }
+            ChatItem::Tool {
+                tool_call_id,
+                content,
+            } => ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                content: ChatCompletionRequestToolMessageContent::Text(content),
+                tool_call_id,
+            }),
         }));
 
         let mut request = CreateChatCompletionRequestArgs::default();
@@ -120,6 +155,23 @@ impl OpenAiLlm {
         if let Some(effort) = self.config.reasoning_effort.as_deref() {
             request.reasoning_effort(parse_reasoning_effort(effort)?);
         }
+        if !tools.is_empty() {
+            request.tools(
+                tools
+                    .into_iter()
+                    .map(|spec| {
+                        ChatCompletionTools::Function(ChatCompletionTool {
+                            function: FunctionObject {
+                                name: spec.name,
+                                description: Some(spec.description),
+                                parameters: Some(spec.parameters),
+                                strict: None,
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
         request
             .build()
             .map_err(|err| LlmError::from(format!("build request: {err}")))
@@ -127,9 +179,14 @@ impl OpenAiLlm {
 }
 
 impl Llm for OpenAiLlm {
-    fn chat(&self, history: Vec<ChatMessage>, cancel: CancellationToken) -> LlmEvents<'_> {
+    fn chat(
+        &self,
+        history: Vec<ChatItem>,
+        tools: Vec<ToolSpec>,
+        cancel: CancellationToken,
+    ) -> LlmEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<LlmEvent, LlmError>>();
-        let request = match self.build_request(history) {
+        let request = match self.build_request(history, tools) {
             Ok(request) => request,
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -147,6 +204,48 @@ impl Llm for OpenAiLlm {
         Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|event| (event, rx))
         }))
+    }
+}
+
+/// Accumulates streamed tool-call fragments, keyed by their `index`.
+#[derive(Default)]
+struct ToolCallAccumulator {
+    calls: BTreeMap<u32, PartialCall>,
+}
+
+#[derive(Default)]
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl ToolCallAccumulator {
+    fn push(&mut self, chunk: async_openai::types::chat::ChatCompletionMessageToolCallChunk) {
+        let entry = self.calls.entry(chunk.index).or_default();
+        if let Some(id) = chunk.id {
+            entry.id = id;
+        }
+        if let Some(function) = chunk.function {
+            if let Some(name) = function.name {
+                entry.name.push_str(&name);
+            }
+            if let Some(arguments) = function.arguments {
+                entry.arguments.push_str(&arguments);
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<ToolCall> {
+        self.calls
+            .into_values()
+            .filter(|call| !call.name.is_empty())
+            .map(|call| ToolCall {
+                id: call.id,
+                name: call.name,
+                arguments: call.arguments,
+            })
+            .collect()
     }
 }
 
@@ -171,6 +270,7 @@ async fn run(
         }
     };
 
+    let mut tool_calls = ToolCallAccumulator::default();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -182,15 +282,26 @@ async fn run(
                 let chunk = chunk.map_err(|err| LlmError::from(format!("stream failed: {err}")))?;
                 for choice in chunk.choices {
                     if let Some(text) = choice.delta.content
+                        && !text.is_empty()
                         && tx.send(Ok(LlmEvent::Delta { text })).is_err()
                     {
                         return Ok(());
+                    }
+                    if let Some(chunks) = choice.delta.tool_calls {
+                        for chunk in chunks {
+                            tool_calls.push(chunk);
+                        }
                     }
                 }
             }
         }
     }
 
+    for call in tool_calls.finish() {
+        if tx.send(Ok(LlmEvent::ToolCall(call))).is_err() {
+            return Ok(());
+        }
+    }
     let _ = tx.send(Ok(LlmEvent::Done));
     Ok(())
 }
@@ -198,6 +309,7 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_openai::types::chat::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
 
     #[test]
     fn parses_reasoning_effort_case_insensitively() {
@@ -210,5 +322,48 @@ mod tests {
             async_openai::types::chat::ReasoningEffort::High
         );
         assert!(parse_reasoning_effort("bogus").is_err());
+    }
+
+    fn chunk(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index,
+            id: id.map(str::to_string),
+            r#type: None,
+            function: Some(FunctionCallStream {
+                name: name.map(str::to_string),
+                arguments: arguments.map(str::to_string),
+            }),
+        }
+    }
+
+    #[test]
+    fn accumulates_fragmented_tool_call() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.push(chunk(0, Some("call_1"), Some("set_"), None));
+        acc.push(chunk(0, None, Some("emotion"), Some("{\"emo")));
+        acc.push(chunk(0, None, None, Some("tion\":\"happy\"}")));
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "set_emotion");
+        assert_eq!(calls[0].arguments, "{\"emotion\":\"happy\"}");
+    }
+
+    #[test]
+    fn accumulates_parallel_tool_calls_by_index() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.push(chunk(0, Some("a"), Some("set_emotion"), Some("{}")));
+        acc.push(chunk(1, Some("b"), Some("get_weather"), Some("{\"city\"")));
+        acc.push(chunk(1, None, None, Some(":\"beijing\"}")));
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "set_emotion");
+        assert_eq!(calls[1].name, "get_weather");
+        assert_eq!(calls[1].arguments, "{\"city\":\"beijing\"}");
     }
 }

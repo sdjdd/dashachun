@@ -4,7 +4,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use xiaozhi_server_rs::agent::{Agent, CompositeAgent};
+use xiaozhi_server_rs::agent::{Agent, CompositeAgent, ToolRegistry};
 use xiaozhi_server_rs::asr::StubAsr;
 use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
 use xiaozhi_server_rs::state::AppState;
@@ -28,12 +28,13 @@ fn state_with_url(websocket_url: Option<String>) -> AppState {
                 timezone_offset: 480,
             },
         },
-        Arc::new(CompositeAgent::new(
-            Arc::new(StubAsr::default()),
-            None,
-            None,
-            Arc::new(SileroVadFactory::new(VadConfig::default())),
-        )) as Arc<dyn Agent>,
+        Arc::new(CompositeAgent {
+            asr: Arc::new(StubAsr::default()),
+            llm: None,
+            tts: None,
+            vad: Arc::new(SileroVadFactory::new(VadConfig::default())),
+            tools: Arc::new(ToolRegistry::new(Vec::new())),
+        }) as Arc<dyn Agent>,
     )
 }
 

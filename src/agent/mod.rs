@@ -1,10 +1,12 @@
 mod composite;
+pub mod tool;
 
 use std::pin::Pin;
 
 use futures_util::Stream;
 
 pub use composite::CompositeAgent;
+pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
 
 pub type AgentInputStream = Pin<Box<dyn Stream<Item = AgentInput> + Send>>;
 pub type AgentOutputStream = Pin<Box<dyn Stream<Item = AgentOutput> + Send>>;
@@ -35,6 +37,7 @@ pub enum AgentOutput {
     Audio(Vec<f32>),
     TtsStop,
     TtsAbort,
+    Emotion { emotion: String },
     Mcp(serde_json::Value),
     Error { message: String },
 }

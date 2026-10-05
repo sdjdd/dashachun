@@ -10,29 +10,59 @@ pub use openai::{OpenAiConfig, OpenAiLlm};
 
 pub type LlmEvents<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRole {
-    User,
-    Assistant,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub content: String,
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
 }
 
-impl ChatMessage {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatItem {
+    User {
+        content: String,
+    },
+    Assistant {
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
+    },
+    Tool {
+        tool_call_id: String,
+        content: String,
+    },
+}
+
+impl ChatItem {
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::User,
+        Self::User {
             content: content.into(),
         }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::Assistant,
+        Self::Assistant {
+            content: Some(content.into()),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    pub fn assistant_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self::Assistant {
+            content: None,
+            tool_calls,
+        }
+    }
+
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::Tool {
+            tool_call_id: tool_call_id.into(),
             content: content.into(),
         }
     }
@@ -41,6 +71,7 @@ impl ChatMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmEvent {
     Delta { text: String },
+    ToolCall(ToolCall),
     Done,
 }
 
@@ -72,5 +103,10 @@ impl From<&str> for LlmError {
 }
 
 pub trait Llm: Send + Sync {
-    fn chat(&self, history: Vec<ChatMessage>, cancel: CancellationToken) -> LlmEvents<'_>;
+    fn chat(
+        &self,
+        history: Vec<ChatItem>,
+        tools: Vec<ToolSpec>,
+        cancel: CancellationToken,
+    ) -> LlmEvents<'_>;
 }

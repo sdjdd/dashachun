@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
 use crate::audio::{OpusDecoder, OpusEncoder};
 use crate::dto::ws::{
-    Abort, AudioParams, ClientHello, InboundMessage, Listen, Mcp, ServerHello, SttMessage,
-    TtsMessage,
+    Abort, AudioParams, ClientHello, InboundMessage, Listen, LlmMessage, Mcp, ServerHello,
+    SttMessage, TtsMessage,
 };
 
 use super::player::{Player, spawn_player};
@@ -266,6 +266,9 @@ async fn run_agent(
                         player.push(packet).await;
                     }
                 }
+            }
+            AgentOutput::Emotion { emotion } => {
+                send_json(&tx, &LlmMessage::new(session_id.clone(), emotion)).await;
             }
             AgentOutput::Mcp(_) => {}
             AgentOutput::Error { message } => {
