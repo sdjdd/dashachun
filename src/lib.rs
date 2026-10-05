@@ -25,22 +25,14 @@ pub mod state;
 pub mod tts;
 pub mod vad;
 
-pub fn app(server: ServerState, auth: Option<AuthState>) -> NormalizePath<Router> {
-    let mut server = server;
-    if let Some(auth) = &auth {
-        server.devices = Some(crate::device::DeviceStore::new(auth.pool.clone()));
-    }
-
-    let mut router = Router::new()
+pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
+    let router = Router::new()
         .route("/", get(async || "Hello, world!"))
         .nest("/gateway", routes::gateway::routes())
         .nest("/api/ota", routes::ota::routes())
-        .with_state(server);
-
-    if let Some(auth) = auth {
-        router = router.nest("/api/auth", routes::auth::routes().with_state(auth.clone()));
-        router = router.nest("/api/devices", routes::devices::routes().with_state(auth));
-    }
+        .with_state(server)
+        .nest("/api/auth", routes::auth::routes().with_state(auth.clone()))
+        .nest("/api/devices", routes::devices::routes().with_state(auth));
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
 }

@@ -28,7 +28,7 @@ fn auth_state(pool: PgPool) -> AuthState {
     }
 }
 
-fn server_state() -> ServerState {
+fn server_state(pool: PgPool) -> ServerState {
     ServerState::new(
         AppConfig {
             server: ServerConfig {
@@ -38,7 +38,6 @@ fn server_state() -> ServerState {
             },
             ota: OtaConfig {
                 websocket_url: None,
-                token: "test-token".into(),
                 timezone_offset: 480,
             },
             device: DeviceConfig {
@@ -54,11 +53,13 @@ fn server_state() -> ServerState {
             )),
             tools: Arc::new(xiaozhi_server_rs::agent::ToolRegistry::new(Vec::new())),
         }),
+        DeviceStore::new(pool),
     )
 }
 
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
-    xiaozhi_server_rs::app(server_state(), Some(auth_state(pool)))
+    let auth = auth_state(pool.clone());
+    xiaozhi_server_rs::app(server_state(pool), auth)
 }
 
 fn ota_request() -> Request<Body> {
@@ -211,12 +212,12 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     };
     assert_eq!(token.len(), 32);
 
-    let state = server_state();
+    let state = server_state(pool.clone());
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let served = xiaozhi_server_rs::app(state, Some(auth_state(pool.clone())));
+    let served = xiaozhi_server_rs::app(state, auth_state(pool.clone()));
     let server = tokio::spawn(xiaozhi_server_rs::serve(
         listener,
         served,

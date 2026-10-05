@@ -53,28 +53,27 @@ async fn handle_ota(
         version
     };
 
-    let (token, activation) = match &state.devices {
-        Some(devices) => {
-            let uuid = parse_client_id(&client_id)?;
-            devices.upsert(uuid, &device_id, &board_type).await?;
-            if devices.is_bound(uuid).await? {
-                (devices.rotate_token(uuid).await?.unwrap_or_default(), None)
-            } else {
-                let code = devices
-                    .ensure_code(uuid, state.config.device.activation_ttl_secs)
-                    .await?;
-                (
-                    String::new(),
-                    Some(Activation {
-                        message: code.clone(),
-                        challenge: Uuid::new_v4().simple().to_string(),
-                        code,
-                        timeout_ms: (state.config.device.activation_ttl_secs as u64) * 1000,
-                    }),
-                )
-            }
-        }
-        None => (state.config.ota.token.clone(), None),
+    let uuid = parse_client_id(&client_id)?;
+    state.devices.upsert(uuid, &device_id, &board_type).await?;
+    let (token, activation) = if state.devices.is_bound(uuid).await? {
+        (
+            state.devices.rotate_token(uuid).await?.unwrap_or_default(),
+            None,
+        )
+    } else {
+        let code = state
+            .devices
+            .ensure_code(uuid, state.config.device.activation_ttl_secs)
+            .await?;
+        (
+            String::new(),
+            Some(Activation {
+                message: code.clone(),
+                challenge: Uuid::new_v4().simple().to_string(),
+                code,
+                timeout_ms: (state.config.device.activation_ttl_secs as u64) * 1000,
+            }),
+        )
     };
 
     debug!(%websocket_url, firmware_version, "OTA response");
@@ -100,11 +99,8 @@ async fn handle_activate(
     State(state): State<ServerState>,
     ClientId(client_id): ClientId,
 ) -> Result<StatusCode, AppError> {
-    let Some(devices) = &state.devices else {
-        return Ok(StatusCode::OK);
-    };
     let uuid = parse_client_id(&client_id)?;
-    if devices.is_bound(uuid).await? {
+    if state.devices.is_bound(uuid).await? {
         Ok(StatusCode::OK)
     } else {
         Ok(StatusCode::ACCEPTED)

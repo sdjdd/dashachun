@@ -10,18 +10,18 @@ use crate::device::DeviceStore;
 pub struct ServerState {
     pub config: AppConfig,
     pub agent: Arc<dyn Agent>,
-    pub devices: Option<DeviceStore>,
+    pub devices: DeviceStore,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl ServerState {
-    pub fn new(config: AppConfig, agent: Arc<dyn Agent>) -> Self {
+    pub fn new(config: AppConfig, agent: Arc<dyn Agent>, devices: DeviceStore) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             config,
             agent,
-            devices: None,
+            devices,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }

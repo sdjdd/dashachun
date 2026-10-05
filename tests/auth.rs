@@ -6,6 +6,7 @@ use tower::ServiceExt;
 
 use xiaozhi_server_rs::auth::state::AuthState;
 use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
+use xiaozhi_server_rs::device::DeviceStore;
 use xiaozhi_server_rs::state::ServerState;
 
 use std::sync::Arc;
@@ -25,7 +26,7 @@ fn auth_state(pool: PgPool) -> AuthState {
     }
 }
 
-fn server_state() -> ServerState {
+fn server_state(pool: PgPool) -> ServerState {
     ServerState::new(
         AppConfig {
             server: ServerConfig {
@@ -35,7 +36,6 @@ fn server_state() -> ServerState {
             },
             ota: OtaConfig {
                 websocket_url: None,
-                token: "test-token".into(),
                 timezone_offset: 480,
             },
             device: xiaozhi_server_rs::config::DeviceConfig {
@@ -51,11 +51,13 @@ fn server_state() -> ServerState {
             )),
             tools: Arc::new(xiaozhi_server_rs::agent::ToolRegistry::new(Vec::new())),
         }),
+        DeviceStore::new(pool),
     )
 }
 
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
-    xiaozhi_server_rs::app(server_state(), Some(auth_state(pool)))
+    let auth = auth_state(pool.clone());
+    xiaozhi_server_rs::app(server_state(pool), auth)
 }
 
 fn post(path: &str, body: &str) -> Request<Body> {

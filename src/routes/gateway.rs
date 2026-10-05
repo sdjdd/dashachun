@@ -26,26 +26,24 @@ async fn handle_device_connect(
         "gateway upgrade"
     );
 
-    if let Some(devices) = &state.devices {
-        let Some(client_id) = header_str(&headers, "client-id") else {
+    let Some(client_id) = header_str(&headers, "client-id") else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Ok(uuid) = Uuid::parse_str(client_id) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let Some(token) = bearer_token(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    match state.devices.verify(uuid, token).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(client_id, "gateway rejected unbound or invalid token");
             return StatusCode::UNAUTHORIZED.into_response();
-        };
-        let Ok(uuid) = Uuid::parse_str(client_id) else {
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
-        let Some(token) = bearer_token(&headers) else {
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
-        match devices.verify(uuid, token).await {
-            Ok(true) => {}
-            Ok(false) => {
-                warn!(client_id, "gateway rejected unbound or invalid token");
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-            Err(err) => {
-                warn!(%err, "gateway token verification failed");
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
+        }
+        Err(err) => {
+            warn!(%err, "gateway token verification failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
 

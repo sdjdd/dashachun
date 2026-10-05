@@ -22,7 +22,6 @@ pub struct DeviceConfig {
 #[derive(Clone, Debug)]
 pub struct OtaConfig {
     pub websocket_url: Option<String>,
-    pub token: String,
     pub timezone_offset: i32,
 }
 
@@ -61,7 +60,6 @@ impl OtaConfig {
     pub fn from_env() -> Self {
         Self {
             websocket_url: env::var("OTA_WEBSOCKET_URL").ok(),
-            token: env_or("OTA_TOKEN", "test-token"),
             timezone_offset: env_or("OTA_TIMEZONE_OFFSET", "480").parse().unwrap_or(480),
         }
     }

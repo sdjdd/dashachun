@@ -8,6 +8,7 @@ use xiaozhi_server_rs::asr::volc::VolcAsr;
 use xiaozhi_server_rs::asr::{Asr, StubAsr};
 use xiaozhi_server_rs::auth::state::AuthState;
 use xiaozhi_server_rs::config::{AppConfig, AuthConfig};
+use xiaozhi_server_rs::device::DeviceStore;
 use xiaozhi_server_rs::llm::{Llm, OpenAiConfig, OpenAiLlm};
 use xiaozhi_server_rs::state::ServerState;
 use xiaozhi_server_rs::tts::Tts;
@@ -65,8 +66,8 @@ async fn main() {
         vad,
         tools,
     });
-    let auth = Some(build_auth_state().await);
-    let state = ServerState::new(config, agent);
+    let auth = build_auth_state().await;
+    let state = ServerState::new(config, agent, DeviceStore::new(auth.pool.clone()));
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = xiaozhi_server_rs::app(state, auth);
