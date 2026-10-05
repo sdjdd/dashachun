@@ -12,9 +12,9 @@ use crate::error::AppError;
 
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/devices", get(list_devices))
-        .route("/api/devices/activate", post(activate_device))
-        .route("/api/devices/{client_id}", delete(unbind_device))
+        .route("/", get(list_devices))
+        .route("/activate", post(activate_device))
+        .route("/{client_id}", delete(unbind_device))
 }
 
 async fn activate_device(

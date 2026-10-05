@@ -11,11 +11,11 @@ use crate::error::AppError;
 
 pub fn routes() -> Router<AuthState> {
     Router::new()
-        .route("/api/auth/register", post(register))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/logout", post(logout))
-        .route("/api/auth/change-password", post(change_password))
-        .route("/api/auth/me", get(me))
+        .route("/register", post(register))
+        .route("/login", post(login))
+        .route("/logout", post(logout))
+        .route("/change-password", post(change_password))
+        .route("/me", get(me))
 }
 
 async fn register(

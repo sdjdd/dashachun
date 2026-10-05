@@ -14,8 +14,8 @@ use crate::{
 
 pub fn routes() -> Router<ServerState> {
     Router::new()
-        .route("/api/ota", post(handle_ota))
-        .route("/api/ota/activate", post(handle_activate))
+        .route("/", post(handle_ota))
+        .route("/activate", post(handle_activate))
 }
 
 async fn handle_ota(

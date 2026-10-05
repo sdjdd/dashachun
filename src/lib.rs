@@ -33,13 +33,13 @@ pub fn app(server: ServerState, auth: Option<AuthState>) -> NormalizePath<Router
 
     let mut router = Router::new()
         .route("/", get(async || "Hello, world!"))
-        .merge(routes::gateway::routes())
-        .merge(routes::ota::routes())
+        .nest("/gateway", routes::gateway::routes())
+        .nest("/api/ota", routes::ota::routes())
         .with_state(server);
 
     if let Some(auth) = auth {
-        router = router.merge(routes::auth::routes().with_state(auth.clone()));
-        router = router.merge(routes::devices::routes().with_state(auth));
+        router = router.nest("/api/auth", routes::auth::routes().with_state(auth.clone()));
+        router = router.nest("/api/devices", routes::devices::routes().with_state(auth));
     }
 
     NormalizePathLayer::trim_trailing_slash().layer(router)

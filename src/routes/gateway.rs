@@ -11,7 +11,7 @@ use crate::gateway::Gateway;
 use crate::state::ServerState;
 
 pub fn routes() -> Router<ServerState> {
-    Router::new().route("/gateway", get(handle_device_connect))
+    Router::new().route("/", get(handle_device_connect))
 }
 
 async fn handle_device_connect(
