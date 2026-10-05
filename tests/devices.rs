@@ -6,10 +6,10 @@ use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use xiaozhi_server_rs::auth::state::AuthState;
-use xiaozhi_server_rs::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
-use xiaozhi_server_rs::device::DeviceStore;
-use xiaozhi_server_rs::state::ServerState;
+use dashachun::auth::state::AuthState;
+use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
+use dashachun::device::DeviceStore;
+use dashachun::state::ServerState;
 
 const CLIENT_ID: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -44,14 +44,14 @@ fn server_state(pool: PgPool) -> ServerState {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(xiaozhi_server_rs::agent::CompositeAgent {
-            asr: Arc::new(xiaozhi_server_rs::asr::StubAsr::default()),
+        Arc::new(dashachun::agent::CompositeAgent {
+            asr: Arc::new(dashachun::asr::StubAsr::default()),
             llm: None,
             tts: None,
-            vad: Arc::new(xiaozhi_server_rs::vad::SileroVadFactory::new(
-                xiaozhi_server_rs::vad::VadConfig::default(),
+            vad: Arc::new(dashachun::vad::SileroVadFactory::new(
+                dashachun::vad::VadConfig::default(),
             )),
-            tools: Arc::new(xiaozhi_server_rs::agent::ToolRegistry::new(Vec::new())),
+            tools: Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
         }),
         DeviceStore::new(pool),
     )
@@ -59,7 +59,7 @@ fn server_state(pool: PgPool) -> ServerState {
 
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
     let auth = auth_state(pool.clone());
-    xiaozhi_server_rs::app(server_state(pool), auth)
+    dashachun::app(server_state(pool), auth)
 }
 
 fn ota_request() -> Request<Body> {
@@ -217,8 +217,8 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     let shutdown_rx = state.shutdown_signal();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let served = xiaozhi_server_rs::app(state, auth_state(pool.clone()));
-    let server = tokio::spawn(xiaozhi_server_rs::serve(
+    let served = dashachun::app(state, auth_state(pool.clone()));
+    let server = tokio::spawn(dashachun::serve(
         listener,
         served,
         shutdown_rx,

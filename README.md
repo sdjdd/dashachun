@@ -1,4 +1,6 @@
-# xiaozhi-server-rs
+# dashachun
+
+> 大傻春，你要干什么！
 
 A Rust reimplementation of the server for [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32), a voice-assistant firmware for ESP32 devices.
 

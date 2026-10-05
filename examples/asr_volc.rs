@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use dashachun::asr::volc::VolcAsr;
+use dashachun::asr::{Asr, AsrEvent, AudioStream};
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
-use xiaozhi_server_rs::asr::volc::VolcAsr;
-use xiaozhi_server_rs::asr::{Asr, AsrEvent, AudioStream};
 
 const CHUNK_SAMPLES: usize = 960;
 const CHUNK_INTERVAL: Duration = Duration::from_millis(60);

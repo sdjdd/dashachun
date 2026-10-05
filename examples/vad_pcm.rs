@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use dashachun::audio::AudioStream;
+use dashachun::vad::{SileroVadFactory, VadConfig, VadEvent, VadFactory, segment};
 use futures_util::StreamExt;
-use xiaozhi_server_rs::audio::AudioStream;
-use xiaozhi_server_rs::vad::{SileroVadFactory, VadConfig, VadEvent, VadFactory, segment};
 
 const FRAME_SAMPLES: usize = 960;
 

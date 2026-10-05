@@ -6,13 +6,13 @@ use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use xiaozhi_server_rs::agent::{Agent, CompositeAgent, ToolRegistry};
-use xiaozhi_server_rs::asr::StubAsr;
-use xiaozhi_server_rs::auth::state::AuthState;
-use xiaozhi_server_rs::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
-use xiaozhi_server_rs::device::DeviceStore;
-use xiaozhi_server_rs::state::ServerState;
-use xiaozhi_server_rs::vad::{SileroVadFactory, VadConfig};
+use dashachun::agent::{Agent, CompositeAgent, ToolRegistry};
+use dashachun::asr::StubAsr;
+use dashachun::auth::state::AuthState;
+use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
+use dashachun::device::DeviceStore;
+use dashachun::state::ServerState;
+use dashachun::vad::{SileroVadFactory, VadConfig};
 
 const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
@@ -55,7 +55,7 @@ fn state_with_url(pool: PgPool, websocket_url: Option<String>) -> ServerState {
 
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
     let auth = auth_state(pool.clone());
-    xiaozhi_server_rs::app(
+    dashachun::app(
         state_with_url(pool, Some("ws://configured/gateway".into())),
         auth,
     )
@@ -105,7 +105,7 @@ async fn ota_uses_configured_websocket_url(pool: PgPool) {
 async fn ota_derives_websocket_url_from_host(pool: PgPool) {
     let auth = auth_state(pool.clone());
     let state = state_with_url(pool, None);
-    let res = xiaozhi_server_rs::app(state, auth)
+    let res = dashachun::app(state, auth)
         .oneshot(ota_request("/api/ota"))
         .await
         .unwrap();
@@ -163,12 +163,12 @@ async fn shutdown_closes_websocket_and_serve_returns(pool: PgPool) {
     let state = state_with_url(pool, None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
-    let app = xiaozhi_server_rs::app(state, auth);
+    let app = dashachun::app(state, auth);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let grace = std::time::Duration::from_secs(5);
-    let server = tokio::spawn(xiaozhi_server_rs::serve(listener, app, shutdown_rx, grace));
+    let server = tokio::spawn(dashachun::serve(listener, app, shutdown_rx, grace));
 
     let mut request =
         tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!(

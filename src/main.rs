@@ -1,19 +1,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use xiaozhi_server_rs::agent::{
-    Agent, CompositeAgent, ToolRegistry, tool::GetWeather, tool::SetEmotion,
-};
-use xiaozhi_server_rs::asr::volc::VolcAsr;
-use xiaozhi_server_rs::asr::{Asr, StubAsr};
-use xiaozhi_server_rs::auth::state::AuthState;
-use xiaozhi_server_rs::config::{AppConfig, AuthConfig};
-use xiaozhi_server_rs::device::DeviceStore;
-use xiaozhi_server_rs::llm::{Llm, OpenAiConfig, OpenAiLlm};
-use xiaozhi_server_rs::state::ServerState;
-use xiaozhi_server_rs::tts::Tts;
-use xiaozhi_server_rs::tts::volc::VolcTts;
-use xiaozhi_server_rs::vad::SileroVadFactory;
+use dashachun::agent::{Agent, CompositeAgent, ToolRegistry, tool::GetWeather, tool::SetEmotion};
+use dashachun::asr::volc::VolcAsr;
+use dashachun::asr::{Asr, StubAsr};
+use dashachun::auth::state::AuthState;
+use dashachun::config::{AppConfig, AuthConfig};
+use dashachun::device::DeviceStore;
+use dashachun::llm::{Llm, OpenAiConfig, OpenAiLlm};
+use dashachun::state::ServerState;
+use dashachun::tts::Tts;
+use dashachun::tts::volc::VolcTts;
+use dashachun::vad::SileroVadFactory;
 
 #[tokio::main]
 async fn main() {
@@ -70,7 +68,7 @@ async fn main() {
     let state = ServerState::new(config, agent, DeviceStore::new(auth.pool.clone()));
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
-    let app = xiaozhi_server_rs::app(state, auth);
+    let app = dashachun::app(state, auth);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     tracing::info!("listening on {bind_addr}");
@@ -84,7 +82,7 @@ async fn main() {
         std::process::exit(0);
     });
 
-    xiaozhi_server_rs::serve(listener, app, shutdown_rx, grace).await;
+    dashachun::serve(listener, app, shutdown_rx, grace).await;
     tracing::info!("server stopped");
 }
 

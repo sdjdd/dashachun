@@ -4,10 +4,10 @@ use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use xiaozhi_server_rs::auth::state::AuthState;
-use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
-use xiaozhi_server_rs::device::DeviceStore;
-use xiaozhi_server_rs::state::ServerState;
+use dashachun::auth::state::AuthState;
+use dashachun::config::{AppConfig, OtaConfig, ServerConfig};
+use dashachun::device::DeviceStore;
+use dashachun::state::ServerState;
 
 use std::sync::Arc;
 
@@ -38,18 +38,18 @@ fn server_state(pool: PgPool) -> ServerState {
                 websocket_url: None,
                 timezone_offset: 480,
             },
-            device: xiaozhi_server_rs::config::DeviceConfig {
+            device: dashachun::config::DeviceConfig {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(xiaozhi_server_rs::agent::CompositeAgent {
-            asr: Arc::new(xiaozhi_server_rs::asr::StubAsr::default()),
+        Arc::new(dashachun::agent::CompositeAgent {
+            asr: Arc::new(dashachun::asr::StubAsr::default()),
             llm: None,
             tts: None,
-            vad: Arc::new(xiaozhi_server_rs::vad::SileroVadFactory::new(
-                xiaozhi_server_rs::vad::VadConfig::default(),
+            vad: Arc::new(dashachun::vad::SileroVadFactory::new(
+                dashachun::vad::VadConfig::default(),
             )),
-            tools: Arc::new(xiaozhi_server_rs::agent::ToolRegistry::new(Vec::new())),
+            tools: Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
         }),
         DeviceStore::new(pool),
     )
@@ -57,7 +57,7 @@ fn server_state(pool: PgPool) -> ServerState {
 
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
     let auth = auth_state(pool.clone());
-    xiaozhi_server_rs::app(server_state(pool), auth)
+    dashachun::app(server_state(pool), auth)
 }
 
 fn post(path: &str, body: &str) -> Request<Body> {

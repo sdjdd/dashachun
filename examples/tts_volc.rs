@@ -1,9 +1,9 @@
 use std::time::Instant;
 
+use dashachun::tts::volc::VolcTts;
+use dashachun::tts::{TextStream, Tts, TtsEvent};
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
-use xiaozhi_server_rs::tts::volc::VolcTts;
-use xiaozhi_server_rs::tts::{TextStream, Tts, TtsEvent};
 
 fn text_stream(text: String) -> TextStream {
     let chunks = text.chars().map(|c| c.to_string()).collect::<Vec<_>>();
