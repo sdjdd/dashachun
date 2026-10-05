@@ -15,6 +15,7 @@ pub mod config;
 pub mod dto;
 pub mod error;
 pub mod extract;
+pub mod gateway;
 pub mod llm;
 pub mod routes;
 pub mod state;
