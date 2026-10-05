@@ -8,15 +8,15 @@ use crate::{
     dto::ota::{Firmware, OtaRequest, OtaResponse, ServerTime, Websocket},
     error::AppError,
     extract::{ClientId, DeviceId},
-    state::AppState,
+    state::ServerState,
 };
 
-pub fn routes() -> Router<AppState> {
+pub fn routes() -> Router<ServerState> {
     Router::new().route("/api/ota", post(handle_ota))
 }
 
 async fn handle_ota(
-    State(state): State<AppState>,
+    State(state): State<ServerState>,
     DeviceId(device_id): DeviceId,
     ClientId(client_id): ClientId,
     headers: HeaderMap,

@@ -8,19 +8,19 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, trace};
 
-use crate::state::AppState;
+use crate::state::ServerState;
 
 use session::Session;
 
 const WRITER_CHANNEL_CAPACITY: usize = 32;
 
 pub struct Gateway {
-    state: AppState,
+    state: ServerState,
     shutdown: watch::Receiver<bool>,
 }
 
 impl Gateway {
-    pub fn new(state: AppState, shutdown: watch::Receiver<bool>) -> Self {
+    pub fn new(state: ServerState, shutdown: watch::Receiver<bool>) -> Self {
         Self { state, shutdown }
     }
 

@@ -1,0 +1,50 @@
+### Health check
+GET http://localhost:3000/
+
+### Register (201, sets session cookie). Duplicate username -> 409
+# @name register
+POST http://localhost:3000/api/auth/register
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "password123"
+}
+
+### Login (200, sets session cookie). Wrong password / unknown user -> 401
+# @name login
+POST http://localhost:3000/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "password123"
+}
+
+### Me (200). Uses the cookie jar populated by login above.
+GET http://localhost:3000/api/auth/me
+
+### Change password (204). Revokes every other session.
+POST http://localhost:3000/api/auth/change-password
+Content-Type: application/json
+
+{
+  "current_password": "password123",
+  "new_password": "newpassword1"
+}
+
+### Login with the new password (200, refreshes the cookie).
+# @name login2
+POST http://localhost:3000/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "newpassword1"
+}
+
+### Logout (204, clears the cookie).
+POST http://localhost:3000/api/auth/logout
+
+### Me after logout (401).
+GET http://localhost:3000/api/auth/me

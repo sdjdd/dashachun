@@ -7,15 +7,15 @@ use axum::routing::get;
 use tracing::info;
 
 use crate::gateway::Gateway;
-use crate::state::AppState;
+use crate::state::ServerState;
 
-pub fn routes() -> Router<AppState> {
+pub fn routes() -> Router<ServerState> {
     Router::new().route("/gateway", get(handle_device_connect))
 }
 
 async fn handle_device_connect(
     ws: WebSocketUpgrade,
-    State(state): State<AppState>,
+    State(state): State<ServerState>,
     headers: HeaderMap,
 ) -> Response {
     info!(

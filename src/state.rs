@@ -6,14 +6,14 @@ use crate::agent::Agent;
 use crate::config::AppConfig;
 
 #[derive(Clone)]
-pub struct AppState {
+pub struct ServerState {
     pub config: AppConfig,
     pub agent: Arc<dyn Agent>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
-impl AppState {
+impl ServerState {
     pub fn new(config: AppConfig, agent: Arc<dyn Agent>) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {

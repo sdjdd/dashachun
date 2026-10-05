@@ -6,11 +6,13 @@ use tokio::sync::watch;
 use tower::Layer;
 use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
 
-use crate::state::AppState;
+use crate::auth::state::AuthState;
+use crate::state::ServerState;
 
 pub mod agent;
 pub mod asr;
 pub mod audio;
+pub mod auth;
 pub mod config;
 pub mod dto;
 pub mod error;
@@ -22,12 +24,16 @@ pub mod state;
 pub mod tts;
 pub mod vad;
 
-pub fn app(state: AppState) -> NormalizePath<Router> {
-    let router = Router::new()
+pub fn app(server: ServerState, auth: Option<AuthState>) -> NormalizePath<Router> {
+    let mut router = Router::new()
         .route("/", get(async || "Hello, world!"))
         .merge(routes::gateway::routes())
         .merge(routes::ota::routes())
-        .with_state(state);
+        .with_state(server);
+
+    if let Some(auth) = auth {
+        router = router.merge(routes::auth::routes().with_state(auth));
+    }
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
 }

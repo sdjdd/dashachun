@@ -7,15 +7,15 @@ use tower::ServiceExt;
 use xiaozhi_server_rs::agent::{Agent, CompositeAgent, ToolRegistry};
 use xiaozhi_server_rs::asr::StubAsr;
 use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
-use xiaozhi_server_rs::state::AppState;
+use xiaozhi_server_rs::state::ServerState;
 use xiaozhi_server_rs::vad::{SileroVadFactory, VadConfig};
 
-fn state() -> AppState {
+fn state() -> ServerState {
     state_with_url(Some("ws://configured/gateway".into()))
 }
 
-fn state_with_url(websocket_url: Option<String>) -> AppState {
-    AppState::new(
+fn state_with_url(websocket_url: Option<String>) -> ServerState {
+    ServerState::new(
         AppConfig {
             server: ServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
@@ -54,7 +54,7 @@ fn ota_request(uri: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn root_returns_ok() {
-    let res = xiaozhi_server_rs::app(state())
+    let res = xiaozhi_server_rs::app(state(), None)
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -63,7 +63,7 @@ async fn root_returns_ok() {
 
 #[tokio::test]
 async fn ota_uses_configured_websocket_url() {
-    let res = xiaozhi_server_rs::app(state())
+    let res = xiaozhi_server_rs::app(state(), None)
         .oneshot(ota_request("/api/ota"))
         .await
         .unwrap();
@@ -79,7 +79,7 @@ async fn ota_uses_configured_websocket_url() {
 
 #[tokio::test]
 async fn ota_derives_websocket_url_from_host() {
-    let res = xiaozhi_server_rs::app(state_with_url(None))
+    let res = xiaozhi_server_rs::app(state_with_url(None), None)
         .oneshot(ota_request("/api/ota"))
         .await
         .unwrap();
@@ -92,7 +92,7 @@ async fn ota_derives_websocket_url_from_host() {
 
 #[tokio::test]
 async fn ota_trailing_slash_is_normalized() {
-    let res = xiaozhi_server_rs::app(state())
+    let res = xiaozhi_server_rs::app(state(), None)
         .oneshot(ota_request("/api/ota/"))
         .await
         .unwrap();
@@ -107,13 +107,16 @@ async fn ota_missing_headers_is_bad_request() {
         .header("content-type", "application/json")
         .body(Body::from("{}"))
         .unwrap();
-    let res = xiaozhi_server_rs::app(state()).oneshot(req).await.unwrap();
+    let res = xiaozhi_server_rs::app(state(), None)
+        .oneshot(req)
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn unknown_route_is_not_found() {
-    let res = xiaozhi_server_rs::app(state())
+    let res = xiaozhi_server_rs::app(state(), None)
         .oneshot(
             Request::builder()
                 .uri("/does-not-exist")
@@ -133,7 +136,7 @@ async fn shutdown_closes_websocket_and_serve_returns() {
     let state = state_with_url(None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
-    let app = xiaozhi_server_rs::app(state);
+    let app = xiaozhi_server_rs::app(state, None);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
