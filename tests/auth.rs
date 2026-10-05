@@ -38,6 +38,9 @@ fn server_state() -> ServerState {
                 token: "test-token".into(),
                 timezone_offset: 480,
             },
+            device: xiaozhi_server_rs::config::DeviceConfig {
+                activation_ttl_secs: 600,
+            },
         },
         Arc::new(xiaozhi_server_rs::agent::CompositeAgent {
             asr: Arc::new(xiaozhi_server_rs::asr::StubAsr::default()),

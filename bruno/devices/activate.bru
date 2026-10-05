@@ -1,0 +1,37 @@
+meta {
+  name: bind device by code
+  type: http
+  seq: 2
+}
+
+docs {
+  # Bind a device
+
+  `POST /api/devices/activate` — bind a device to the logged-in user by its
+  activation code.
+
+  - Body: `{ code }` (6 digits). Requires a session cookie (`register`/`login`).
+  - `200` + the device; `404` if the code is missing or expired; `409` if already
+    bound. Fill `activationCode` in the environment (or run `ota` first).
+}
+
+post {
+  url: {{baseUrl}}/api/devices/activate
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "code": "{{activationCode}}"
+  }
+}
+
+tests {
+  test("status is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("binds the device", function() {
+    expect(res.getBody().client_id).to.equal(bru.getVar("clientId"));
+  });
+}

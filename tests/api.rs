@@ -6,7 +6,7 @@ use tower::ServiceExt;
 
 use xiaozhi_server_rs::agent::{Agent, CompositeAgent, ToolRegistry};
 use xiaozhi_server_rs::asr::StubAsr;
-use xiaozhi_server_rs::config::{AppConfig, OtaConfig, ServerConfig};
+use xiaozhi_server_rs::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
 use xiaozhi_server_rs::state::ServerState;
 use xiaozhi_server_rs::vad::{SileroVadFactory, VadConfig};
 
@@ -26,6 +26,9 @@ fn state_with_url(websocket_url: Option<String>) -> ServerState {
                 websocket_url,
                 token: "test-token".into(),
                 timezone_offset: 480,
+            },
+            device: DeviceConfig {
+                activation_ttl_secs: 600,
             },
         },
         Arc::new(CompositeAgent {
@@ -75,6 +78,7 @@ async fn ota_uses_configured_websocket_url() {
     assert_eq!(v["websocket"]["token"], "test-token");
     assert_eq!(v["server_time"]["timezone_offset"], 480);
     assert_eq!(v["firmware"]["version"], "1.0.0");
+    assert!(v.get("activation").is_none());
 }
 
 #[tokio::test]

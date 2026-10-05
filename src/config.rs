@@ -4,6 +4,7 @@ use std::env;
 pub struct AppConfig {
     pub server: ServerConfig,
     pub ota: OtaConfig,
+    pub device: DeviceConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -11,6 +12,11 @@ pub struct ServerConfig {
     pub bind_addr: String,
     pub playback_prebuffer_ms: u32,
     pub shutdown_grace_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeviceConfig {
+    pub activation_ttl_secs: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -34,6 +40,7 @@ impl AppConfig {
         Self {
             server: ServerConfig::from_env(),
             ota: OtaConfig::from_env(),
+            device: DeviceConfig::from_env(),
         }
     }
 }
@@ -56,6 +63,16 @@ impl OtaConfig {
             websocket_url: env::var("OTA_WEBSOCKET_URL").ok(),
             token: env_or("OTA_TOKEN", "test-token"),
             timezone_offset: env_or("OTA_TIMEZONE_OFFSET", "480").parse().unwrap_or(480),
+        }
+    }
+}
+
+impl DeviceConfig {
+    pub fn from_env() -> Self {
+        Self {
+            activation_ttl_secs: env_or("DEVICE_ACTIVATION_TTL_SECS", "600")
+                .parse()
+                .unwrap_or(600),
         }
     }
 }

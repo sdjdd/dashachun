@@ -1,0 +1,16 @@
+meta {
+  name: devices
+}
+
+docs {
+  # Device activation & binding
+
+  End-to-end flow for pairing a XiaoZhi device with an account.
+
+  Run order (`seq`): `ota` → `activate` → `list` → `unbind`.
+  - `ota` simulates the device's first contact and captures the activation code.
+  - `activate` binds that code to the logged-in user (needs an `auth` session).
+  - `list` shows the user's devices; `unbind` releases one.
+
+  `clientId` is a board UUID set in the environment.
+}

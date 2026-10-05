@@ -1,7 +1,17 @@
 meta {
-  name: register
+  name: register (auto login)
   type: http
   seq: 2
+}
+
+docs {
+  # Register
+
+  `POST /api/auth/register` — create an account and auto-log in.
+
+  - Body: `{ username, password }` (username `^[A-Za-z0-9_-]{3,32}$`, password 8–128 chars).
+  - `201` + signed session cookie; `409` if the username is taken.
+  - A random `username` is generated pre-request so re-runs don't collide.
 }
 
 post {

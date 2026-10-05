@@ -4,6 +4,15 @@ meta {
   seq: 3
 }
 
+docs {
+  # Login
+
+  `POST /api/auth/login` — authenticate and start a session.
+
+  - Body: `{ username, password }`.
+  - `200` + signed session cookie; `401` for unknown user or wrong password.
+}
+
 post {
   url: {{baseUrl}}/api/auth/login
   body: json

@@ -4,6 +4,14 @@ meta {
   seq: 6
 }
 
+docs {
+  # Logout
+
+  `POST /api/auth/logout` — delete the current session and clear the cookie.
+
+  `204` on success; `401` when not logged in.
+}
+
 post {
   url: {{baseUrl}}/api/auth/logout
   body: none

@@ -1,7 +1,16 @@
 meta {
-  name: me
+  name: me (current user)
   type: http
   seq: 4
+}
+
+docs {
+  # Current user
+
+  `GET /api/auth/me` — return `{ id, username }` for the session cookie.
+
+  `401` when the cookie is missing or the session has expired.
+  Uses the cookie jar populated by `register` / `login`.
 }
 
 get {

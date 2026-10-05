@@ -1,7 +1,13 @@
 meta {
-  name: health
+  name: health check
   type: http
   seq: 1
+}
+
+docs {
+  # Health check
+
+  `GET /` — liveness probe. Returns `200` when the server is up.
 }
 
 get {

@@ -1,0 +1,26 @@
+meta {
+  name: list my devices
+  type: http
+  seq: 3
+}
+
+docs {
+  # List devices
+
+  `GET /api/devices` — the current user's bound devices.
+
+  Requires a session cookie. Each item is `{ client_id, device_id, board_type,
+  activated_at, created_at }` (no internal id, no token/activation code).
+}
+
+get {
+  url: {{baseUrl}}/api/devices
+  body: none
+  auth: none
+}
+
+tests {
+  test("status is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

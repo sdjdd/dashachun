@@ -25,6 +25,16 @@ pub struct OtaResponse {
     pub server_time: ServerTime,
     pub firmware: Firmware,
     pub websocket: Websocket,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation: Option<Activation>,
+}
+
+#[derive(Serialize)]
+pub struct Activation {
+    pub code: String,
+    pub message: String,
+    pub challenge: String,
+    pub timeout_ms: u64,
 }
 
 #[derive(Serialize)]

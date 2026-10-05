@@ -14,6 +14,7 @@ pub mod asr;
 pub mod audio;
 pub mod auth;
 pub mod config;
+pub mod device;
 pub mod dto;
 pub mod error;
 pub mod extract;
@@ -25,6 +26,11 @@ pub mod tts;
 pub mod vad;
 
 pub fn app(server: ServerState, auth: Option<AuthState>) -> NormalizePath<Router> {
+    let mut server = server;
+    if let Some(auth) = &auth {
+        server.devices = Some(crate::device::DeviceStore::new(auth.pool.clone()));
+    }
+
     let mut router = Router::new()
         .route("/", get(async || "Hello, world!"))
         .merge(routes::gateway::routes())
@@ -32,7 +38,8 @@ pub fn app(server: ServerState, auth: Option<AuthState>) -> NormalizePath<Router
         .with_state(server);
 
     if let Some(auth) = auth {
-        router = router.merge(routes::auth::routes().with_state(auth));
+        router = router.merge(routes::auth::routes().with_state(auth.clone()));
+        router = router.merge(routes::devices::routes().with_state(auth));
     }
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
