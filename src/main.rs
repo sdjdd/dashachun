@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::ServiceExt;
 use axum::body::Body;
 use axum::http::Request;
-use tracing_subscriber::EnvFilter;
 
 use xiaozhi_server_rs::agent::{Agent, CompositeAgent};
 use xiaozhi_server_rs::asr::volc::VolcAsr;
@@ -19,9 +18,7 @@ use xiaozhi_server_rs::vad::SileroVadFactory;
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let filter = filter.add_directive("ort=off".parse().expect("valid directive"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt::init();
 
     let config = AppConfig::from_env();
     let bind_addr = config.server.bind_addr.clone();
