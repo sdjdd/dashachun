@@ -1,0 +1,29 @@
+info:
+  name: register (auto login)
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: '{{baseUrl}}/api/auth/register'
+  body:
+    type: json
+    data: |-
+      {
+        "username": "{{username}}",
+        "password": "{{password}}"
+      }
+
+runtime:
+  scripts:
+    - type: before-request
+      code: |-
+        bru.setVar("username", "u" + Math.random().toString(36).slice(2, 12));
+    - type: tests
+      code: |-
+        test("status is 201", function() {
+          expect(res.status).to.equal(201);
+        });
+        test("returns the username", function() {
+          expect(res.body.username).to.equal(bru.getVar("username"));
+        });

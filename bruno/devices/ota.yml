@@ -1,0 +1,33 @@
+info:
+  name: ota check (first contact)
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: '{{baseUrl}}/api/ota'
+  headers:
+    - name: Device-Id
+      value: aa:bb:cc:dd:ee:ff
+    - name: Client-Id
+      value: '{{clientId}}'
+  body:
+    type: json
+    data: |-
+      {
+        "application": { "version": "1.0.0" },
+        "board": { "type": "test-board" }
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("status is 200", function() {
+          expect(res.status).to.equal(200);
+        });
+        test("returns an activation code", function() {
+          const code = res.body.activation.code;
+          expect(code).to.have.length(6);
+          bru.setVar("activationCode", code);
+        });

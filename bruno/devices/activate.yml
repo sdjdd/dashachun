@@ -1,0 +1,25 @@
+info:
+  name: bind device by code
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: '{{baseUrl}}/api/devices/activate'
+  body:
+    type: json
+    data: |-
+      {
+        "code": "{{activationCode}}"
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("status is 200", function() {
+          expect(res.status).to.equal(200);
+        });
+        test("binds the device", function() {
+          expect(res.body.client_id).to.equal(bru.getVar("clientId"));
+        });

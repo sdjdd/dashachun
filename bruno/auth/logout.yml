@@ -1,0 +1,16 @@
+info:
+  name: logout
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: '{{baseUrl}}/api/auth/logout'
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("status is 204", function() {
+          expect(res.status).to.equal(204);
+        });

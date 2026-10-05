@@ -1,0 +1,23 @@
+info:
+  name: login
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: '{{baseUrl}}/api/auth/login'
+  body:
+    type: json
+    data: |-
+      {
+        "username": "{{username}}",
+        "password": "{{password}}"
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("status is 200", function() {
+          expect(res.status).to.equal(200);
+        });
