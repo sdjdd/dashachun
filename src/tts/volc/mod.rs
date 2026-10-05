@@ -257,14 +257,6 @@ async fn run(
                             return Ok(());
                         }
                     }
-                    protocol::EVENT_TTS_SENTENCE_START | protocol::EVENT_TTS_SENTENCE_END => {
-                        if let Some(text) = sentence_text(&message)
-                            && !text.is_empty()
-                            && tx.send(Ok(TtsEvent::SentenceStart { text })).is_err()
-                        {
-                            return Ok(());
-                        }
-                    }
                     protocol::EVENT_TTS_SUBTITLE => {
                         if let Some(subtitle) = subtitle(&message)
                             && tx.send(Ok(TtsEvent::Subtitle(subtitle))).is_err()
@@ -330,15 +322,6 @@ where
             Some(Ok(_)) => {}
         }
     }
-}
-
-fn sentence_text(message: &TtsMessage) -> Option<String> {
-    let json = message.json()?;
-    json.get("res_params")
-        .and_then(|params| params.get("text"))
-        .or_else(|| json.get("text"))?
-        .as_str()
-        .map(str::to_string)
 }
 
 fn subtitle(message: &TtsMessage) -> Option<Subtitle> {
@@ -419,28 +402,6 @@ mod tests {
             payload: payload.as_bytes().to_vec(),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn sentence_text_prefers_res_params() {
-        assert_eq!(
-            sentence_text(&message(r#"{"res_params":{"text":"你好"}}"#)),
-            Some("你好".to_string())
-        );
-    }
-
-    #[test]
-    fn sentence_text_falls_back_to_top_level() {
-        assert_eq!(
-            sentence_text(&message(
-                r#"{"phonemes":[],"text":"好，我是小智。","words":[]}"#
-            )),
-            Some("好，我是小智。".to_string())
-        );
-        assert_eq!(
-            sentence_text(&message(r#"{"phonemes":[],"text":"","words":[]}"#)),
-            Some(String::new())
-        );
     }
 
     #[test]
