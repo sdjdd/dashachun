@@ -111,8 +111,7 @@ async fn drive(
             item = input.next() => {
                 let Some(item) = item else { break };
                 match item {
-                    AgentInput::ListenStart { mode } => {
-                        info!(session_id = %session.id, mode = ?mode, "listen start");
+                    AgentInput::ListenStart { .. } => {
                         cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
                         vad = match vad_factory.build(session.sample_rate) {
                             Ok(vad) => Some(vad),
@@ -165,7 +164,6 @@ async fn drive(
                         }
                     }
                     AgentInput::Mcp(payload) => {
-                        debug!(session_id = %session.id, %payload, "mcp message");
                         if out_tx.send(AgentOutput::Mcp(payload)).await.is_err() {
                             break;
                         }
@@ -183,7 +181,6 @@ async fn drive(
                 }
                 match message {
                     AsrMessage::Partial { text, .. } => {
-                        debug!(session_id = %session.id, %text, "asr partial");
                         if out_tx
                             .send(AgentOutput::Stt {
                                 text,
@@ -485,8 +482,7 @@ fn handle_vad_events(
                     trace!(session_id, "asr input full, dropping frame");
                 }
             }
-            VadEvent::SpeechEnd { at_ms } => {
-                info!(session_id, at_ms, "speech end");
+            VadEvent::SpeechEnd { .. } => {
                 if let Some(current) = utterance.take() {
                     current.detach();
                 }

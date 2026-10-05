@@ -191,7 +191,6 @@ async fn run(
         }
     }
 
-    info!("llm stream ended");
     let _ = tx.send(Ok(LlmEvent::Done));
     Ok(())
 }

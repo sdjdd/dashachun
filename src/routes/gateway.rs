@@ -245,7 +245,6 @@ impl Session {
         match listen.state.as_str() {
             "start" => {
                 self.send_agent(AgentInput::ListenStart { mode: listen.mode });
-                info!(session_id, "device started listening");
             }
             "detect" => {
                 info!(session_id, text = ?listen.text, "wake word detected");
@@ -318,9 +317,7 @@ async fn run_agent(
         match item {
             AgentOutput::Stt { text, is_final } => {
                 if is_final {
-                    info!(%text, "stt final");
-                } else {
-                    debug!(%text, "stt partial");
+                    debug!(%text, "stt final");
                 }
                 send_json(&tx, &SttMessage::new(session_id.clone(), text)).await;
             }
@@ -363,9 +360,7 @@ async fn run_agent(
                     }
                 }
             }
-            AgentOutput::Mcp(payload) => {
-                debug!(%payload, "agent mcp output");
-            }
+            AgentOutput::Mcp(_) => {}
             AgentOutput::Error { message } => {
                 warn!(%message, "agent error");
             }

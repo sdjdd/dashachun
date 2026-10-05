@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 mod protocol;
 
@@ -116,7 +116,7 @@ impl VolcTts {
         .map_err(|_| TtsError::from("connect timeout"))?
         .map_err(|err| TtsError::from(format!("connect failed: {err}")))?;
 
-        info!("tts websocket connected");
+        debug!("tts websocket connected");
         Ok(socket)
     }
 }
@@ -176,6 +176,7 @@ async fn run(
             result?;
         }
     }
+    debug!("tts connection started");
 
     let mut first = None;
     while first.is_none() {
@@ -222,6 +223,7 @@ async fn run(
             result?;
         }
     }
+    debug!(%session_id, "tts session started");
 
     let frame = protocol::task_request(&session_id, &first);
     sink.send(Message::Binary(frame.into()))
@@ -235,6 +237,8 @@ async fn run(
     let mut text_done = false;
     let mut finish_sent = false;
     let mut canceling = false;
+    let mut chunks_sent = 1usize;
+    let mut audio_frames = 0usize;
     let mut cancel_deadline = tokio::time::Instant::now() + CANCEL_TIMEOUT;
 
     loop {
@@ -247,7 +251,6 @@ async fn run(
                 sink.send(Message::Binary(protocol::cancel_session(&session_id).into()))
                     .await
                     .map_err(|err| TtsError::from(format!("send cancel session: {err}")))?;
-                debug!(%session_id, "cancel session sent, awaiting session canceled");
             }
             _ = tokio::time::sleep_until(cancel_deadline), if canceling && !finish_sent => {
                 warn!(%session_id, "tts cancel not confirmed in time, finishing connection");
@@ -263,10 +266,12 @@ async fn run(
                         sink.send(Message::Binary(frame.into()))
                             .await
                             .map_err(|err| TtsError::from(format!("send task request: {err}")))?;
+                        chunks_sent += 1;
                     }
                     Some(_) => {}
                     None => {
                         text_done = true;
+                        debug!(%session_id, chunks = chunks_sent, "tts text stream ended, finishing session");
                         sink.send(Message::Binary(protocol::finish_session(&session_id).into()))
                             .await
                             .map_err(|err| TtsError::from(format!("send finish session: {err}")))?;
@@ -305,6 +310,7 @@ async fn run(
                             )));
                         }
                         let samples = pcm16_to_f32(message.audio());
+                        audio_frames += 1;
                         if tx.send(Ok(TtsEvent::Audio(samples))).is_err() {
                             return Ok(());
                         }
@@ -317,12 +323,12 @@ async fn run(
                         }
                     }
                     protocol::EVENT_SESSION_CANCELED => {
-                        debug!(%session_id, "session canceled confirmed, sending finish connection");
                         if canceling && !finish_sent {
                             finish_sent = true;
                             sink.send(Message::Binary(protocol::finish_connection().into()))
                                 .await
                                 .map_err(|err| TtsError::from(format!("send finish connection: {err}")))?;
+                            debug!(%session_id, "session canceled");
                         }
                     }
                     protocol::EVENT_SESSION_FINISHED => {
@@ -335,6 +341,12 @@ async fn run(
                         }
                     }
                     protocol::EVENT_CONNECTION_FINISHED => {
+                        debug!(
+                            %session_id,
+                            chunks = chunks_sent,
+                            audio_frames,
+                            "connection finished"
+                        );
                         let _ = tx.send(Ok(TtsEvent::Done));
                         return Ok(());
                     }

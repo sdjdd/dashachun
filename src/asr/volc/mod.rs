@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 mod protocol;
 
@@ -87,7 +87,7 @@ impl VolcAsr {
         .map_err(|_| AsrError::from("connect timeout"))?
         .map_err(|err| AsrError::from(format!("connect failed: {err}")))?;
 
-        info!("asr websocket connected");
+        debug!("asr websocket connected");
         Ok(socket)
     }
 }
@@ -135,6 +135,7 @@ async fn run(
 ) -> Result<(), AsrError> {
     let (mut sink, mut stream) = socket.split();
 
+    debug!("asr session started, sending config frame");
     let full_request = protocol::build_full_client_request(1, &request_payload());
     sink.send(Message::Binary(full_request.into()))
         .await
@@ -145,11 +146,12 @@ async fn run(
     let mut audio = audio;
     let mut audio_done = false;
     let mut text = String::new();
+    let mut sent_segments = 0usize;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled(), if !audio_done => {
-                info!("asr cancelled, sending final frame");
+                debug!("asr cancelled, sending final frame");
                 let last = protocol::build_audio_request(seq, &pending, true);
                 sink.send(Message::Binary(last.into()))
                     .await
@@ -171,10 +173,17 @@ async fn run(
                                 .await
                                 .map_err(|err| AsrError::from(format!("send audio: {err}")))?;
                             seq += 1;
+                            sent_segments += 1;
                         }
                     }
                     None => {
                         audio_done = true;
+                        debug!(
+                            seq,
+                            segments = sent_segments,
+                            remaining_bytes = pending.len(),
+                            "asr audio stream ended, sending last frame"
+                        );
                         let last = protocol::build_audio_request(seq, &pending, true);
                         sink.send(Message::Binary(last.into()))
                             .await
@@ -217,6 +226,12 @@ async fn run(
         }
     }
 
+    debug!(
+        seq,
+        segments = sent_segments,
+        chars = text.chars().count(),
+        "asr session closed"
+    );
     let _ = tx.send(Ok(AsrEvent::Final { text }));
     Ok(())
 }
