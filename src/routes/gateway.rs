@@ -42,14 +42,19 @@ async fn handle_device_connect(
         user_agent = header_str(&headers, "user-agent"),
         "gateway upgrade"
     );
-    ws.on_upgrade(move |socket| handle_device_socket(socket, state))
+    let shutdown = state.shutdown_signal();
+    ws.on_upgrade(move |socket| handle_device_socket(socket, state, shutdown))
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &'static str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
 
-async fn handle_device_socket(socket: WebSocket, state: AppState) {
+async fn handle_device_socket(
+    socket: WebSocket,
+    state: AppState,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     info!("device connected");
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<Message>(32);
@@ -67,33 +72,52 @@ async fn handle_device_socket(socket: WebSocket, state: AppState) {
         state.agent,
         state.config.server.playback_prebuffer_ms,
     );
-    while let Some(result) = stream.next().await {
-        let msg = match result {
-            Ok(Message::Close(_)) => break,
-            Ok(msg) => msg,
-            Err(err) => {
-                debug!(%err, "websocket stream ended");
-                break;
-            }
-        };
+    let grace = Duration::from_millis(state.config.server.shutdown_grace_ms);
+    let mut shutdown = shutdown;
 
-        match msg {
-            Message::Text(txt) => {
-                trace!(%txt, "inbound text");
-                match serde_json::from_str::<InboundMessage>(txt.as_str()) {
-                    Ok(message) => session.handle(message).await,
-                    Err(err) => warn!(%err, %txt, "invalid message"),
+    let mut shutdown_requested = false;
+    loop {
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    shutdown_requested = true;
+                    break;
                 }
             }
-            Message::Binary(data) => {
-                trace!(len = data.len(), "inbound binary");
-                session.handle_binary(&data);
+            result = stream.next() => {
+                let Some(result) = result else { break };
+                let msg = match result {
+                    Ok(Message::Close(_)) => break,
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        debug!(%err, "websocket stream ended");
+                        break;
+                    }
+                };
+
+                match msg {
+                    Message::Text(txt) => {
+                        trace!(%txt, "inbound text");
+                        match serde_json::from_str::<InboundMessage>(txt.as_str()) {
+                            Ok(message) => session.handle(message).await,
+                            Err(err) => warn!(%err, %txt, "invalid message"),
+                        }
+                    }
+                    Message::Binary(data) => {
+                        trace!(len = data.len(), "inbound binary");
+                        session.handle_binary(&data);
+                    }
+                    _ => {}
+                }
             }
-            _ => {}
         }
     }
 
-    session.shutdown();
+    session.shutdown(grace).await;
+    if shutdown_requested {
+        let _ = session.tx.send(Message::Close(None)).await;
+    }
     drop(session);
     drop(tx);
     let _ = writer.await;
@@ -108,6 +132,7 @@ struct Session {
     playback_prebuffer_ms: u32,
     agent_tx: Option<mpsc::Sender<AgentInput>>,
     agent_task: Option<JoinHandle<()>>,
+    player: Option<Player>,
 }
 
 impl Session {
@@ -120,6 +145,7 @@ impl Session {
             playback_prebuffer_ms,
             agent_tx: None,
             agent_task: None,
+            player: None,
         }
     }
 
@@ -127,7 +153,7 @@ impl Session {
         match message {
             InboundMessage::Hello(hello) => self.on_hello(hello).await,
             InboundMessage::Listen(listen) => self.on_listen(listen),
-            InboundMessage::Abort(abort) => self.on_abort(abort),
+            InboundMessage::Abort(abort) => self.on_abort(abort).await,
             InboundMessage::Mcp(mcp) => self.on_mcp(mcp),
         }
     }
@@ -203,6 +229,7 @@ impl Session {
             self.playback_prebuffer_ms,
             session_id.clone(),
         );
+        self.player = Some(player.clone());
         self.agent_task = Some(tokio::spawn(run_agent(
             output, tx, session_id, encoder, player,
         )));
@@ -230,9 +257,12 @@ impl Session {
         }
     }
 
-    fn on_abort(&mut self, abort: Abort) {
+    async fn on_abort(&mut self, abort: Abort) {
         let reason = abort.reason;
         info!(session_id = ?self.id, reason = ?reason, "abort requested");
+        if let Some(player) = self.player.as_ref() {
+            player.abort().await;
+        }
         self.send_agent(AgentInput::Interrupt { reason });
     }
 
@@ -265,9 +295,12 @@ impl Session {
         }
     }
 
-    fn shutdown(&mut self) {
+    async fn shutdown(&mut self, grace: Duration) {
         self.agent_tx = None;
-        if let Some(handle) = self.agent_task.take() {
+        if let Some(mut handle) = self.agent_task.take()
+            && tokio::time::timeout(grace, &mut handle).await.is_err()
+        {
+            warn!("agent task did not stop in time, aborting");
             handle.abort();
         }
     }
@@ -350,6 +383,14 @@ enum PlayerCommand {
 
 struct Player {
     tx: mpsc::Sender<PlayerCommand>,
+}
+
+impl Clone for Player {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+        }
+    }
 }
 
 impl Player {
@@ -717,6 +758,24 @@ mod tests {
             assert!(
                 sentence_start(&message).is_none(),
                 "subtitle should be dropped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cloned_player_handle_clears_pending_subtitle() {
+        let (tx, mut rx) = mpsc::channel::<Message>(16);
+        let player = spawn_player(tx, 50, 0, "test".into());
+        let session_handle = player.clone();
+
+        player.subtitle(10_000, "gone".into()).await;
+        session_handle.abort().await;
+
+        player.finish().await;
+        while let Ok(message) = rx.try_recv() {
+            assert!(
+                sentence_start(&message).is_none(),
+                "abort via a cloned handle must drop pending subtitles"
             );
         }
     }

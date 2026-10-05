@@ -2,6 +2,7 @@ use std::fmt;
 use std::pin::Pin;
 
 use futures_util::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 pub mod volc;
 
@@ -43,7 +44,7 @@ impl From<&str> for AsrError {
 }
 
 pub trait Asr: Send + Sync {
-    fn transcribe(&self, audio: AudioStream) -> AsrEvents<'_>;
+    fn transcribe(&self, audio: AudioStream, cancel: CancellationToken) -> AsrEvents<'_>;
 }
 
 pub struct StubAsr {
@@ -63,7 +64,7 @@ impl Default for StubAsr {
 }
 
 impl Asr for StubAsr {
-    fn transcribe(&self, audio: AudioStream) -> AsrEvents<'_> {
+    fn transcribe(&self, audio: AudioStream, _cancel: CancellationToken) -> AsrEvents<'_> {
         let text = self.text.clone();
         Box::pin(futures_util::stream::unfold(
             (audio, Some(text)),
@@ -89,7 +90,7 @@ mod tests {
     async fn stub_emits_final_after_stream_ends() {
         let asr = StubAsr::new("hello");
         let (tx, rx) = mpsc::channel(4);
-        let mut events = asr.transcribe(audio_stream(rx));
+        let mut events = asr.transcribe(audio_stream(rx), CancellationToken::new());
 
         tx.send(vec![0.0; 160]).await.unwrap();
         assert!(tx.send(vec![0.5; 160]).await.is_ok());

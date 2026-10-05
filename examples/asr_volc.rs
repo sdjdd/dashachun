@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
+use tokio_util::sync::CancellationToken;
 use xiaozhi_server_rs::asr::volc::VolcAsr;
 use xiaozhi_server_rs::asr::{Asr, AsrEvent, AudioStream};
 
@@ -84,7 +85,7 @@ async fn main() {
     };
 
     let start = Instant::now();
-    let mut events = asr.transcribe(audio_stream(samples));
+    let mut events = asr.transcribe(audio_stream(samples), CancellationToken::new());
     while let Some(event) = events.next().await {
         let elapsed = start.elapsed().as_millis();
         match event {

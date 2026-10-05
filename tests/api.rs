@@ -15,11 +15,12 @@ fn state() -> AppState {
 }
 
 fn state_with_url(websocket_url: Option<String>) -> AppState {
-    AppState {
-        config: AppConfig {
+    AppState::new(
+        AppConfig {
             server: ServerConfig {
                 bind_addr: "127.0.0.1:0".into(),
                 playback_prebuffer_ms: 180,
+                shutdown_grace_ms: 5000,
             },
             ota: OtaConfig {
                 websocket_url,
@@ -27,13 +28,13 @@ fn state_with_url(websocket_url: Option<String>) -> AppState {
                 timezone_offset: 480,
             },
         },
-        agent: Arc::new(CompositeAgent::new(
+        Arc::new(CompositeAgent::new(
             Arc::new(StubAsr::default()),
             None,
             None,
             Arc::new(SileroVadFactory::new(VadConfig::default())),
         )) as Arc<dyn Agent>,
-    }
+    )
 }
 
 fn ota_request(uri: &str) -> Request<Body> {
@@ -121,4 +122,52 @@ async fn unknown_route_is_not_found() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn shutdown_closes_websocket_and_serve_returns() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let state = state_with_url(None);
+    let shutdown_tx = state.shutdown_sender();
+    let shutdown_rx = state.shutdown_signal();
+    let app = xiaozhi_server_rs::app(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let grace = std::time::Duration::from_secs(5);
+    let server = tokio::spawn(xiaozhi_server_rs::serve(listener, app, shutdown_rx, grace));
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/gateway"))
+        .await
+        .unwrap();
+    ws.send(Message::text(
+        r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":false,"aec":false}}"#,
+    ))
+    .await
+    .unwrap();
+
+    let hello = ws.next().await.unwrap().unwrap();
+    assert!(matches!(hello, Message::Text(_)));
+
+    shutdown_tx.send(true).unwrap();
+
+    let mut closed = false;
+    while let Some(message) = ws.next().await {
+        match message {
+            Ok(Message::Close(_)) => {
+                closed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(closed, "client did not receive a close frame");
+
+    tokio::time::timeout(grace, server)
+        .await
+        .expect("serve did not return within grace")
+        .unwrap();
 }

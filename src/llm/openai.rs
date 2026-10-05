@@ -9,6 +9,7 @@ use async_openai::types::chat::{
 };
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::{ChatMessage, ChatRole, Llm, LlmError, LlmEvent, LlmEvents};
@@ -126,7 +127,7 @@ impl OpenAiLlm {
 }
 
 impl Llm for OpenAiLlm {
-    fn chat(&self, history: Vec<ChatMessage>) -> LlmEvents<'_> {
+    fn chat(&self, history: Vec<ChatMessage>, cancel: CancellationToken) -> LlmEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<LlmEvent, LlmError>>();
         let request = match self.build_request(history) {
             Ok(request) => request,
@@ -139,7 +140,7 @@ impl Llm for OpenAiLlm {
         };
         let client = self.client.clone();
         tokio::spawn(async move {
-            if let Err(err) = run(client, request, tx.clone()).await {
+            if let Err(err) = run(client, request, tx.clone(), cancel).await {
                 let _ = tx.send(Err(err));
             }
         });
@@ -153,19 +154,39 @@ async fn run(
     client: Client<OpenAIConfig>,
     request: async_openai::types::chat::CreateChatCompletionRequest,
     tx: mpsc::UnboundedSender<Result<LlmEvent, LlmError>>,
+    cancel: CancellationToken,
 ) -> Result<(), LlmError> {
-    let mut stream = tokio::time::timeout(REQUEST_TIMEOUT, client.chat().create_stream(request))
-        .await
-        .map_err(|_| LlmError::from("request timeout"))?
-        .map_err(|err| LlmError::from(format!("create chat completion: {err}")))?;
+    let chat = client.chat();
+    let create = tokio::time::timeout(REQUEST_TIMEOUT, chat.create_stream(request));
+    let mut stream = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            info!("llm cancelled before stream opened");
+            return Ok(());
+        }
+        result = create => {
+            result
+                .map_err(|_| LlmError::from("request timeout"))?
+                .map_err(|err| LlmError::from(format!("create chat completion: {err}")))?
+        }
+    };
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| LlmError::from(format!("stream failed: {err}")))?;
-        for choice in chunk.choices {
-            if let Some(text) = choice.delta.content
-                && tx.send(Ok(LlmEvent::Delta { text })).is_err()
-            {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("llm cancelled, dropping stream");
                 return Ok(());
+            }
+            chunk = stream.next() => {
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.map_err(|err| LlmError::from(format!("stream failed: {err}")))?;
+                for choice in chunk.choices {
+                    if let Some(text) = choice.delta.content
+                        && tx.send(Ok(LlmEvent::Delta { text })).is_err()
+                    {
+                        return Ok(());
+                    }
+                }
             }
         }
     }

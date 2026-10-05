@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
@@ -18,6 +20,7 @@ const LLM_CHANNEL_CAPACITY: usize = 64;
 const TTS_CHANNEL_CAPACITY: usize = 64;
 const TTS_TEXT_CHANNEL_CAPACITY: usize = 64;
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct CompositeAgent {
     asr: Arc<dyn Asr>,
@@ -110,6 +113,7 @@ async fn drive(
                 match item {
                     AgentInput::ListenStart { mode } => {
                         info!(session_id = %session.id, mode = ?mode, "listen start");
+                        cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
                         vad = match vad_factory.build(session.sample_rate) {
                             Ok(vad) => Some(vad),
                             Err(err) => {
@@ -151,6 +155,7 @@ async fn drive(
                     }
                     AgentInput::Interrupt { reason } => {
                         info!(session_id = %session.id, reason = ?reason, "interrupt");
+                        cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
                         generation += 1;
                         utterance = None;
                         completion = None;
@@ -207,7 +212,12 @@ async fn drive(
                         }
                         match llm.as_ref() {
                             Some(llm) => {
-                                synthesis = None;
+                                if let Some(current) = completion.take() {
+                                    current.cancel().await;
+                                }
+                                if let Some(current) = synthesis.take() {
+                                    current.cancel().await;
+                                }
                                 history.push(ChatMessage::user(text));
                                 completion = Some(spawn_llm(
                                     llm,
@@ -344,19 +354,49 @@ async fn drive(
         }
     }
 
-    drop(utterance.take());
-    drop(completion.take());
-    drop(synthesis.take());
+    cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
+}
+
+async fn cancel_in_flight(
+    utterance: &mut Option<Utterance>,
+    completion: &mut Option<Completion>,
+    synthesis: &mut Option<Synthesis>,
+) {
+    tokio::join!(
+        async {
+            if let Some(current) = utterance.take() {
+                current.cancel().await;
+            }
+        },
+        async {
+            if let Some(current) = completion.take() {
+                current.cancel().await;
+            }
+        },
+        async {
+            if let Some(current) = synthesis.take() {
+                current.cancel().await;
+            }
+        },
+    );
 }
 
 struct Utterance {
     tx: mpsc::Sender<Vec<f32>>,
     handle: Option<JoinHandle<()>>,
+    cancel: CancellationToken,
 }
 
 impl Utterance {
     fn detach(mut self) {
         self.handle.take();
+    }
+
+    async fn cancel(mut self) {
+        self.cancel.cancel();
+        if let Some(mut handle) = self.handle.take() {
+            stop_task(&mut handle).await;
+        }
     }
 }
 
@@ -370,6 +410,14 @@ impl Drop for Utterance {
 
 struct Completion {
     handle: JoinHandle<()>,
+    cancel: CancellationToken,
+}
+
+impl Completion {
+    async fn cancel(mut self) {
+        self.cancel.cancel();
+        stop_task(&mut self.handle).await;
+    }
 }
 
 impl Drop for Completion {
@@ -381,11 +429,19 @@ impl Drop for Completion {
 struct Synthesis {
     tx: mpsc::Sender<String>,
     handle: Option<JoinHandle<()>>,
+    cancel: CancellationToken,
 }
 
 impl Synthesis {
     fn detach(mut self) {
         self.handle.take();
+    }
+
+    async fn cancel(mut self) {
+        self.cancel.cancel();
+        if let Some(mut handle) = self.handle.take() {
+            stop_task(&mut handle).await;
+        }
     }
 }
 
@@ -394,6 +450,16 @@ impl Drop for Synthesis {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
+    }
+}
+
+async fn stop_task(handle: &mut JoinHandle<()>) {
+    if tokio::time::timeout(CANCEL_TIMEOUT, &mut *handle)
+        .await
+        .is_err()
+    {
+        warn!("provider did not cancel in time, aborting");
+        handle.abort();
     }
 }
 
@@ -441,12 +507,15 @@ fn spawn_asr(
     }));
     let asr = asr.clone();
     let asr_tx = asr_tx.clone();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
-        run_asr(asr, audio, asr_tx, session_id, generation).await;
+        run_asr(asr, audio, asr_tx, session_id, generation, task_cancel).await;
     });
     Utterance {
         tx,
         handle: Some(handle),
+        cancel,
     }
 }
 
@@ -456,8 +525,9 @@ async fn run_asr(
     asr_tx: mpsc::Sender<AsrMessage>,
     session_id: String,
     generation: u64,
+    cancel: CancellationToken,
 ) {
-    let mut events = asr.transcribe(audio);
+    let mut events = asr.transcribe(audio, cancel);
     while let Some(result) = events.next().await {
         let message = match result {
             Ok(AsrEvent::Partial { text }) => AsrMessage::Partial { generation, text },
@@ -486,10 +556,12 @@ fn spawn_llm(
 ) -> Completion {
     let llm = llm.clone();
     let llm_tx = llm_tx.clone();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
-        run_llm(llm, history, llm_tx, session_id, generation).await;
+        run_llm(llm, history, llm_tx, session_id, generation, task_cancel).await;
     });
-    Completion { handle }
+    Completion { handle, cancel }
 }
 
 async fn run_llm(
@@ -498,8 +570,9 @@ async fn run_llm(
     llm_tx: mpsc::Sender<LlmMessage>,
     session_id: String,
     generation: u64,
+    cancel: CancellationToken,
 ) {
-    let mut events = llm.chat(history);
+    let mut events = llm.chat(history, cancel);
     let mut text = String::new();
     while let Some(result) = events.next().await {
         let message = match result {
@@ -544,12 +617,15 @@ fn spawn_tts(
     }));
     let tts = tts.clone();
     let tts_tx = tts_tx.clone();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
-        run_tts(tts, text, tts_tx, session_id, generation).await;
+        run_tts(tts, text, tts_tx, session_id, generation, task_cancel).await;
     });
     Synthesis {
         tx,
         handle: Some(handle),
+        cancel,
     }
 }
 
@@ -559,8 +635,9 @@ async fn run_tts(
     tts_tx: mpsc::Sender<TtsMessage>,
     session_id: String,
     generation: u64,
+    cancel: CancellationToken,
 ) {
-    let mut events = tts.synthesize(text);
+    let mut events = tts.synthesize(text, cancel);
     while let Some(result) = events.next().await {
         let message = match result {
             Ok(TtsEvent::SentenceStart { text }) => TtsMessage::SentenceStart { generation, text },
@@ -616,7 +693,7 @@ mod tests {
     struct ScriptedTts;
 
     impl Tts for ScriptedTts {
-        fn synthesize(&self, mut text: TextStream) -> TtsEvents<'_> {
+        fn synthesize(&self, mut text: TextStream, _cancel: CancellationToken) -> TtsEvents<'_> {
             let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
             tokio::spawn(async move {
                 let mut acc = String::new();
@@ -642,9 +719,8 @@ mod tests {
         reply: String,
         calls: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
     }
-
     impl Llm for ScriptedLlm {
-        fn chat(&self, history: Vec<ChatMessage>) -> LlmEvents<'_> {
+        fn chat(&self, history: Vec<ChatMessage>, _cancel: CancellationToken) -> LlmEvents<'_> {
             self.calls.lock().unwrap().push(history);
             let text = self.reply.clone();
             Box::pin(futures_util::stream::iter([
@@ -657,7 +733,6 @@ mod tests {
     struct ScriptedVad {
         events: std::collections::VecDeque<VadEvent>,
     }
-
     impl Vad for ScriptedVad {
         fn push(&mut self, samples: &[f32]) -> Vec<VadEvent> {
             if samples.iter().any(|s| *s != 0.0) {
@@ -875,5 +950,82 @@ mod tests {
                 .any(|item| matches!(item, AgentOutput::Audio(s) if s.len() == 960))
         );
         assert!(matches!(seen.last(), Some(AgentOutput::TtsStop)));
+    }
+
+    struct CancelAwareTts {
+        cancelled: Arc<Mutex<bool>>,
+    }
+
+    impl Tts for CancelAwareTts {
+        fn synthesize(&self, _text: TextStream, cancel: CancellationToken) -> TtsEvents<'_> {
+            let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
+            let cancelled = self.cancelled.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(Ok(TtsEvent::SentenceStart { text: "hi".into() }));
+                let _ = tx.send(Ok(TtsEvent::Audio(vec![0.25; 960])));
+                cancel.cancelled().await;
+                *cancelled.lock().unwrap() = true;
+                let _ = tx.send(Ok(TtsEvent::Done));
+            });
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }))
+        }
+    }
+
+    struct HangingLlm;
+
+    impl Llm for HangingLlm {
+        fn chat(&self, _history: Vec<ChatMessage>, cancel: CancellationToken) -> LlmEvents<'_> {
+            Box::pin(futures_util::stream::unfold(false, move |delivered| {
+                let cancel = cancel.clone();
+                async move {
+                    if delivered {
+                        cancel.cancelled().await;
+                        return None;
+                    }
+                    Some((Ok(LlmEvent::Delta { text: "hi".into() }), true))
+                }
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupt_cancels_in_flight_tts_instead_of_aborting() {
+        let cancelled = Arc::new(Mutex::new(false));
+        let agent = CompositeAgent::new(
+            Arc::new(StubAsr::new("hello")),
+            Some(Arc::new(HangingLlm)),
+            Some(Arc::new(CancelAwareTts {
+                cancelled: cancelled.clone(),
+            })),
+            Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+        );
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        loop {
+            let item = output.next().await;
+            if matches!(item, Some(AgentOutput::Audio(_))) {
+                break;
+            }
+        }
+
+        tx.send(AgentInput::Interrupt { reason: None })
+            .await
+            .unwrap();
+        let item = output.next().await;
+        assert!(matches!(item, Some(AgentOutput::TtsAbort)), "got {item:?}");
+        assert!(*cancelled.lock().unwrap(), "tts was not cancelled");
     }
 }

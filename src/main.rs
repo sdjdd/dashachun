@@ -1,8 +1,5 @@
 use std::sync::Arc;
-
-use axum::ServiceExt;
-use axum::body::Body;
-use axum::http::Request;
+use std::time::Duration;
 
 use xiaozhi_server_rs::agent::{Agent, CompositeAgent};
 use xiaozhi_server_rs::asr::volc::VolcAsr;
@@ -22,6 +19,7 @@ async fn main() {
 
     let config = AppConfig::from_env();
     let bind_addr = config.server.bind_addr.clone();
+    let grace = Duration::from_millis(config.server.shutdown_grace_ms);
     let asr: Arc<dyn Asr> = match VolcAsr::from_env() {
         Some(volc) => {
             tracing::info!("using volc asr provider");
@@ -54,14 +52,46 @@ async fn main() {
         }
     };
     let agent: Arc<dyn Agent> = Arc::new(CompositeAgent::new(asr, llm, tts, vad));
-    let app = xiaozhi_server_rs::app(AppState { config, agent });
+    let state = AppState::new(config, agent);
+    let shutdown_tx = state.shutdown_sender();
+    let shutdown_rx = state.shutdown_signal();
+    let app = xiaozhi_server_rs::app(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     tracing::info!("listening on {bind_addr}");
-    axum::serve(
-        listener,
-        ServiceExt::<Request<Body>>::into_make_service(app),
-    )
-    .await
-    .unwrap();
+
+    tokio::spawn(async move {
+        shutdown_on_signal().await;
+        tracing::info!("shutdown signal received, draining");
+        let _ = shutdown_tx.send(true);
+        tokio::time::sleep(grace).await;
+        tracing::warn!("graceful shutdown timed out, forcing exit");
+        std::process::exit(0);
+    });
+
+    xiaozhi_server_rs::serve(listener, app, shutdown_rx, grace).await;
+    tracing::info!("server stopped");
+}
+
+async fn shutdown_on_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(term) => term,
+            Err(err) => {
+                tracing::warn!(%err, "failed to install sigterm handler");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

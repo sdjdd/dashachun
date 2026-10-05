@@ -10,6 +10,7 @@ pub struct AppConfig {
 pub struct ServerConfig {
     pub bind_addr: String,
     pub playback_prebuffer_ms: u32,
+    pub shutdown_grace_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +36,7 @@ impl ServerConfig {
             playback_prebuffer_ms: env_or("PLAYBACK_PREBUFFER_MS", "180")
                 .parse()
                 .unwrap_or(180),
+            shutdown_grace_ms: env_or("SHUTDOWN_GRACE_MS", "5000").parse().unwrap_or(5000),
         }
     }
 }

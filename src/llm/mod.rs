@@ -2,6 +2,7 @@ use std::fmt;
 use std::pin::Pin;
 
 use futures_util::Stream;
+use tokio_util::sync::CancellationToken;
 
 pub mod openai;
 
@@ -71,5 +72,5 @@ impl From<&str> for LlmError {
 }
 
 pub trait Llm: Send + Sync {
-    fn chat(&self, history: Vec<ChatMessage>) -> LlmEvents<'_>;
+    fn chat(&self, history: Vec<ChatMessage>, cancel: CancellationToken) -> LlmEvents<'_>;
 }

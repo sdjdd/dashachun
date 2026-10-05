@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use futures_util::StreamExt;
+use tokio_util::sync::CancellationToken;
 use xiaozhi_server_rs::tts::volc::VolcTts;
 use xiaozhi_server_rs::tts::{TextStream, Tts, TtsEvent};
 
@@ -57,7 +58,7 @@ async fn main() {
 
     let start = Instant::now();
     let mut samples = Vec::new();
-    let mut events = tts.synthesize(text_stream(text));
+    let mut events = tts.synthesize(text_stream(text), CancellationToken::new());
     while let Some(event) = events.next().await {
         let elapsed = start.elapsed().as_millis();
         match event {

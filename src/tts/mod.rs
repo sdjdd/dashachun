@@ -2,6 +2,7 @@ use std::fmt;
 use std::pin::Pin;
 
 use futures_util::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 
 pub mod volc;
 
@@ -51,13 +52,13 @@ impl From<&str> for TtsError {
 }
 
 pub trait Tts: Send + Sync {
-    fn synthesize(&self, text: TextStream) -> TtsEvents<'_>;
+    fn synthesize(&self, text: TextStream, cancel: CancellationToken) -> TtsEvents<'_>;
 }
 
 pub struct StubTts;
 
 impl Tts for StubTts {
-    fn synthesize(&self, text: TextStream) -> TtsEvents<'_> {
+    fn synthesize(&self, text: TextStream, _cancel: CancellationToken) -> TtsEvents<'_> {
         Box::pin(futures_util::stream::unfold(
             (text, Vec::<TtsEvent>::new(), false),
             |(mut text, mut pending, mut drained)| async move {
@@ -97,7 +98,10 @@ mod tests {
 
     #[tokio::test]
     async fn stub_emits_sentence_then_done() {
-        let mut events = StubTts.synthesize(text_stream(vec!["hello", " world"]));
+        let mut events = StubTts.synthesize(
+            text_stream(vec!["hello", " world"]),
+            CancellationToken::new(),
+        );
         assert_eq!(
             events.next().await.unwrap().unwrap(),
             TtsEvent::SentenceStart {
@@ -110,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_emits_done_for_empty_text() {
-        let mut events = StubTts.synthesize(text_stream(vec![]));
+        let mut events = StubTts.synthesize(text_stream(vec![]), CancellationToken::new());
         assert_eq!(events.next().await.unwrap().unwrap(), TtsEvent::Done);
         assert!(events.next().await.is_none());
     }

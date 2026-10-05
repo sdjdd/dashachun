@@ -19,8 +19,10 @@ pub const EVENT_CONNECTION_STARTED: i32 = 50;
 pub const EVENT_CONNECTION_FAILED: i32 = 51;
 pub const EVENT_CONNECTION_FINISHED: i32 = 52;
 pub const EVENT_START_SESSION: i32 = 100;
+pub const EVENT_CANCEL_SESSION: i32 = 101;
 pub const EVENT_FINISH_SESSION: i32 = 102;
 pub const EVENT_SESSION_STARTED: i32 = 150;
+pub const EVENT_SESSION_CANCELED: i32 = 151;
 pub const EVENT_SESSION_FINISHED: i32 = 152;
 pub const EVENT_SESSION_FAILED: i32 = 153;
 pub const EVENT_TASK_REQUEST: i32 = 200;
@@ -106,6 +108,27 @@ pub fn task_request(session_id: &str, text: &str) -> Vec<u8> {
 
 pub fn finish_session(session_id: &str) -> Vec<u8> {
     event_frame(EVENT_FINISH_SESSION, session_id, b"{}")
+}
+
+pub fn cancel_session(session_id: &str) -> Vec<u8> {
+    event_frame(EVENT_CANCEL_SESSION, session_id, b"{}")
+}
+
+#[cfg(test)]
+pub fn server_event_frame(event: i32, session_id: &str) -> Vec<u8> {
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&header(
+        MSG_FULL_SERVER_RESPONSE,
+        FLAG_WITH_EVENT,
+        SERIALIZATION_JSON,
+        COMPRESSION_NONE,
+    ));
+    frame.extend_from_slice(&event.to_be_bytes());
+    if !is_connection_event(event) || is_connection_id_event(event) {
+        push_bytes(&mut frame, session_id.as_bytes());
+    }
+    push_bytes(&mut frame, b"{}");
+    frame
 }
 
 #[derive(Debug, Default)]
@@ -235,6 +258,23 @@ mod tests {
         assert_eq!(i32::from_be_bytes(frame[4..8].try_into().unwrap()), 200);
         let payload = serde_json::from_slice::<Value>(&frame[19..]).unwrap();
         assert_eq!(payload["req_params"]["text"], "你好");
+    }
+
+    #[test]
+    fn cancel_session_uses_event_101_with_session_id() {
+        let frame = cancel_session("abc");
+        assert_eq!(
+            i32::from_be_bytes(frame[4..8].try_into().unwrap()),
+            EVENT_CANCEL_SESSION
+        );
+        assert_eq!(&frame[8..12], &3u32.to_be_bytes());
+        assert_eq!(&frame[12..15], b"abc");
+        assert_eq!(&frame[19..], b"{}");
+    }
+
+    #[test]
+    fn session_canceled_is_event_151() {
+        assert_eq!(EVENT_SESSION_CANCELED, 151);
     }
 
     #[test]

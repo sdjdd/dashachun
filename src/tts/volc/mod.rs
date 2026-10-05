@@ -4,7 +4,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tracing::{info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 mod protocol;
 
@@ -16,6 +17,7 @@ pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
 const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 const DEFAULT_FORMAT: &str = "pcm";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
 type Connection =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -120,7 +122,7 @@ impl VolcTts {
 }
 
 impl Tts for VolcTts {
-    fn synthesize(&self, text: TextStream) -> TtsEvents<'_> {
+    fn synthesize(&self, text: TextStream, cancel: CancellationToken) -> TtsEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
         let request = self.build_request();
         let session = self.session.clone();
@@ -138,7 +140,7 @@ impl Tts for VolcTts {
                     return;
                 }
             };
-            if let Err(err) = run(socket, text, tx.clone(), session).await {
+            if let Err(err) = run(socket, text, tx.clone(), session, cancel).await {
                 let _ = tx.send(Err(err));
             }
         });
@@ -153,25 +155,39 @@ async fn run(
     mut text: TextStream,
     tx: mpsc::UnboundedSender<Result<TtsEvent, TtsError>>,
     session: SessionConfig,
+    cancel: CancellationToken,
 ) -> Result<(), TtsError> {
     let (mut sink, mut stream) = socket.split();
 
-    sink.send(Message::Binary(protocol::start_connection().into()))
+    let start_connection = async {
+        sink.send(Message::Binary(protocol::start_connection().into()))
+            .await
+            .map_err(|err| TtsError::from(format!("send start connection: {err}")))?;
+        next_matching(
+            &mut stream,
+            protocol::MSG_FULL_SERVER_RESPONSE,
+            protocol::EVENT_CONNECTION_STARTED,
+        )
         .await
-        .map_err(|err| TtsError::from(format!("send start connection: {err}")))?;
-    next_matching(
-        &mut stream,
-        protocol::MSG_FULL_SERVER_RESPONSE,
-        protocol::EVENT_CONNECTION_STARTED,
-    )
-    .await?;
+    };
+    match select_cancel(cancel.clone(), start_connection).await {
+        SelectOutcome::Cancelled => return cancel_before_session(&mut sink, &tx).await,
+        SelectOutcome::Ready(result) => {
+            result?;
+        }
+    }
 
     let mut first = None;
     while first.is_none() {
-        match text.next().await {
-            Some(chunk) if !chunk.is_empty() => first = Some(chunk),
-            Some(_) => continue,
-            None => break,
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                return cancel_before_session(&mut sink, &tx).await;
+            }
+            chunk = text.next() => match chunk {
+                Some(chunk) if !chunk.is_empty() => first = Some(chunk),
+                Some(_) => continue,
+                None => break,
+            }
         }
     }
     let Some(first) = first else {
@@ -183,27 +199,63 @@ async fn run(
     };
 
     let session_id = uuid::Uuid::new_v4().to_string();
+    if cancel.is_cancelled() {
+        return cancel_before_session(&mut sink, &tx).await;
+    }
     let frame = protocol::start_session(&session_id, &session.payload());
-    sink.send(Message::Binary(frame.into()))
+    let start_session = async {
+        sink.send(Message::Binary(frame.into()))
+            .await
+            .map_err(|err| TtsError::from(format!("send start session: {err}")))?;
+        next_matching(
+            &mut stream,
+            protocol::MSG_FULL_SERVER_RESPONSE,
+            protocol::EVENT_SESSION_STARTED,
+        )
         .await
-        .map_err(|err| TtsError::from(format!("send start session: {err}")))?;
-    next_matching(
-        &mut stream,
-        protocol::MSG_FULL_SERVER_RESPONSE,
-        protocol::EVENT_SESSION_STARTED,
-    )
-    .await?;
+    };
+    match select_cancel(cancel.clone(), start_session).await {
+        SelectOutcome::Cancelled => {
+            return cancel_session_and_finish(&mut sink, &mut stream, &tx, &session_id).await;
+        }
+        SelectOutcome::Ready(result) => {
+            result?;
+        }
+    }
 
     let frame = protocol::task_request(&session_id, &first);
     sink.send(Message::Binary(frame.into()))
         .await
         .map_err(|err| TtsError::from(format!("send first task request: {err}")))?;
 
+    if cancel.is_cancelled() {
+        return cancel_session_and_finish(&mut sink, &mut stream, &tx, &session_id).await;
+    }
+
     let mut text_done = false;
     let mut finish_sent = false;
+    let mut canceling = false;
+    let mut cancel_deadline = tokio::time::Instant::now() + CANCEL_TIMEOUT;
 
     loop {
         tokio::select! {
+            _ = cancel.cancelled(), if !text_done && !finish_sent && !canceling => {
+                debug!(%session_id, "tts cancelled, sending cancel session");
+                text_done = true;
+                canceling = true;
+                cancel_deadline = tokio::time::Instant::now() + CANCEL_TIMEOUT;
+                sink.send(Message::Binary(protocol::cancel_session(&session_id).into()))
+                    .await
+                    .map_err(|err| TtsError::from(format!("send cancel session: {err}")))?;
+                debug!(%session_id, "cancel session sent, awaiting session canceled");
+            }
+            _ = tokio::time::sleep_until(cancel_deadline), if canceling && !finish_sent => {
+                warn!(%session_id, "tts cancel not confirmed in time, finishing connection");
+                finish_sent = true;
+                sink.send(Message::Binary(protocol::finish_connection().into()))
+                    .await
+                    .map_err(|err| TtsError::from(format!("send finish connection: {err}")))?;
+            }
             chunk = text.next(), if !text_done => {
                 match chunk {
                     Some(chunk) if !chunk.is_empty() => {
@@ -264,12 +316,22 @@ async fn run(
                             return Ok(());
                         }
                     }
+                    protocol::EVENT_SESSION_CANCELED => {
+                        debug!(%session_id, "session canceled confirmed, sending finish connection");
+                        if canceling && !finish_sent {
+                            finish_sent = true;
+                            sink.send(Message::Binary(protocol::finish_connection().into()))
+                                .await
+                                .map_err(|err| TtsError::from(format!("send finish connection: {err}")))?;
+                        }
+                    }
                     protocol::EVENT_SESSION_FINISHED => {
                         if !finish_sent {
                             finish_sent = true;
                             sink.send(Message::Binary(protocol::finish_connection().into()))
                                 .await
                                 .map_err(|err| TtsError::from(format!("send finish connection: {err}")))?;
+                            debug!(%session_id, "session finished");
                         }
                     }
                     protocol::EVENT_CONNECTION_FINISHED => {
@@ -285,6 +347,94 @@ async fn run(
         }
     }
 
+    let _ = tx.send(Ok(TtsEvent::Done));
+    Ok(())
+}
+
+enum SelectOutcome<T> {
+    Ready(T),
+    Cancelled,
+}
+
+async fn select_cancel<F>(cancel: CancellationToken, future: F) -> SelectOutcome<F::Output>
+where
+    F: std::future::Future,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => SelectOutcome::Cancelled,
+        output = future => SelectOutcome::Ready(output),
+    }
+}
+
+async fn await_event<S>(stream: &mut S, event: i32) -> Result<(), TtsError>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + CANCEL_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Err(_) => return Ok(()),
+            Ok(None) | Ok(Some(Ok(Message::Close(_)))) => return Ok(()),
+            Ok(Some(Err(err))) => return Err(TtsError::from(format!("receive failed: {err}"))),
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                if let Ok(message) = protocol::parse(&data) {
+                    if message.message_type == protocol::MSG_SERVER_ERROR_RESPONSE {
+                        return Err(TtsError::from(format!(
+                            "tts error {:?}: {}",
+                            message.error_code,
+                            String::from_utf8_lossy(message.audio())
+                        )));
+                    }
+                    if message.event == event {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(Some(Ok(_))) => {}
+        }
+    }
+}
+
+async fn cancel_before_session<W>(
+    sink: &mut W,
+    tx: &mpsc::UnboundedSender<Result<TtsEvent, TtsError>>,
+) -> Result<(), TtsError>
+where
+    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    debug!("tts cancelled before session start, finishing connection");
+    sink.send(Message::Binary(protocol::finish_connection().into()))
+        .await
+        .map_err(|err| TtsError::from(format!("send finish connection: {err}")))?;
+    let _ = tx.send(Ok(TtsEvent::Done));
+    Ok(())
+}
+
+async fn cancel_session_and_finish<W, S>(
+    sink: &mut W,
+    stream: &mut S,
+    tx: &mpsc::UnboundedSender<Result<TtsEvent, TtsError>>,
+    session_id: &str,
+) -> Result<(), TtsError>
+where
+    W: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    debug!(%session_id, "tts cancelled during handshake, sending cancel session");
+    sink.send(Message::Binary(protocol::cancel_session(session_id).into()))
+        .await
+        .map_err(|err| TtsError::from(format!("send cancel session: {err}")))?;
+    if await_event(stream, protocol::EVENT_SESSION_CANCELED)
+        .await
+        .is_err()
+    {
+        warn!(%session_id, "tts cancel not confirmed in time, finishing connection");
+    }
+    sink.send(Message::Binary(protocol::finish_connection().into()))
+        .await
+        .map_err(|err| TtsError::from(format!("send finish connection: {err}")))?;
+    let _ = await_event(stream, protocol::EVENT_CONNECTION_FINISHED).await;
     let _ = tx.send(Ok(TtsEvent::Done));
     Ok(())
 }
@@ -375,6 +525,7 @@ fn pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn session_payload_has_required_fields() {
@@ -434,5 +585,145 @@ mod tests {
         assert_eq!(subtitle.text, "你好。");
         assert_eq!(subtitle.start_ms, 0);
         assert_eq!(subtitle.end_ms, 0);
+    }
+
+    fn frame_event(data: &[u8]) -> i32 {
+        i32::from_be_bytes(data[4..8].try_into().unwrap())
+    }
+
+    #[tokio::test]
+    async fn cancel_sends_cancel_then_finish_after_session_canceled() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let order = Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+        let order_server = order.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Binary(data) = message else {
+                    continue;
+                };
+                match frame_event(&data) {
+                    protocol::EVENT_START_CONNECTION => {
+                        ws.send(Message::Binary(
+                            server_event_frame(protocol::EVENT_CONNECTION_STARTED, "cid").into(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    protocol::EVENT_START_SESSION => {
+                        ws.send(Message::Binary(
+                            server_event_frame(protocol::EVENT_SESSION_STARTED, "sid").into(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    protocol::EVENT_CANCEL_SESSION => {
+                        order_server.lock().unwrap().push(101);
+                        ws.send(Message::Binary(
+                            server_event_frame(protocol::EVENT_SESSION_CANCELED, "sid").into(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    protocol::EVENT_FINISH_CONNECTION => {
+                        order_server.lock().unwrap().push(2);
+                        ws.send(Message::Binary(
+                            server_event_frame(protocol::EVENT_CONNECTION_FINISHED, "cid").into(),
+                        ))
+                        .await
+                        .unwrap();
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        fn server_event_frame(event: i32, session_id: &str) -> Vec<u8> {
+            protocol::server_event_frame(event, session_id)
+        }
+
+        let tts = VolcTts::new(
+            format!("ws://{addr}"),
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+        );
+        let (text_tx, text_rx) = mpsc::channel::<String>(4);
+        let text: TextStream =
+            Box::pin(futures_util::stream::unfold(text_rx, |mut rx| async move {
+                rx.recv().await.map(|chunk| (chunk, rx))
+            }));
+        let cancel = CancellationToken::new();
+        let mut events = tts.synthesize(text, cancel.clone());
+
+        text_tx.send("你好".to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+
+        let mut saw_done = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Ok(TtsEvent::Done)) {
+                saw_done = true;
+                break;
+            }
+        }
+        assert!(saw_done, "expected Done after cancel handshake");
+        drop(text_tx);
+        server.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![101, 2]);
+    }
+
+    #[tokio::test]
+    async fn cancel_during_connection_handshake_finishes_connection() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let order = Arc::new(std::sync::Mutex::new(Vec::<i32>::new()));
+        let order_server = order.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                let Message::Binary(data) = message else {
+                    continue;
+                };
+                if frame_event(&data) == protocol::EVENT_FINISH_CONNECTION {
+                    order_server.lock().unwrap().push(2);
+                }
+            }
+        });
+
+        let tts = VolcTts::new(
+            format!("ws://{addr}"),
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+        );
+        let (_text_tx, text_rx) = mpsc::channel::<String>(4);
+        let text: TextStream =
+            Box::pin(futures_util::stream::unfold(text_rx, |mut rx| async move {
+                rx.recv().await.map(|chunk| (chunk, rx))
+            }));
+        let cancel = CancellationToken::new();
+        let mut events = tts.synthesize(text, cancel.clone());
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+
+        let mut saw_done = false;
+        while let Some(event) = events.next().await {
+            if matches!(event, Ok(TtsEvent::Done)) {
+                saw_done = true;
+                break;
+            }
+        }
+        assert!(saw_done, "expected Done before session start");
+        server.await.unwrap();
+        assert_eq!(*order.lock().unwrap(), vec![2]);
     }
 }
