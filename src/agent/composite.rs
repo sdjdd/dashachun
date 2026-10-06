@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
-    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, ToolRegistry,
+    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession,
+    ToolRegistry, emotion,
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
 use crate::llm::{ChatItem, Llm, LlmEvent, ToolCall};
@@ -61,6 +62,10 @@ enum LlmMessage {
         generation: u64,
         text: String,
     },
+    Emotion {
+        generation: u64,
+        emotion: emotion::Emotion,
+    },
     Output {
         generation: u64,
         output: AgentOutput,
@@ -104,6 +109,8 @@ async fn drive(
     let mut synthesis: Option<Synthesis> = None;
     let mut history: Vec<ChatItem> = Vec::new();
     let mut generation: u64 = 0;
+    let mut emotion_pending = false;
+    let mut stripper = emotion::Stripper::new();
 
     loop {
         tokio::select! {
@@ -123,6 +130,7 @@ async fn drive(
                         utterance = None;
                         completion = None;
                         synthesis = None;
+                        emotion_pending = false;
                     }
                     AgentInput::ListenStop => {
                         info!(session_id = %session.id, "listen stop");
@@ -158,6 +166,7 @@ async fn drive(
                         utterance = None;
                         completion = None;
                         synthesis = None;
+                        emotion_pending = false;
                         if out_tx.send(AgentOutput::TtsAbort).await.is_err() {
                             break;
                         }
@@ -215,6 +224,8 @@ async fn drive(
                                     current.cancel().await;
                                 }
                                 history.push(ChatItem::user(text));
+                                emotion_pending = true;
+                                stripper = emotion::Stripper::new();
                                 completion = Some(spawn_llm(
                                     llm,
                                     &tools,
@@ -244,6 +255,7 @@ async fn drive(
             Some(message) = llm_rx.recv() => {
                 let current = match &message {
                     LlmMessage::Delta { generation, .. }
+                    | LlmMessage::Emotion { generation, .. }
                     | LlmMessage::Output { generation, .. }
                     | LlmMessage::Done { generation, .. }
                     | LlmMessage::Error { generation, .. } => *generation,
@@ -257,31 +269,64 @@ async fn drive(
                         if text.is_empty() {
                             continue;
                         }
-                        match synthesis.as_mut() {
-                            Some(current) => {
-                                if current.tx.try_send(text).is_err() {
-                                    trace!(session_id = %session.id, "tts input full, dropping delta");
-                                }
+                        if emotion_pending
+                            && let Some(emotion) = emotion::detect(&text)
+                        {
+                            emotion_pending = false;
+                            if out_tx
+                                .send(AgentOutput::Emotion {
+                                    emotion: emotion.to_string(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
                             }
-                            None => {
-                                if let Some(tts) = tts.as_ref() {
-                                    if out_tx.send(AgentOutput::TtsStart).await.is_err() {
-                                        break;
-                                    }
-                                    let current =
-                                        spawn_tts(tts, &tts_tx, session.id.clone(), generation);
-                                    if current.tx.try_send(text).is_err() {
-                                        trace!(session_id = %session.id, "tts input full, dropping delta");
-                                    }
-                                    synthesis = Some(current);
-                                }
-                            }
+                        }
+                        let text = stripper.push(&text);
+                        if !feed_tts(
+                            text,
+                            &mut synthesis,
+                            &tts,
+                            &tts_tx,
+                            &out_tx,
+                            &session.id,
+                            generation,
+                        )
+                        .await
+                        {
+                            break;
+                        }
+                    }
+                    LlmMessage::Emotion { emotion, .. } => {
+                        if out_tx
+                            .send(AgentOutput::Emotion {
+                                emotion: emotion.to_string(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                     LlmMessage::Done { reply, history: items, .. } => {
                         completion = None;
                         info!(session_id = %session.id, %reply, "llm result");
                         history.extend(items);
+                        let tail = stripper.finish();
+                        if !feed_tts(
+                            tail,
+                            &mut synthesis,
+                            &tts,
+                            &tts_tx,
+                            &out_tx,
+                            &session.id,
+                            generation,
+                        )
+                        .await
+                        {
+                            break;
+                        }
                         if let Some(current) = synthesis.take() {
                             current.detach();
                         }
@@ -643,6 +688,17 @@ async fn run_llm(
             return;
         }
 
+        if llm_tx
+            .send(LlmMessage::Emotion {
+                generation,
+                emotion: emotion::Emotion::Thinking,
+            })
+            .await
+            .is_err()
+        {
+            debug!(session_id, "llm output closed");
+            return;
+        }
         new_items.push(ChatItem::assistant_tool_calls(calls.clone()));
         working.push(ChatItem::assistant_tool_calls(calls.clone()));
         for call in calls {
@@ -658,6 +714,17 @@ async fn run_llm(
             }
             new_items.push(ChatItem::tool(call.id.clone(), content.clone()));
             working.push(ChatItem::tool(call.id, content));
+        }
+        if llm_tx
+            .send(LlmMessage::Emotion {
+                generation,
+                emotion: emotion::Emotion::Neutral,
+            })
+            .await
+            .is_err()
+        {
+            debug!(session_id, "llm output closed");
+            return;
         }
     }
 }
@@ -702,6 +769,40 @@ async fn execute_tool(
         "tool result"
     );
     result
+}
+
+async fn feed_tts(
+    text: String,
+    synthesis: &mut Option<Synthesis>,
+    tts: &Option<Arc<dyn Tts>>,
+    tts_tx: &mpsc::Sender<TtsMessage>,
+    out_tx: &mpsc::Sender<AgentOutput>,
+    session_id: &str,
+    generation: u64,
+) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    match synthesis.as_mut() {
+        Some(current) => {
+            if current.tx.try_send(text).is_err() {
+                trace!(session_id, "tts input full, dropping delta");
+            }
+        }
+        None => {
+            if let Some(tts) = tts.as_ref() {
+                if out_tx.send(AgentOutput::TtsStart).await.is_err() {
+                    return false;
+                }
+                let current = spawn_tts(tts, tts_tx, session_id.to_string(), generation);
+                if current.tx.try_send(text).is_err() {
+                    trace!(session_id, "tts input full, dropping delta");
+                }
+                *synthesis = Some(current);
+            }
+        }
+    }
+    true
 }
 
 fn spawn_tts(
@@ -1046,30 +1147,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_call_emits_emotion_before_reply() {
+    async fn emoji_prefix_emits_emotion_and_strips_tts_text() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
+        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
+            reply: "🙂你好呀".into(),
             calls: calls.clone(),
-            tool_calls: vec![ToolCall {
-                id: "call_1".into(),
-                name: "set_emotion".into(),
-                arguments: r#"{"emotion":"happy"}"#.into(),
-            }],
-            reply: "你好呀".into(),
         });
         let agent = CompositeAgent {
             asr: Arc::new(StubAsr::new("hello")),
             llm: Some(llm),
-            tts: None,
+            tts: Some(Arc::new(ScriptedTts)),
             vad: Arc::new(ScriptedVadFactory {
                 events: vec![
                     VadEvent::SpeechStart { at_ms: 0 },
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
-            tools: Arc::new(ToolRegistry::new(vec![Arc::new(
-                crate::agent::tool::SetEmotion,
-            )])),
+            tools: empty_tools(),
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1079,29 +1173,130 @@ mod tests {
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut emotion_pos = None;
-        let mut seen = 0usize;
+        let mut seen = Vec::new();
         while let Some(item) = output.next().await {
-            if matches!(&item, AgentOutput::Emotion { emotion } if emotion == "happy") {
-                emotion_pos = Some(seen);
+            let done = matches!(item, AgentOutput::TtsStop);
+            seen.push(item);
+            if done {
                 break;
             }
-            seen += 1;
         }
-        assert_eq!(emotion_pos, Some(1), "emotion should follow the final stt");
 
-        let rounds = wait_for_calls(&calls, 2).await;
-        assert_eq!(rounds[0], vec![ChatItem::user("hello")]);
+        let emotion_pos = seen.iter().position(
+            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "happy"),
+        );
+        let tts_start_pos = seen
+            .iter()
+            .position(|item| matches!(item, AgentOutput::TtsStart));
+        assert_eq!(emotion_pos, Some(1), "emotion should follow the final stt");
+        assert!(tts_start_pos.is_some(), "tts should start");
+        assert!(
+            emotion_pos < tts_start_pos,
+            "emotion must precede tts start"
+        );
+        assert!(
+            seen.iter()
+                .any(|item| matches!(item, AgentOutput::TtsSentence { text } if text == "你好呀")),
+            "tts text should have the emoji stripped"
+        );
+        assert!(
+            seen.iter().any(|item| matches!(
+                item,
+                AgentOutput::TtsSubtitle { subtitle } if subtitle.text == "你好呀"
+            )),
+            "subtitle should have the emoji stripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_emoji_is_stripped_but_emits_no_emotion() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
+            reply: "🦄你好".into(),
+            calls: calls.clone(),
+        });
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: Some(Arc::new(ScriptedTts)),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            tools: empty_tools(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let mut seen = Vec::new();
+        while let Some(item) = output.next().await {
+            let done = matches!(item, AgentOutput::TtsStop);
+            seen.push(item);
+            if done {
+                break;
+            }
+        }
+
+        assert!(
+            !seen
+                .iter()
+                .any(|item| matches!(item, AgentOutput::Emotion { .. })),
+            "unsupported emoji must not emit emotion"
+        );
+        assert!(
+            seen.iter()
+                .any(|item| matches!(item, AgentOutput::TtsSentence { text } if text == "你好")),
+            "unsupported emoji should still be stripped from tts text"
+        );
+    }
+
+    #[tokio::test]
+    async fn emotion_is_kept_in_history() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
+            reply: "🙂你好".into(),
+            calls: calls.clone(),
+        });
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: None,
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                    VadEvent::SpeechStart { at_ms: 200 },
+                    VadEvent::SpeechEnd { at_ms: 300 },
+                ],
+            }),
+            tools: empty_tools(),
+        };
+        let (tx, input) = input_channel();
+        let _output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+        let _ = wait_for_calls(&calls, 1).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let second = wait_for_calls(&calls, 2).await;
         assert_eq!(
-            rounds[1],
+            second[1],
             vec![
                 ChatItem::user("hello"),
-                ChatItem::assistant_tool_calls(vec![ToolCall {
-                    id: "call_1".into(),
-                    name: "set_emotion".into(),
-                    arguments: r#"{"emotion":"happy"}"#.into(),
-                }]),
-                ChatItem::tool("call_1", "emotion set to happy"),
+                ChatItem::assistant("🙂你好"),
+                ChatItem::user("hello"),
             ]
         );
     }
@@ -1150,6 +1345,120 @@ mod tests {
                 }]),
                 ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_emits_thinking_emotion() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
+            calls: calls.clone(),
+            tool_calls: vec![ToolCall {
+                id: "call_x".into(),
+                name: "nonexistent".into(),
+                arguments: "{}".into(),
+            }],
+            reply: "🙂搞定".into(),
+        });
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: Some(Arc::new(ScriptedTts)),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            tools: empty_tools(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let mut seen = Vec::new();
+        while let Some(item) = output.next().await {
+            let done = matches!(item, AgentOutput::TtsStop);
+            seen.push(item);
+            if done {
+                break;
+            }
+        }
+
+        let thinking = seen.iter().position(
+            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "thinking"),
+        );
+        assert!(
+            thinking.is_some(),
+            "tool call should emit thinking: {seen:?}"
+        );
+        let reply_emotion = seen.iter().position(
+            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "happy"),
+        );
+        assert!(
+            thinking < reply_emotion,
+            "thinking must precede the reply emotion"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_without_reply_emoji_resets_to_neutral() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
+            calls: calls.clone(),
+            tool_calls: vec![ToolCall {
+                id: "call_x".into(),
+                name: "nonexistent".into(),
+                arguments: "{}".into(),
+            }],
+            reply: "搞定了".into(),
+        });
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Some(llm),
+            tts: Some(Arc::new(ScriptedTts)),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            tools: empty_tools(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let mut seen = Vec::new();
+        while let Some(item) = output.next().await {
+            let done = matches!(item, AgentOutput::TtsStop);
+            seen.push(item);
+            if done {
+                break;
+            }
+        }
+
+        let thinking = seen.iter().position(
+            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "thinking"),
+        );
+        let neutral = seen.iter().position(
+            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "neutral"),
+        );
+        assert!(
+            thinking.is_some(),
+            "tool call should emit thinking: {seen:?}"
+        );
+        assert!(
+            thinking < neutral,
+            "reply without emoji should reset thinking to neutral: {seen:?}"
         );
     }
 

@@ -7,10 +7,8 @@ use serde_json::Value;
 use crate::agent::AgentOutput;
 use crate::llm::ToolSpec;
 
-mod emotion;
 mod weather;
 
-pub use emotion::{Emotion, SetEmotion};
 pub use weather::GetWeather;
 
 pub(crate) fn params_schema<T: JsonSchema>() -> Value {

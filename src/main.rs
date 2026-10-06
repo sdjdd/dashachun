@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashachun::agent::{Agent, CompositeAgent, ToolRegistry, tool::GetWeather, tool::SetEmotion};
+use dashachun::agent::{Agent, CompositeAgent, ToolRegistry, tool::GetWeather};
 use dashachun::asr::volc::VolcAsr;
 use dashachun::asr::{Asr, StubAsr};
 use dashachun::auth::state::AuthState;
@@ -36,7 +36,7 @@ async fn main() {
     let llm: Option<Arc<dyn Llm>> = match OpenAiConfig::from_env() {
         Some(config) => {
             tracing::info!(model = %config.model, "using openai llm provider");
-            Some(Arc::new(OpenAiLlm::new(config)))
+            Some(Arc::new(OpenAiLlm::new(config.with_prompt_prefix())))
         }
         None => {
             tracing::info!("no llm provider configured");
@@ -53,10 +53,7 @@ async fn main() {
             None
         }
     };
-    let tools = Arc::new(ToolRegistry::new(vec![
-        Arc::new(SetEmotion),
-        Arc::new(GetWeather::new()),
-    ]));
+    let tools = Arc::new(ToolRegistry::new(vec![Arc::new(GetWeather::new())]));
     let agent: Arc<dyn Agent> = Arc::new(CompositeAgent {
         asr,
         llm,

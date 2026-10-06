@@ -1,4 +1,5 @@
 mod composite;
+mod emotion;
 pub mod tool;
 
 use std::pin::Pin;

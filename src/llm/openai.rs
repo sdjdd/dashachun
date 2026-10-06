@@ -32,16 +32,31 @@ fn parse_reasoning_effort(
     }
 }
 
-const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are a helpful voice assistant. Keep replies short and conversational.";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Fixed prefix prepended to every system message, before the configurable
+/// persona prompt. Carries the TTS plain-text output rules and the
+/// single-leading-emoji directive the emotion pipeline relies on.
+pub const SYSTEM_PROMPT_PREFIX: &str = "\
+You are a voice assistant speaking through a device that reads your replies \
+aloud with text-to-speech. Reply in the user's language and keep every reply \
+short and conversational.
+
+TTS output rules:
+- Output plain text only. Never use Markdown, code blocks, or bullet points.
+- Never write stage directions, inner thoughts, or actions in brackets or \
+parentheses.
+- To express emotion, start a regular reply with exactly one emoji. Never \
+place the emoji anywhere else.
+- When calling a tool, output only the tool call with no emoji and no text.";
 
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    pub system_prompt: String,
+    pub persona_prompt: String,
+    pub prompt_prefix: String,
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<String>,
 }
@@ -51,8 +66,7 @@ impl OpenAiConfig {
         let base_url = std::env::var("LLM_BASE_URL").ok()?;
         let api_key = std::env::var("LLM_API_KEY").ok()?;
         let model = std::env::var("LLM_MODEL").ok()?;
-        let system_prompt = std::env::var("LLM_SYSTEM_PROMPT")
-            .unwrap_or_else(|_| DEFAULT_SYSTEM_PROMPT.to_string());
+        let persona_prompt = std::env::var("LLM_PERSONA_PROMPT").unwrap_or_default();
         let max_tokens = std::env::var("LLM_MAX_TOKENS")
             .or_else(|_| std::env::var("LLM_MAX_OUTPUT_TOKENS"))
             .ok()
@@ -64,10 +78,17 @@ impl OpenAiConfig {
             base_url,
             api_key,
             model,
-            system_prompt,
+            persona_prompt,
+            prompt_prefix: String::new(),
             max_tokens,
             reasoning_effort,
         })
+    }
+
+    /// Prepend the fixed TTS plain-text prefix to the persona prompt.
+    pub fn with_prompt_prefix(mut self) -> Self {
+        self.prompt_prefix = SYSTEM_PROMPT_PREFIX.to_string();
+        self
     }
 }
 
@@ -86,6 +107,20 @@ impl OpenAiLlm {
         Self { client, config }
     }
 
+    fn system_content(&self) -> String {
+        match (
+            self.config.prompt_prefix.is_empty(),
+            self.config.persona_prompt.is_empty(),
+        ) {
+            (false, false) => format!(
+                "{}\n\n<persona>\n{}\n</persona>",
+                self.config.prompt_prefix, self.config.persona_prompt
+            ),
+            (false, true) => self.config.prompt_prefix.clone(),
+            (true, _) => self.config.persona_prompt.clone(),
+        }
+    }
+
     fn build_request(
         &self,
         history: Vec<ChatItem>,
@@ -94,7 +129,7 @@ impl OpenAiLlm {
         let mut messages = Vec::with_capacity(history.len() + 1);
         messages.push(ChatCompletionRequestMessage::System(
             ChatCompletionRequestSystemMessage {
-                content: self.config.system_prompt.clone().into(),
+                content: self.system_content().into(),
                 name: None,
             },
         ));
@@ -310,7 +345,6 @@ async fn run(
 mod tests {
     use super::*;
     use async_openai::types::chat::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
-
     #[test]
     fn parses_reasoning_effort_case_insensitively() {
         assert_eq!(
@@ -322,6 +356,45 @@ mod tests {
             async_openai::types::chat::ReasoningEffort::High
         );
         assert!(parse_reasoning_effort("bogus").is_err());
+    }
+
+    fn config() -> OpenAiConfig {
+        OpenAiConfig {
+            base_url: "http://localhost".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            persona_prompt: "Be a helpful assistant.".into(),
+            prompt_prefix: String::new(),
+            max_tokens: None,
+            reasoning_effort: None,
+        }
+    }
+
+    #[test]
+    fn prompt_prefix_precedes_persona_prompt() {
+        let llm = OpenAiLlm::new(config().with_prompt_prefix());
+        let content = llm.system_content();
+        assert!(
+            content.find("TTS output rules").unwrap() < content.find("<persona>").unwrap(),
+            "prefix must precede persona prompt"
+        );
+        assert!(content.contains("Be a helpful assistant."));
+    }
+
+    #[test]
+    fn empty_prefix_uses_persona_prompt_only() {
+        let llm = OpenAiLlm::new(config());
+        assert_eq!(llm.system_content(), "Be a helpful assistant.");
+    }
+
+    #[test]
+    fn prefix_without_persona_prompt_omits_block() {
+        let mut config = config();
+        config.persona_prompt = String::new();
+        let llm = OpenAiLlm::new(config.with_prompt_prefix());
+        let content = llm.system_content();
+        assert!(!content.contains("<persona>"));
+        assert!(content.starts_with("You are a voice assistant"));
     }
 
     fn chunk(
@@ -344,25 +417,25 @@ mod tests {
     #[test]
     fn accumulates_fragmented_tool_call() {
         let mut acc = ToolCallAccumulator::default();
-        acc.push(chunk(0, Some("call_1"), Some("set_"), None));
-        acc.push(chunk(0, None, Some("emotion"), Some("{\"emo")));
-        acc.push(chunk(0, None, None, Some("tion\":\"happy\"}")));
+        acc.push(chunk(0, Some("call_1"), Some("get_"), None));
+        acc.push(chunk(0, None, Some("weather"), Some("{\"ci")));
+        acc.push(chunk(0, None, None, Some("ty\":\"beijing\"}")));
         let calls = acc.finish();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_1");
-        assert_eq!(calls[0].name, "set_emotion");
-        assert_eq!(calls[0].arguments, "{\"emotion\":\"happy\"}");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, "{\"city\":\"beijing\"}");
     }
 
     #[test]
     fn accumulates_parallel_tool_calls_by_index() {
         let mut acc = ToolCallAccumulator::default();
-        acc.push(chunk(0, Some("a"), Some("set_emotion"), Some("{}")));
+        acc.push(chunk(0, Some("a"), Some("get_weather"), Some("{}")));
         acc.push(chunk(1, Some("b"), Some("get_weather"), Some("{\"city\"")));
         acc.push(chunk(1, None, None, Some(":\"beijing\"}")));
         let calls = acc.finish();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].name, "set_emotion");
+        assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[1].name, "get_weather");
         assert_eq!(calls[1].arguments, "{\"city\":\"beijing\"}");
     }
