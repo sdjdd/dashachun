@@ -492,6 +492,7 @@ fn subtitle(message: &TtsMessage) -> Option<Subtitle> {
         .get("text")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
+        .trim()
         .to_string();
     let mut start_ms: Option<u64> = None;
     let mut end_ms = 0;
