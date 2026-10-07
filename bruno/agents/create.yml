@@ -1,0 +1,28 @@
+info:
+  name: create agent
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: '{{baseUrl}}/api/agents'
+  body:
+    type: json
+    data: |-
+      {
+        "name": "{{agentName}}",
+        "persona_prompt": "你是一个测试助手"
+      }
+
+runtime:
+  scripts:
+    - type: tests
+      code: |-
+        test("status is 201", function() {
+          expect(res.status).to.equal(201);
+        });
+        test("returns the agent", function() {
+          expect(res.body.name).to.equal(bru.getEnvVar("agentName"));
+          expect(res.body.id).to.be.a("number");
+          bru.setVar("agentId", res.body.id);
+        });

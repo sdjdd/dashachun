@@ -16,6 +16,7 @@ pub struct AgentRecord {
     pub user_id: i64,
     pub name: String,
     pub persona_prompt: String,
+    pub created_at: time::OffsetDateTime,
 }
 
 impl AgentStore {
@@ -25,12 +26,37 @@ impl AgentStore {
 
     pub async fn find(&self, agent_id: i64) -> Result<Option<AgentRecord>, AppError> {
         let record = sqlx::query_as::<_, AgentRecord>(
-            "SELECT id, user_id, name, persona_prompt FROM agents WHERE id = $1",
+            "SELECT id, user_id, name, persona_prompt, created_at FROM agents WHERE id = $1",
         )
         .bind(agent_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(record)
+    }
+
+    pub async fn create(
+        &self,
+        user_id: i64,
+        name: &str,
+        persona_prompt: &str,
+    ) -> Result<AgentRecord, AppError> {
+        let record = sqlx::query_as::<_, AgentRecord>(
+            "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, $2, $3) \
+             RETURNING id, user_id, name, persona_prompt, created_at",
+        )
+        .bind(user_id)
+        .bind(name)
+        .bind(persona_prompt)
+        .fetch_one(&self.pool)
+        .await;
+
+        match record {
+            Ok(record) => Ok(record),
+            Err(sqlx::Error::Database(err)) if err.code().as_deref() == Some("23505") => {
+                Err(AppError::Conflict("agent name already taken".into()))
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     pub async fn owns(&self, agent_id: i64, user_id: i64) -> Result<bool, AppError> {

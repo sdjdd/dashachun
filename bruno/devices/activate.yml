@@ -10,7 +10,8 @@ http:
     type: json
     data: |-
       {
-        "code": "{{activationCode}}"
+        "code": "{{activationCode}}",
+        "agent_id": {{agentId}}
       }
 
 runtime:
@@ -22,4 +23,8 @@ runtime:
         });
         test("binds the device", function() {
           expect(res.body.client_id).to.equal(bru.getVar("clientId"));
+        });
+        test("binds the agent", function() {
+          const expected = bru.getVar("agentId") ?? bru.getEnvVar("agentId");
+          expect(res.body.agent_id).to.equal(Number(expected));
         });

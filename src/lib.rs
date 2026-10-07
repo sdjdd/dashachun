@@ -32,6 +32,10 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         .nest("/api/ota", routes::ota::routes())
         .with_state(server)
         .nest("/api/auth", routes::auth::routes().with_state(auth.clone()))
+        .nest(
+            "/api/agents",
+            routes::agents::routes().with_state(auth.clone()),
+        )
         .nest("/api/devices", routes::devices::routes().with_state(auth));
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
