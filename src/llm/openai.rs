@@ -33,6 +33,7 @@ fn parse_reasoning_effort(
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
@@ -193,7 +194,7 @@ impl Llm for OpenAiLlm {
         };
         let client = self.client.clone();
         tokio::spawn(async move {
-            if let Err(err) = run(client, request, tx.clone(), cancel).await {
+            if let Err(err) = run(client, request, tx.clone(), cancel, IDLE_TIMEOUT).await {
                 let _ = tx.send(Err(err));
             }
         });
@@ -250,6 +251,7 @@ async fn run(
     request: async_openai::types::chat::CreateChatCompletionRequest,
     tx: mpsc::UnboundedSender<Result<LlmEvent, LlmError>>,
     cancel: CancellationToken,
+    idle_timeout: Duration,
 ) -> Result<(), LlmError> {
     let chat = client.chat();
     let create = tokio::time::timeout(REQUEST_TIMEOUT, chat.create_stream(request));
@@ -273,8 +275,12 @@ async fn run(
                 info!("llm cancelled, dropping stream");
                 return Ok(());
             }
-            chunk = stream.next() => {
-                let Some(chunk) = chunk else { break };
+            chunk = tokio::time::timeout(idle_timeout, stream.next()) => {
+                let Some(chunk) = chunk
+                    .map_err(|_| LlmError::from(format!("stream idle timeout after {idle_timeout:?}")))?
+                else {
+                    break;
+                };
                 let chunk = chunk.map_err(|err| LlmError::from(format!("stream failed: {err}")))?;
                 for choice in chunk.choices {
                     if let Some(text) = choice.delta.content
@@ -394,5 +400,84 @@ mod tests {
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[1].name, "get_weather");
         assert_eq!(calls[1].arguments, "{\"city\":\"beijing\"}");
+    }
+
+    #[tokio::test]
+    async fn idle_stream_errors_after_timeout() {
+        use axum::response::sse::{Event, Sse};
+
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "hi"},
+                    "finish_reason": null
+                }
+            ]
+        });
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move || {
+                let event = Event::default().data(chunk.to_string());
+                async move {
+                    Sse::new(
+                        futures_util::stream::once(async move {
+                            Ok::<_, std::convert::Infallible>(event)
+                        })
+                        .chain(futures_util::stream::pending()),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = Client::with_config(
+            OpenAIConfig::new()
+                .with_api_base(format!("http://{addr}/v1"))
+                .with_api_key("k"),
+        );
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("m")
+            .messages(vec![ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage {
+                    content: "hi".to_string().into(),
+                    name: None,
+                },
+            )])
+            .build()
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run(
+            client,
+            request,
+            tx,
+            CancellationToken::new(),
+            Duration::from_millis(200),
+        ));
+
+        let first = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first,
+            LlmEvent::Delta {
+                text: "hi".to_string()
+            }
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        let message = outcome.unwrap_err().to_string();
+        assert!(message.contains("idle"), "unexpected error: {message}");
     }
 }
