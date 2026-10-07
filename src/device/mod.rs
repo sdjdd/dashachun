@@ -151,17 +151,16 @@ impl DeviceStore {
         code: &str,
         agent_id: i64,
     ) -> Result<BindOutcome, AppError> {
-        let agents = AgentStore::new(self.pool.clone());
-        if !agents.owns(agent_id, user_id).await? {
-            return Ok(BindOutcome::UnknownAgent);
-        }
-
         let updated = sqlx::query_as::<_, DeviceRecord>(&format!(
             "UPDATE devices \
                 SET user_id = $1, agent_id = $3, activated_at = now(), \
                     activation_code = NULL, activation_code_expires_at = NULL \
               WHERE activation_code = $2 AND user_id IS NULL \
                 AND activation_code_expires_at > now() \
+                AND EXISTS (\
+                    SELECT 1 FROM agents \
+                     WHERE agents.id = $3 AND agents.user_id = $1\
+                ) \
               RETURNING {DEVICE_COLUMNS}"
         ))
         .bind(user_id)
@@ -173,6 +172,10 @@ impl DeviceStore {
             return Ok(BindOutcome::Bound(record));
         }
 
+        let agents = AgentStore::new(self.pool.clone());
+        if !agents.owns(agent_id, user_id).await? {
+            return Ok(BindOutcome::UnknownAgent);
+        }
         let taken = sqlx::query_scalar::<_, bool>(
             "SELECT user_id IS NOT NULL FROM devices WHERE activation_code = $1",
         )

@@ -391,3 +391,39 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test]
+#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgPool) {
+    let app = app(pool.clone());
+    let code = {
+        let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+        body["activation"]["code"].as_str().unwrap().to_owned()
+    };
+
+    let (owner, owner_id) = register(&app, &pool).await;
+    let owner_agent = create_agent(&pool, owner_id).await;
+    let (other, _) = register(&app, &pool).await;
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/api/devices/activate",
+            &format!(r#"{{"code":"{code}","agent_id":{owner_agent}}}"#),
+            Some(other),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/api/devices/activate",
+            &format!(r#"{{"code":"{code}","agent_id":{owner_agent}}}"#),
+            Some(owner),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
