@@ -43,6 +43,9 @@ impl From<&str> for AsrError {
     }
 }
 
+/// Streaming speech recognition. Implementations must keep consuming the
+/// audio stream even while nobody polls the event stream, since the agent
+/// applies backpressure on the audio channel while draining events.
 pub trait Asr: Send + Sync {
     fn transcribe(&self, audio: AudioStream, cancel: CancellationToken) -> AsrEvents<'_>;
 }

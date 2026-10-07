@@ -106,6 +106,7 @@ async fn drive(
     let mut generation: u64 = 0;
     let mut emotion_pending = false;
     let mut stripper = emotion::Stripper::new();
+    let mut speaking = false;
 
     loop {
         tokio::select! {
@@ -113,7 +114,17 @@ async fn drive(
                 let Some(item) = item else { break };
                 match item {
                     AgentInput::ListenStart { .. } => {
-                        cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
+                        if cancel_in_flight(
+                            &mut utterance,
+                            &mut completion,
+                            &mut synthesis,
+                            &mut speaking,
+                        )
+                        .await
+                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        {
+                            break;
+                        }
                         vad = match agent.vad.build(session.sample_rate) {
                             Ok(vad) => Some(vad),
                             Err(err) => {
@@ -138,7 +149,8 @@ async fn drive(
                                 &asr_tx,
                                 &mut generation,
                                 &mut utterance,
-                            );
+                            )
+                            .await;
                         }
                         utterance = None;
                     }
@@ -152,11 +164,18 @@ async fn drive(
                             &asr_tx,
                             &mut generation,
                             &mut utterance,
-                        );
+                        )
+                        .await;
                     }
                     AgentInput::Interrupt { reason } => {
                         info!(session_id = %session.id, reason = ?reason, "interrupt");
-                        cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
+                        cancel_in_flight(
+                            &mut utterance,
+                            &mut completion,
+                            &mut synthesis,
+                            &mut speaking,
+                        )
+                        .await;
                         generation += 1;
                         utterance = None;
                         completion = None;
@@ -216,6 +235,12 @@ async fn drive(
                         if let Some(current) = synthesis.take() {
                             current.cancel().await;
                         }
+                        if speaking
+                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        {
+                            break;
+                        }
+                        speaking = false;
                         history.push(ChatItem::user(text));
                         emotion_pending = true;
                         stripper = emotion::Stripper::new();
@@ -272,6 +297,7 @@ async fn drive(
                         if !feed_tts(
                             text,
                             &mut synthesis,
+                            &mut speaking,
                             &agent.tts,
                             &tts_tx,
                             &out_tx,
@@ -302,6 +328,7 @@ async fn drive(
                         if !feed_tts(
                             tail,
                             &mut synthesis,
+                            &mut speaking,
                             &agent.tts,
                             &tts_tx,
                             &out_tx,
@@ -367,12 +394,14 @@ async fn drive(
                     }
                     TtsMessage::Done { .. } => {
                         synthesis = None;
+                        speaking = false;
                         if out_tx.send(AgentOutput::TtsStop).await.is_err() {
                             break;
                         }
                     }
                     TtsMessage::Error { message, .. } => {
                         synthesis = None;
+                        speaking = false;
                         warn!(session_id = %session.id, %message, "tts failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err()
                             || out_tx.send(AgentOutput::TtsAbort).await.is_err()
@@ -385,14 +414,23 @@ async fn drive(
         }
     }
 
-    cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
+    cancel_in_flight(
+        &mut utterance,
+        &mut completion,
+        &mut synthesis,
+        &mut speaking,
+    )
+    .await;
 }
 
+/// Cancels every in-flight stage and reports whether a spoken reply was still
+/// playing, so the caller can tell the gateway to drop its buffered playback.
 async fn cancel_in_flight(
     utterance: &mut Option<Utterance>,
     completion: &mut Option<Completion>,
     synthesis: &mut Option<Synthesis>,
-) {
+    speaking: &mut bool,
+) -> bool {
     tokio::join!(
         async {
             if let Some(current) = utterance.take() {
@@ -410,6 +448,7 @@ async fn cancel_in_flight(
             }
         },
     );
+    std::mem::take(speaking)
 }
 
 struct Utterance {
@@ -494,7 +533,7 @@ async fn stop_task(handle: &mut JoinHandle<()>) {
     }
 }
 
-fn handle_vad_events(
+async fn handle_vad_events(
     events: Vec<VadEvent>,
     session_id: &str,
     asr: &Arc<dyn Asr>,
@@ -511,9 +550,9 @@ fn handle_vad_events(
             }
             VadEvent::Speech { samples } => {
                 if let Some(current) = utterance.as_ref()
-                    && current.tx.try_send(samples).is_err()
+                    && current.tx.send(samples).await.is_err()
                 {
-                    trace!(session_id, "asr input full, dropping frame");
+                    debug!(session_id, "asr input closed, dropping frame");
                 }
             }
             VadEvent::SpeechEnd { .. } => {
@@ -765,9 +804,11 @@ async fn execute_tool(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn feed_tts(
     text: String,
     synthesis: &mut Option<Synthesis>,
+    speaking: &mut bool,
     tts: &Arc<dyn Tts>,
     tts_tx: &mpsc::Sender<TtsMessage>,
     out_tx: &mpsc::Sender<AgentOutput>,
@@ -779,8 +820,8 @@ async fn feed_tts(
     }
     match synthesis.as_mut() {
         Some(current) => {
-            if current.tx.try_send(text).is_err() {
-                trace!(session_id, "tts input full, dropping delta");
+            if current.tx.send(text).await.is_err() {
+                debug!(session_id, "tts input closed, dropping delta");
             }
         }
         None => {
@@ -788,10 +829,11 @@ async fn feed_tts(
                 return false;
             }
             let current = spawn_tts(tts, tts_tx, session_id.to_string(), generation);
-            if current.tx.try_send(text).is_err() {
-                trace!(session_id, "tts input full, dropping delta");
+            if current.tx.send(text).await.is_err() {
+                debug!(session_id, "tts input closed, dropping delta");
             }
             *synthesis = Some(current);
+            *speaking = true;
         }
     }
     true
@@ -865,7 +907,7 @@ async fn run_tts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asr::StubAsr;
+    use crate::asr::{AsrError, AsrEvents, StubAsr};
     use crate::llm::{LlmEvents, StubLlm};
     use crate::tts::{StubTts, Tts, TtsError, TtsEvent, TtsEvents};
     use crate::vad::{Vad, VadError, VadEvent};
@@ -1066,6 +1108,280 @@ mod tests {
 
         let item = output.next().await;
         assert!(matches!(item, Some(AgentOutput::TtsAbort)), "got {item:?}");
+    }
+
+    /// Holds the synthesis open (never emits `Done`) until cancelled, so a
+    /// reply is still "speaking" when the next input arrives.
+    struct HeldTts;
+
+    impl Tts for HeldTts {
+        fn synthesize(&self, mut text: TextStream, cancel: CancellationToken) -> TtsEvents<'_> {
+            let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
+            tokio::spawn(async move {
+                while let Some(chunk) = text.next().await {
+                    if !chunk.is_empty() {
+                        let _ = tx.send(Ok(TtsEvent::Audio(vec![0.25; 960])));
+                        break;
+                    }
+                }
+                cancel.cancelled().await;
+            });
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn new_utterance_final_aborts_in_flight_tts() {
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            tts: Arc::new(HeldTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                    VadEvent::SpeechStart { at_ms: 200 },
+                    VadEvent::SpeechEnd { at_ms: 300 },
+                ],
+            }),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::TtsStart) {
+                break;
+            }
+        }
+
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let mut aborted = false;
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::TtsAbort) {
+                aborted = true;
+                break;
+            }
+        }
+        assert!(aborted, "second final must abort the in-flight reply");
+    }
+
+    /// Emits `SpeechStart` + `Speech` on every push and `SpeechEnd` on flush,
+    /// so one utterance spans any number of audio chunks.
+    struct StreamVad {
+        started: bool,
+    }
+
+    impl Vad for StreamVad {
+        fn push(&mut self, samples: &[f32]) -> Vec<VadEvent> {
+            let mut events = Vec::new();
+            if !self.started {
+                self.started = true;
+                events.push(VadEvent::SpeechStart { at_ms: 0 });
+            }
+            events.push(VadEvent::Speech {
+                samples: samples.to_vec(),
+            });
+            events
+        }
+
+        fn flush(&mut self) -> Vec<VadEvent> {
+            self.started = false;
+            vec![VadEvent::SpeechEnd { at_ms: 0 }]
+        }
+    }
+
+    struct StreamVadFactory;
+
+    impl VadFactory for StreamVadFactory {
+        fn build(&self, _sample_rate: u32) -> Result<Box<dyn Vad>, VadError> {
+            Ok(Box::new(StreamVad { started: false }))
+        }
+    }
+
+    /// Consumes audio slower than the driver produces it and records the
+    /// chunks it actually received.
+    struct SlowAsr {
+        delay: Duration,
+        chunks: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Asr for SlowAsr {
+        fn transcribe(&self, audio: AudioStream, _cancel: CancellationToken) -> AsrEvents<'_> {
+            let delay = self.delay;
+            let chunks = self.chunks.clone();
+            let (tx, rx) = mpsc::unbounded_channel::<Result<AsrEvent, AsrError>>();
+            tokio::spawn(async move {
+                let mut audio = audio;
+                while let Some(samples) = audio.next().await {
+                    tokio::time::sleep(delay).await;
+                    chunks.lock().unwrap().push(samples.len());
+                    let _ = tx.send(Ok(AsrEvent::Partial {
+                        text: String::new(),
+                    }));
+                }
+                let _ = tx.send(Ok(AsrEvent::Final {
+                    text: "done".to_string(),
+                }));
+            });
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }))
+        }
+    }
+
+    /// Splits the reply into one delta per char.
+    struct ChunkedLlm {
+        reply: String,
+    }
+
+    impl Llm for ChunkedLlm {
+        fn chat(
+            &self,
+            _history: Vec<ChatItem>,
+            _tools: Vec<crate::llm::ToolSpec>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            let events = self
+                .reply
+                .chars()
+                .map(|c| {
+                    Ok(LlmEvent::Delta {
+                        text: c.to_string(),
+                    })
+                })
+                .chain(std::iter::once(Ok(LlmEvent::Done)))
+                .collect::<Vec<_>>();
+            Box::pin(futures_util::stream::iter(events))
+        }
+    }
+
+    /// Consumes text slower than the driver produces it.
+    struct SlowTts {
+        delay: Duration,
+    }
+
+    impl Tts for SlowTts {
+        fn synthesize(&self, mut text: TextStream, _cancel: CancellationToken) -> TtsEvents<'_> {
+            let delay = self.delay;
+            let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
+            tokio::spawn(async move {
+                let mut acc = String::new();
+                while let Some(chunk) = text.next().await {
+                    tokio::time::sleep(delay).await;
+                    acc.push_str(&chunk);
+                }
+                let _ = tx.send(Ok(TtsEvent::SentenceStart { text: acc }));
+                let _ = tx.send(Ok(TtsEvent::Done));
+            });
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_tts_receives_every_delta() {
+        let reply = "字".repeat(200);
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(ChunkedLlm {
+                reply: reply.clone(),
+            }),
+            tts: Arc::new(SlowTts {
+                delay: Duration::from_millis(1),
+            }),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut sentence = None;
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if let AgentOutput::TtsSentence { text } = item {
+                sentence = Some(text);
+                break;
+            }
+        }
+        assert_eq!(sentence.as_deref(), Some(reply.as_str()));
+    }
+
+    #[tokio::test]
+    async fn slow_asr_receives_every_audio_chunk() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let agent = CompositeAgent {
+            asr: Arc::new(SlowAsr {
+                delay: Duration::from_millis(1),
+                chunks: chunks.clone(),
+            }),
+            llm: Arc::new(StubLlm::default()),
+            tts: Arc::new(StubTts),
+            vad: Arc::new(StreamVadFactory),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        for _ in 0..80 {
+            tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+        }
+        tx.send(AgentInput::ListenStop).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let item = tokio::time::timeout_at(deadline, output.next())
+                .await
+                .ok()
+                .flatten();
+            match item {
+                Some(AgentOutput::Stt { is_final: true, .. }) => break,
+                Some(_) => continue,
+                None => panic!("asr never produced a final transcription"),
+            }
+        }
+        assert_eq!(chunks.lock().unwrap().len(), 80);
     }
 
     async fn wait_for_calls(

@@ -82,7 +82,7 @@ impl Gateway {
                         }
                         Message::Binary(data) => {
                             trace!(len = data.len(), "inbound binary");
-                            session.handle_binary(&data);
+                            session.handle_binary(&data).await;
                         }
 
                         _ => {}

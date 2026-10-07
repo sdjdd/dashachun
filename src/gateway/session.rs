@@ -58,9 +58,9 @@ impl Session {
     async fn handle(&mut self, message: InboundMessage) {
         match message {
             InboundMessage::Hello(hello) => self.on_hello(hello).await,
-            InboundMessage::Listen(listen) => self.on_listen(listen),
+            InboundMessage::Listen(listen) => self.on_listen(listen).await,
             InboundMessage::Abort(abort) => self.on_abort(abort).await,
-            InboundMessage::Mcp(mcp) => self.on_mcp(mcp),
+            InboundMessage::Mcp(mcp) => self.on_mcp(mcp).await,
         }
     }
 
@@ -138,7 +138,7 @@ impl Session {
         self.agent_tx = Some(agent_tx);
     }
 
-    fn on_listen(&mut self, listen: Listen) {
+    async fn on_listen(&mut self, listen: Listen) {
         let Some(session_id) = self.id.clone() else {
             warn!("listen message before hello, ignoring");
             return;
@@ -146,13 +146,14 @@ impl Session {
 
         match listen.state.as_str() {
             "start" => {
-                self.send_agent(AgentInput::ListenStart { mode: listen.mode });
+                self.send_agent(AgentInput::ListenStart { mode: listen.mode })
+                    .await;
             }
             "detect" => {
                 info!(session_id, text = ?listen.text, "wake word detected");
             }
             "stop" => {
-                self.send_agent(AgentInput::ListenStop);
+                self.send_agent(AgentInput::ListenStop).await;
             }
             other => warn!(%other, "unknown listen state"),
         }
@@ -164,15 +165,15 @@ impl Session {
         if let Some(player) = self.player.as_ref() {
             player.abort().await;
         }
-        self.send_agent(AgentInput::Interrupt { reason });
+        self.send_agent(AgentInput::Interrupt { reason }).await;
     }
 
-    fn on_mcp(&mut self, mcp: Mcp) {
+    async fn on_mcp(&mut self, mcp: Mcp) {
         debug!(session_id = ?self.id, payload = %mcp.payload, "mcp message");
-        self.send_agent(AgentInput::Mcp(mcp.payload));
+        self.send_agent(AgentInput::Mcp(mcp.payload)).await;
     }
 
-    pub(super) fn handle_binary(&mut self, data: &[u8]) {
+    pub(super) async fn handle_binary(&mut self, data: &[u8]) {
         let Some(decoder) = self.decoder.as_mut() else {
             debug!(len = data.len(), "binary frame before decoder ready");
             return;
@@ -185,14 +186,15 @@ impl Session {
             }
         };
         tracing::trace!(samples = samples.len(), "decoded opus frame");
-        self.send_agent(AgentInput::Audio(samples));
+        self.send_agent(AgentInput::Audio(samples)).await;
     }
 
-    fn send_agent(&self, input: AgentInput) {
-        if let Some(tx) = self.agent_tx.as_ref()
-            && tx.try_send(input).is_err()
-        {
-            tracing::trace!("agent input full or closed, dropping message");
+    async fn send_agent(&mut self, input: AgentInput) {
+        let Some(tx) = self.agent_tx.clone() else {
+            return;
+        };
+        if tx.send(input).await.is_err() {
+            tracing::debug!("agent input closed, dropping message");
         }
     }
 

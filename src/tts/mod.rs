@@ -51,6 +51,9 @@ impl From<&str> for TtsError {
     }
 }
 
+/// Streaming speech synthesis. Implementations must keep consuming the text
+/// stream even while nobody polls the event stream, since the agent applies
+/// backpressure on the text channel while draining events.
 pub trait Tts: Send + Sync {
     fn synthesize(&self, text: TextStream, cancel: CancellationToken) -> TtsEvents<'_>;
 }
