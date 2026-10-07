@@ -23,6 +23,7 @@ const TTS_TEXT_CHANNEL_CAPACITY: usize = 64;
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 pub struct CompositeAgent {
     pub asr: Arc<dyn Asr>,
     pub llm: Arc<dyn Llm>,
@@ -35,28 +36,14 @@ pub struct CompositeAgent {
 impl Agent for CompositeAgent {
     fn run(&self, session: AgentSession, input: AgentInputStream) -> AgentOutputStream {
         let (out_tx, out_rx) = mpsc::channel::<AgentOutput>(OUTPUT_CHANNEL_CAPACITY);
-        let asr = self.asr.clone();
-        let llm = self.llm.clone();
-        let tts = self.tts.clone();
-        let vad_factory = self.vad.clone();
-        let tools = self.tools.clone();
-        let system_prompt = self.system_prompt.clone();
         let session_id = session.id.clone();
         info!(session_id, "agent started");
-        tokio::spawn(async move {
-            drive(
-                &session,
-                input,
-                asr,
-                llm,
-                tts,
-                vad_factory,
-                tools,
-                system_prompt,
-                out_tx,
-            )
-            .await;
-            info!(session_id, "agent stopped");
+        tokio::spawn({
+            let agent = self.clone();
+            async move {
+                drive(agent, session, input, out_tx).await;
+                info!(session_id, "agent stopped");
+            }
         });
         Box::pin(futures_util::stream::unfold(out_rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
@@ -102,16 +89,10 @@ enum TtsMessage {
     Error { generation: u64, message: String },
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn drive(
-    session: &AgentSession,
+    agent: CompositeAgent,
+    session: AgentSession,
     mut input: AgentInputStream,
-    asr: Arc<dyn Asr>,
-    llm: Arc<dyn Llm>,
-    tts: Arc<dyn Tts>,
-    vad_factory: Arc<dyn VadFactory>,
-    tools: Arc<ToolRegistry>,
-    system_prompt: SystemPrompt,
     out_tx: mpsc::Sender<AgentOutput>,
 ) {
     let mut vad: Option<Box<dyn Vad>> = None;
@@ -133,7 +114,7 @@ async fn drive(
                 match item {
                     AgentInput::ListenStart { .. } => {
                         cancel_in_flight(&mut utterance, &mut completion, &mut synthesis).await;
-                        vad = match vad_factory.build(session.sample_rate) {
+                        vad = match agent.vad.build(session.sample_rate) {
                             Ok(vad) => Some(vad),
                             Err(err) => {
                                 warn!(session_id = %session.id, %err, "failed to build vad");
@@ -153,7 +134,7 @@ async fn drive(
                             handle_vad_events(
                                 events,
                                 &session.id,
-                                &asr,
+                                &agent.asr,
                                 &asr_tx,
                                 &mut generation,
                                 &mut utterance,
@@ -167,7 +148,7 @@ async fn drive(
                         handle_vad_events(
                             events,
                             &session.id,
-                            &asr,
+                            &agent.asr,
                             &asr_tx,
                             &mut generation,
                             &mut utterance,
@@ -239,13 +220,13 @@ async fn drive(
                         emotion_pending = true;
                         stripper = emotion::Stripper::new();
                         completion = Some(spawn_llm(
-                            &llm,
-                            &tools,
+                            &agent.llm,
+                            &agent.tools,
                             &llm_tx,
                             session.id.clone(),
                             generation,
                             history.clone(),
-                            system_prompt.clone(),
+                            agent.system_prompt.clone(),
                         ));
                     }
                     AsrMessage::Error { message, .. } => {
@@ -291,7 +272,7 @@ async fn drive(
                         if !feed_tts(
                             text,
                             &mut synthesis,
-                            &tts,
+                            &agent.tts,
                             &tts_tx,
                             &out_tx,
                             &session.id,
@@ -321,7 +302,7 @@ async fn drive(
                         if !feed_tts(
                             tail,
                             &mut synthesis,
-                            &tts,
+                            &agent.tts,
                             &tts_tx,
                             &out_tx,
                             &session.id,
