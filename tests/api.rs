@@ -6,12 +6,14 @@ use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use dashachun::agent::{Agent, CompositeAgent, ToolRegistry};
+use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry};
 use dashachun::asr::StubAsr;
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
 use dashachun::device::DeviceStore;
+use dashachun::llm::StubLlm;
 use dashachun::state::ServerState;
+use dashachun::tts::StubTts;
 use dashachun::vad::{SileroVadFactory, VadConfig};
 
 const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000000";
@@ -42,13 +44,14 @@ fn state_with_url(pool: PgPool, websocket_url: Option<String>) -> ServerState {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(CompositeAgent {
-            asr: Arc::new(StubAsr::default()),
-            llm: None,
-            tts: None,
-            vad: Arc::new(SileroVadFactory::new(VadConfig::default())),
-            tools: Arc::new(ToolRegistry::new(Vec::new())),
-        }) as Arc<dyn Agent>,
+        Arc::new(AgentFactory::new(
+            Arc::new(StubAsr::default()),
+            Arc::new(StubLlm::default()),
+            Arc::new(StubTts),
+            Arc::new(SileroVadFactory::new(VadConfig::default())),
+            Arc::new(ToolRegistry::new(Vec::new())),
+            AgentStore::new(pool.clone()),
+        )),
         DeviceStore::new(pool),
     )
 }
@@ -230,12 +233,23 @@ async fn bound_device_token(pool: &PgPool) -> String {
     .await
     .unwrap();
 
-    sqlx::query("UPDATE devices SET user_id = $1, activated_at = now() WHERE client_id = $2")
-        .bind(user_id)
-        .bind(uuid)
-        .execute(pool)
-        .await
-        .unwrap();
+    let agent_id: i64 = sqlx::query_scalar(
+        "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, 'default', '') RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE devices SET user_id = $1, agent_id = $3, activated_at = now() WHERE client_id = $2",
+    )
+    .bind(user_id)
+    .bind(uuid)
+    .bind(agent_id)
+    .execute(pool)
+    .await
+    .unwrap();
 
     devices.rotate_token(uuid).await.unwrap().unwrap()
 }

@@ -8,6 +8,8 @@ use super::DeviceRecord;
 pub struct ActivateDeviceArgs {
     #[garde(pattern(r"^[0-9]{6}$"))]
     pub code: String,
+    #[garde(range(min = 1))]
+    pub agent_id: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -15,6 +17,7 @@ pub struct DeviceResponse {
     pub client_id: String,
     pub device_id: Option<String>,
     pub board_type: Option<String>,
+    pub agent_id: Option<i64>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub activated_at: Option<time::OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
@@ -27,6 +30,7 @@ impl From<DeviceRecord> for DeviceResponse {
             client_id: record.client_id.to_string(),
             device_id: record.device_id,
             board_type: record.board_type,
+            agent_id: record.agent_id,
             activated_at: record.activated_at,
             created_at: record.created_at,
         }

@@ -35,9 +35,9 @@ async fn handle_device_connect(
     let Some(token) = bearer_token(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    match state.devices.verify(uuid, token).await {
-        Ok(true) => {}
-        Ok(false) => {
+    let record = match state.devices.verify(uuid, token).await {
+        Ok(Some(record)) => record,
+        Ok(None) => {
             warn!(client_id, "gateway rejected unbound or invalid token");
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -45,10 +45,17 @@ async fn handle_device_connect(
             warn!(%err, "gateway token verification failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-    }
+    };
 
+    let agent = match state.agent_factory.build(record.agent_id).await {
+        Ok(agent) => agent,
+        Err(err) => {
+            warn!(client_id, %err, "gateway rejected: agent unavailable");
+            return err.into_response();
+        }
+    };
     let shutdown = state.shutdown_signal();
-    ws.on_upgrade(move |socket| Gateway::new(state, shutdown).run(socket))
+    ws.on_upgrade(move |socket| Gateway::new(state, agent, shutdown).run(socket))
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

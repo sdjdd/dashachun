@@ -2,25 +2,25 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use crate::agent::Agent;
+use crate::agent::AgentFactory;
 use crate::config::AppConfig;
 use crate::device::DeviceStore;
 
 #[derive(Clone)]
 pub struct ServerState {
     pub config: AppConfig,
-    pub agent: Arc<dyn Agent>,
+    pub agent_factory: Arc<AgentFactory>,
     pub devices: DeviceStore,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl ServerState {
-    pub fn new(config: AppConfig, agent: Arc<dyn Agent>, devices: DeviceStore) -> Self {
+    pub fn new(config: AppConfig, agent_factory: Arc<AgentFactory>, devices: DeviceStore) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             config,
-            agent,
+            agent_factory,
             devices,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,

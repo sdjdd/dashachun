@@ -34,29 +34,11 @@ fn parse_reasoning_effort(
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Fixed prefix prepended to every system message, before the configurable
-/// persona prompt. Carries the TTS plain-text output rules and the
-/// single-leading-emoji directive the emotion pipeline relies on.
-pub const SYSTEM_PROMPT_PREFIX: &str = "\
-You are a voice assistant speaking through a device that reads your replies \
-aloud with text-to-speech. Reply in the user's language and keep every reply \
-short and conversational.
-
-TTS output rules:
-- Output plain text only. Never use Markdown, code blocks, or bullet points.
-- Never write stage directions, inner thoughts, or actions in brackets or \
-parentheses.
-- To express emotion, start a regular reply with exactly one emoji. Never \
-place the emoji anywhere else.
-- When calling a tool, output only the tool call with no emoji and no text.";
-
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
-    pub persona_prompt: String,
-    pub prompt_prefix: String,
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<String>,
 }
@@ -66,7 +48,6 @@ impl OpenAiConfig {
         let base_url = std::env::var("LLM_BASE_URL").ok()?;
         let api_key = std::env::var("LLM_API_KEY").ok()?;
         let model = std::env::var("LLM_MODEL").ok()?;
-        let persona_prompt = std::env::var("LLM_PERSONA_PROMPT").unwrap_or_default();
         let max_tokens = std::env::var("LLM_MAX_TOKENS")
             .or_else(|_| std::env::var("LLM_MAX_OUTPUT_TOKENS"))
             .ok()
@@ -78,17 +59,9 @@ impl OpenAiConfig {
             base_url,
             api_key,
             model,
-            persona_prompt,
-            prompt_prefix: String::new(),
             max_tokens,
             reasoning_effort,
         })
-    }
-
-    /// Prepend the fixed TTS plain-text prefix to the persona prompt.
-    pub fn with_prompt_prefix(mut self) -> Self {
-        self.prompt_prefix = SYSTEM_PROMPT_PREFIX.to_string();
-        self
     }
 }
 
@@ -107,77 +80,65 @@ impl OpenAiLlm {
         Self { client, config }
     }
 
-    fn system_content(&self) -> String {
-        match (
-            self.config.prompt_prefix.is_empty(),
-            self.config.persona_prompt.is_empty(),
-        ) {
-            (false, false) => format!(
-                "{}\n\n<persona>\n{}\n</persona>",
-                self.config.prompt_prefix, self.config.persona_prompt
-            ),
-            (false, true) => self.config.prompt_prefix.clone(),
-            (true, _) => self.config.persona_prompt.clone(),
-        }
-    }
-
     fn build_request(
         &self,
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
     ) -> Result<async_openai::types::chat::CreateChatCompletionRequest, LlmError> {
-        let mut messages = Vec::with_capacity(history.len() + 1);
-        messages.push(ChatCompletionRequestMessage::System(
-            ChatCompletionRequestSystemMessage {
-                content: self.system_content().into(),
-                name: None,
-            },
-        ));
-        messages.extend(history.into_iter().map(|item| match item {
-            ChatItem::User { content } => {
-                ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-                    content: content.into(),
-                    name: None,
-                })
-            }
-            ChatItem::Assistant {
-                content,
-                tool_calls,
-            } => {
-                let tool_calls = if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(
-                        tool_calls
-                            .into_iter()
-                            .map(|call| {
-                                ChatCompletionMessageToolCalls::Function(
-                                    ChatCompletionMessageToolCall {
-                                        id: call.id,
-                                        function: FunctionCall {
-                                            name: call.name,
-                                            arguments: call.arguments,
-                                        },
-                                    },
-                                )
-                            })
-                            .collect(),
-                    )
-                };
-                ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-                    content: content.map(Into::into),
+        let messages = history
+            .into_iter()
+            .map(|item| match item {
+                ChatItem::System { content } => {
+                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                        content: content.into(),
+                        name: None,
+                    })
+                }
+                ChatItem::User { content } => {
+                    ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
+                        content: content.into(),
+                        name: None,
+                    })
+                }
+                ChatItem::Assistant {
+                    content,
                     tool_calls,
-                    ..Default::default()
-                })
-            }
-            ChatItem::Tool {
-                tool_call_id,
-                content,
-            } => ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
-                content: ChatCompletionRequestToolMessageContent::Text(content),
-                tool_call_id,
-            }),
-        }));
+                } => {
+                    let tool_calls = if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            tool_calls
+                                .into_iter()
+                                .map(|call| {
+                                    ChatCompletionMessageToolCalls::Function(
+                                        ChatCompletionMessageToolCall {
+                                            id: call.id,
+                                            function: FunctionCall {
+                                                name: call.name,
+                                                arguments: call.arguments,
+                                            },
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        )
+                    };
+                    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                        content: content.map(Into::into),
+                        tool_calls,
+                        ..Default::default()
+                    })
+                }
+                ChatItem::Tool {
+                    tool_call_id,
+                    content,
+                } => ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(content),
+                    tool_call_id,
+                }),
+            })
+            .collect::<Vec<_>>();
 
         let mut request = CreateChatCompletionRequestArgs::default();
         request
@@ -363,38 +324,33 @@ mod tests {
             base_url: "http://localhost".into(),
             api_key: "k".into(),
             model: "m".into(),
-            persona_prompt: "Be a helpful assistant.".into(),
-            prompt_prefix: String::new(),
             max_tokens: None,
             reasoning_effort: None,
         }
     }
 
     #[test]
-    fn prompt_prefix_precedes_persona_prompt() {
-        let llm = OpenAiLlm::new(config().with_prompt_prefix());
-        let content = llm.system_content();
-        assert!(
-            content.find("TTS output rules").unwrap() < content.find("<persona>").unwrap(),
-            "prefix must precede persona prompt"
-        );
-        assert!(content.contains("Be a helpful assistant."));
-    }
-
-    #[test]
-    fn empty_prefix_uses_persona_prompt_only() {
+    fn maps_items_to_request_messages() {
         let llm = OpenAiLlm::new(config());
-        assert_eq!(llm.system_content(), "Be a helpful assistant.");
-    }
-
-    #[test]
-    fn prefix_without_persona_prompt_omits_block() {
-        let mut config = config();
-        config.persona_prompt = String::new();
-        let llm = OpenAiLlm::new(config.with_prompt_prefix());
-        let content = llm.system_content();
-        assert!(!content.contains("<persona>"));
-        assert!(content.starts_with("You are a voice assistant"));
+        let request = llm
+            .build_request(
+                vec![
+                    ChatItem::system("be nice"),
+                    ChatItem::user("hi"),
+                    ChatItem::assistant("hello"),
+                ],
+                Vec::new(),
+            )
+            .unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        let messages = value["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "be nice");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "hi");
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["content"], "hello");
     }
 
     fn chunk(

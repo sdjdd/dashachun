@@ -44,15 +44,16 @@ fn server_state(pool: PgPool) -> ServerState {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(dashachun::agent::CompositeAgent {
-            asr: Arc::new(dashachun::asr::StubAsr::default()),
-            llm: None,
-            tts: None,
-            vad: Arc::new(dashachun::vad::SileroVadFactory::new(
+        Arc::new(dashachun::agent::AgentFactory::new(
+            Arc::new(dashachun::asr::StubAsr::default()),
+            Arc::new(dashachun::llm::StubLlm::default()),
+            Arc::new(dashachun::tts::StubTts),
+            Arc::new(dashachun::vad::SileroVadFactory::new(
                 dashachun::vad::VadConfig::default(),
             )),
-            tools: Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
-        }),
+            Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
+            dashachun::agent::AgentStore::new(pool.clone()),
+        )),
         DeviceStore::new(pool),
     )
 }
@@ -122,7 +123,10 @@ async fn body_json(res: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
-async fn register(app: &tower_http::normalize_path::NormalizePath<axum::Router>) -> String {
+async fn register(
+    app: &tower_http::normalize_path::NormalizePath<axum::Router>,
+    pool: &PgPool,
+) -> (String, i64) {
     let username = test_name();
     let res = app
         .clone()
@@ -134,7 +138,23 @@ async fn register(app: &tower_http::normalize_path::NormalizePath<axum::Router>)
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    session_cookie(&res)
+    let cookie = session_cookie(&res);
+    let user_id = sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = $1")
+        .bind(&username)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    (cookie, user_id)
+}
+
+async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, 'default', '') RETURNING id",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 #[sqlx::test]
@@ -171,13 +191,25 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
-    let cookie = register(&app).await;
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent_id = create_agent(&pool, user_id).await;
 
     let res = app
         .clone()
         .oneshot(post_json(
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}"}}"#),
+            &format!(r#"{{"code":"{code}","agent_id":999999}}"#),
+            Some(cookie.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = app
+        .clone()
+        .oneshot(post_json(
+            "/api/devices/activate",
+            &format!(r#"{{"code":"{code}","agent_id":{agent_id}}}"#),
             Some(cookie.clone()),
         ))
         .await
@@ -185,6 +217,7 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     assert_eq!(res.status(), StatusCode::OK);
     let device = body_json(res).await;
     assert_eq!(device["client_id"], CLIENT_ID);
+    assert_eq!(device["agent_id"], agent_id);
     assert!(device.get("id").is_none());
     assert!(device["created_at"].as_str().unwrap().contains('T'));
 
@@ -228,6 +261,16 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     assert!(connect_gateway(addr, Some(&token)).await.is_ok());
     assert!(connect_gateway(addr, Some("wrong-token")).await.is_err());
     assert!(connect_gateway(addr, None).await.is_err());
+
+    sqlx::query("DELETE FROM agents WHERE id = $1")
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        connect_gateway(addr, Some(&token)).await.is_err(),
+        "a bound device whose agent is gone must be rejected"
+    );
 
     let res = app
         .clone()
@@ -294,12 +337,13 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
     .await
     .unwrap();
 
-    let cookie = register(&app).await;
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent_id = create_agent(&pool, user_id).await;
     let res = app
         .clone()
         .oneshot(post_json(
             "/api/devices/activate",
-            &format!(r#"{{"code":"{old_code}"}}"#),
+            &format!(r#"{{"code":"{old_code}","agent_id":{agent_id}}}"#),
             Some(cookie),
         ))
         .await
@@ -320,24 +364,26 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
-    let cookie = register(&app).await;
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent_id = create_agent(&pool, user_id).await;
     let res = app
         .clone()
         .oneshot(post_json(
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}"}}"#),
+            &format!(r#"{{"code":"{code}","agent_id":{agent_id}}}"#),
             Some(cookie),
         ))
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 
-    let other = register(&app).await;
+    let (other, other_id) = register(&app, &pool).await;
+    let other_agent = create_agent(&pool, other_id).await;
     let res = app
         .clone()
         .oneshot(post_json(
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}"}}"#),
+            &format!(r#"{{"code":"{code}","agent_id":{other_agent}}}"#),
             Some(other),
         ))
         .await

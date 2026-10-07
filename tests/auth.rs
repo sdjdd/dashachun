@@ -42,15 +42,16 @@ fn server_state(pool: PgPool) -> ServerState {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(dashachun::agent::CompositeAgent {
-            asr: Arc::new(dashachun::asr::StubAsr::default()),
-            llm: None,
-            tts: None,
-            vad: Arc::new(dashachun::vad::SileroVadFactory::new(
+        Arc::new(dashachun::agent::AgentFactory::new(
+            Arc::new(dashachun::asr::StubAsr::default()),
+            Arc::new(dashachun::llm::StubLlm::default()),
+            Arc::new(dashachun::tts::StubTts),
+            Arc::new(dashachun::vad::SileroVadFactory::new(
                 dashachun::vad::VadConfig::default(),
             )),
-            tools: Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
-        }),
+            Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
+            dashachun::agent::AgentStore::new(pool.clone()),
+        )),
         DeviceStore::new(pool),
     )
 }

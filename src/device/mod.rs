@@ -1,6 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::agent::AgentStore;
 use crate::error::AppError;
 
 pub mod dto;
@@ -19,6 +20,7 @@ pub struct DeviceRecord {
     pub device_id: Option<String>,
     pub board_type: Option<String>,
     pub user_id: Option<i64>,
+    pub agent_id: Option<i64>,
     pub activated_at: Option<time::OffsetDateTime>,
     pub created_at: time::OffsetDateTime,
     pub last_seen_at: time::OffsetDateTime,
@@ -28,10 +30,10 @@ pub enum BindOutcome {
     Bound(DeviceRecord),
     NotFound,
     Conflict,
+    UnknownAgent,
 }
 
-const DEVICE_COLUMNS: &str =
-    "id, client_id, device_id, board_type, user_id, activated_at, created_at, last_seen_at";
+const DEVICE_COLUMNS: &str = "id, client_id, device_id, board_type, user_id, agent_id, activated_at, created_at, last_seen_at";
 
 impl DeviceStore {
     pub fn new(pool: PgPool) -> Self {
@@ -126,23 +128,37 @@ impl DeviceStore {
         Ok((affected > 0).then_some(token))
     }
 
-    pub async fn verify(&self, client_id: Uuid, token: &str) -> Result<bool, AppError> {
+    pub async fn verify(
+        &self,
+        client_id: Uuid,
+        token: &str,
+    ) -> Result<Option<DeviceRecord>, AppError> {
         let hash = hash_token(token);
-        let ok = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM devices \
-             WHERE client_id = $1 AND token_hash = $2 AND user_id IS NOT NULL)",
-        )
+        let record = sqlx::query_as::<_, DeviceRecord>(&format!(
+            "SELECT {DEVICE_COLUMNS} FROM devices \
+             WHERE client_id = $1 AND token_hash = $2 AND user_id IS NOT NULL"
+        ))
         .bind(client_id)
         .bind(&hash)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await?;
-        Ok(ok)
+        Ok(record)
     }
 
-    pub async fn bind_by_code(&self, user_id: i64, code: &str) -> Result<BindOutcome, AppError> {
+    pub async fn bind_by_code(
+        &self,
+        user_id: i64,
+        code: &str,
+        agent_id: i64,
+    ) -> Result<BindOutcome, AppError> {
+        let agents = AgentStore::new(self.pool.clone());
+        if !agents.owns(agent_id, user_id).await? {
+            return Ok(BindOutcome::UnknownAgent);
+        }
+
         let updated = sqlx::query_as::<_, DeviceRecord>(&format!(
             "UPDATE devices \
-                SET user_id = $1, activated_at = now(), \
+                SET user_id = $1, agent_id = $3, activated_at = now(), \
                     activation_code = NULL, activation_code_expires_at = NULL \
               WHERE activation_code = $2 AND user_id IS NULL \
                 AND activation_code_expires_at > now() \
@@ -150,6 +166,7 @@ impl DeviceStore {
         ))
         .bind(user_id)
         .bind(code)
+        .bind(agent_id)
         .fetch_optional(&self.pool)
         .await?;
         if let Some(record) = updated {
@@ -182,6 +199,7 @@ impl DeviceStore {
         let affected = sqlx::query(
             "UPDATE devices \
                 SET user_id = NULL, token_hash = NULL, activated_at = NULL, \
+                    agent_id = NULL, \
                     activation_code = NULL, activation_code_expires_at = NULL \
               WHERE client_id = $1 AND user_id = $2",
         )

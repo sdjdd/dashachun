@@ -23,9 +23,13 @@ async fn activate_device(
     Validated(args): Validated<ActivateDeviceArgs>,
 ) -> Result<Json<DeviceResponse>, AppError> {
     let devices = DeviceStore::new(state.pool.clone());
-    match devices.bind_by_code(user.id, &args.code).await? {
+    match devices
+        .bind_by_code(user.id, &args.code, args.agent_id)
+        .await?
+    {
         BindOutcome::Bound(record) => Ok(Json(record.into())),
         BindOutcome::NotFound => Err(AppError::NotFound),
+        BindOutcome::UnknownAgent => Err(AppError::NotFound),
         BindOutcome::Conflict => Err(AppError::Conflict("device already bound".into())),
     }
 }

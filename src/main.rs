@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashachun::agent::{Agent, CompositeAgent, ToolRegistry, tool::GetWeather};
+use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry, tool::GetWeather};
 use dashachun::asr::volc::VolcAsr;
 use dashachun::asr::{Asr, StubAsr};
 use dashachun::auth::state::AuthState;
@@ -33,36 +33,39 @@ async fn main() {
         }
     };
     let vad = Arc::new(SileroVadFactory::from_env());
-    let llm: Option<Arc<dyn Llm>> = match OpenAiConfig::from_env() {
+    let llm: Arc<dyn Llm> = match OpenAiConfig::from_env() {
         Some(config) => {
             tracing::info!(model = %config.model, "using openai llm provider");
-            Some(Arc::new(OpenAiLlm::new(config.with_prompt_prefix())))
+            Arc::new(OpenAiLlm::new(config))
         }
         None => {
-            tracing::info!("no llm provider configured");
-            None
+            tracing::error!("LLM_BASE_URL, LLM_API_KEY and LLM_MODEL are required");
+            std::process::exit(1);
         }
     };
-    let tts: Option<Arc<dyn Tts>> = match VolcTts::from_env() {
+    let tts: Arc<dyn Tts> = match VolcTts::from_env() {
         Some(volc) => {
             tracing::info!("using volc tts provider");
-            Some(Arc::new(volc))
+            Arc::new(volc)
         }
         None => {
-            tracing::info!("no tts provider configured");
-            None
+            tracing::error!(
+                "VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL and VOLC_TTS_SPEAKER are required"
+            );
+            std::process::exit(1);
         }
     };
     let tools = Arc::new(ToolRegistry::new(vec![Arc::new(GetWeather::new())]));
-    let agent: Arc<dyn Agent> = Arc::new(CompositeAgent {
+    let auth = build_auth_state().await;
+    let agent_factory = Arc::new(AgentFactory::new(
         asr,
         llm,
         tts,
         vad,
         tools,
-    });
-    let auth = build_auth_state().await;
-    let state = ServerState::new(config, agent, DeviceStore::new(auth.pool.clone()));
+        AgentStore::new(auth.pool.clone()),
+    ));
+    let state = ServerState::new(config, agent_factory, DeviceStore::new(auth.pool.clone()));
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = dashachun::app(state, auth);

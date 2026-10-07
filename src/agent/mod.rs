@@ -1,5 +1,8 @@
 mod composite;
 mod emotion;
+mod factory;
+mod prompt;
+mod store;
 pub mod tool;
 
 use std::pin::Pin;
@@ -7,6 +10,9 @@ use std::pin::Pin;
 use futures_util::Stream;
 
 pub use composite::CompositeAgent;
+pub use factory::AgentFactory;
+pub use prompt::SystemPrompt;
+pub use store::{AgentRecord, AgentStore};
 pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
 
 pub type AgentInputStream = Pin<Box<dyn Stream<Item = AgentInput> + Send>>;

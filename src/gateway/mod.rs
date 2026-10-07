@@ -1,6 +1,7 @@
 mod player;
 mod session;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
@@ -8,6 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, trace};
 
+use crate::agent::Agent;
 use crate::state::ServerState;
 
 use session::Session;
@@ -16,16 +18,25 @@ const WRITER_CHANNEL_CAPACITY: usize = 32;
 
 pub struct Gateway {
     state: ServerState,
+    agent: Arc<dyn Agent>,
     shutdown: watch::Receiver<bool>,
 }
 
 impl Gateway {
-    pub fn new(state: ServerState, shutdown: watch::Receiver<bool>) -> Self {
-        Self { state, shutdown }
+    pub fn new(state: ServerState, agent: Arc<dyn Agent>, shutdown: watch::Receiver<bool>) -> Self {
+        Self {
+            state,
+            agent,
+            shutdown,
+        }
     }
 
     pub async fn run(self, socket: WebSocket) {
-        let Self { state, shutdown } = self;
+        let Self {
+            state,
+            agent,
+            shutdown,
+        } = self;
         info!("device connected");
         let (mut sink, mut stream) = socket.split();
         let (tx, mut rx) = mpsc::channel::<Message>(WRITER_CHANNEL_CAPACITY);
@@ -38,11 +49,8 @@ impl Gateway {
             }
         });
 
-        let mut session = Session::new(
-            tx.clone(),
-            state.agent,
-            state.config.server.playback_prebuffer_ms,
-        );
+        let mut session =
+            Session::new(tx.clone(), agent, state.config.server.playback_prebuffer_ms);
         let grace = Duration::from_millis(state.config.server.shutdown_grace_ms);
         let mut shutdown = shutdown;
 
