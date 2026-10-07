@@ -10,6 +10,25 @@ pub const SAMPLE_RATE: u32 = 16000;
 pub const CHANNELS: u16 = 1;
 pub const FRAME_DURATION_MS: u32 = 60;
 
+/// The server's downlink audio format, owned by the server rather than
+/// negotiated: TTS providers must produce PCM at this rate and channel count,
+/// the gateway Opus-encodes at this rate and paces playback by this frame
+/// duration, and the server hello announces it to the device. The wire format
+/// is always Opus; the device's uplink format is described by its hello
+/// instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DownlinkAudio {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frame_duration_ms: u32,
+}
+
+pub const DOWNLINK: DownlinkAudio = DownlinkAudio {
+    sample_rate: SAMPLE_RATE,
+    channels: CHANNELS,
+    frame_duration_ms: FRAME_DURATION_MS,
+};
+
 const MAX_FRAME_SAMPLES: usize = 5760;
 
 #[derive(Debug)]

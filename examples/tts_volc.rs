@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use dashachun::audio::DOWNLINK;
 use dashachun::tts::volc::VolcTts;
 use dashachun::tts::{TextStream, Tts, TtsEvent};
 use futures_util::StreamExt;
@@ -49,11 +50,18 @@ async fn main() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("tts_out.wav"));
 
-    let Some(tts) = VolcTts::from_env() else {
-        eprintln!(
-            "set VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL and VOLC_TTS_SPEAKER (optional VOLC_TTS_RESOURCE_ID)"
-        );
-        std::process::exit(1);
+    let tts = match VolcTts::from_env(DOWNLINK) {
+        Ok(Some(tts)) => tts,
+        Ok(None) => {
+            eprintln!(
+                "set VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL and VOLC_TTS_SPEAKER (optional VOLC_TTS_RESOURCE_ID)"
+            );
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
     };
 
     let start = Instant::now();

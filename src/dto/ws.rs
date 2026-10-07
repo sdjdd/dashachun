@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::audio::DownlinkAudio;
+
 #[derive(Debug, Deserialize)]
 pub struct ClientHello {
     pub version: u32,
@@ -33,6 +35,17 @@ impl Default for AudioParams {
             sample_rate: 16000,
             channels: 1,
             frame_duration: 60,
+        }
+    }
+}
+
+impl From<DownlinkAudio> for AudioParams {
+    fn from(downlink: DownlinkAudio) -> Self {
+        Self {
+            format: "opus".into(),
+            sample_rate: downlink.sample_rate,
+            channels: u32::from(downlink.channels),
+            frame_duration: downlink.frame_duration_ms,
         }
     }
 }
@@ -168,6 +181,16 @@ impl TtsMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::DOWNLINK;
+
+    #[test]
+    fn downlink_maps_to_wire_params() {
+        let value = serde_json::to_value(AudioParams::from(DOWNLINK)).unwrap();
+        assert_eq!(value["format"], "opus");
+        assert_eq!(value["sample_rate"], 16000);
+        assert_eq!(value["channels"], 1);
+        assert_eq!(value["frame_duration"], 60);
+    }
 
     #[test]
     fn llm_message_serializes_emotion() {

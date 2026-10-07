@@ -4,6 +4,7 @@ use std::time::Duration;
 use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry, tool::GetWeather};
 use dashachun::asr::volc::VolcAsr;
 use dashachun::asr::{Asr, StubAsr};
+use dashachun::audio::DOWNLINK;
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig};
 use dashachun::device::DeviceStore;
@@ -43,15 +44,19 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let tts: Arc<dyn Tts> = match VolcTts::from_env() {
-        Some(volc) => {
+    let tts: Arc<dyn Tts> = match VolcTts::from_env(DOWNLINK) {
+        Ok(Some(volc)) => {
             tracing::info!("using volc tts provider");
             Arc::new(volc)
         }
-        None => {
+        Ok(None) => {
             tracing::error!(
                 "VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL and VOLC_TTS_SPEAKER are required"
             );
+            std::process::exit(1);
+        }
+        Err(err) => {
+            tracing::error!(%err, "invalid volc tts configuration");
             std::process::exit(1);
         }
     };

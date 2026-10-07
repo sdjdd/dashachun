@@ -8,10 +8,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
-use crate::audio::{OpusDecoder, OpusEncoder};
+use crate::audio::{DOWNLINK, OpusDecoder, OpusEncoder};
 use crate::dto::ws::{
-    Abort, AudioParams, ClientHello, InboundMessage, Listen, LlmMessage, Mcp, ServerHello,
-    SttMessage, TtsMessage,
+    Abort, ClientHello, InboundMessage, Listen, LlmMessage, Mcp, ServerHello, SttMessage,
+    TtsMessage,
 };
 
 use super::player::{Player, spawn_player};
@@ -98,40 +98,36 @@ impl Session {
                     None
                 }
             };
-        send_json(
-            &self.tx,
-            &ServerHello::new(id.clone(), audio_params.clone()),
-        )
-        .await;
+        send_json(&self.tx, &ServerHello::new(id.clone(), DOWNLINK.into())).await;
         self.id = Some(id.clone());
-        self.start_agent(id, audio_params);
+        let session = AgentSession {
+            id,
+            sample_rate: audio_params.sample_rate,
+            channels: audio_params.channels as u16,
+            frame_duration_ms: audio_params.frame_duration,
+        };
+        self.start_agent(session);
     }
 
-    fn start_agent(&mut self, session_id: String, audio_params: AudioParams) {
+    fn start_agent(&mut self, session: AgentSession) {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentInput>(AGENT_CHANNEL_CAPACITY);
         let input: crate::agent::AgentInputStream = Box::pin(futures_util::stream::unfold(
             agent_rx,
             |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
         ));
-        let session = AgentSession {
-            id: session_id,
-            sample_rate: audio_params.sample_rate,
-            channels: audio_params.channels as u16,
-            frame_duration_ms: audio_params.frame_duration,
-        };
+        let session_id = session.id.clone();
         let output = self.agent.run(session, input);
         let tx = self.tx.clone();
-        let session_id = self.id.clone().unwrap_or_default();
         let encoder = OpusEncoder::new(
-            audio_params.sample_rate,
-            audio_params.channels as u16,
-            audio_params.frame_duration,
+            DOWNLINK.sample_rate,
+            DOWNLINK.channels,
+            DOWNLINK.frame_duration_ms,
         )
         .map_err(|err| warn!(%err, "failed to create opus encoder"))
         .ok();
         let player = spawn_player(
             tx.clone(),
-            audio_params.frame_duration,
+            DOWNLINK.frame_duration_ms,
             self.playback_prebuffer_ms,
             session_id.clone(),
         );

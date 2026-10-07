@@ -10,11 +10,13 @@ use tracing::{debug, warn};
 mod protocol;
 
 use super::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
+use crate::audio::DownlinkAudio;
 use protocol::Message as TtsMessage;
 
 pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
 
-const DEFAULT_SAMPLE_RATE: u32 = 16_000;
+/// Sample rates the Volcengine bidirectional streaming TTS accepts.
+const SUPPORTED_SAMPLE_RATES: &[u32] = &[8000, 16000, 22050, 24000, 32000, 44100, 48000];
 const DEFAULT_FORMAT: &str = "pcm";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -55,31 +57,57 @@ pub struct VolcTts {
 }
 
 impl VolcTts {
+    /// Errors on a downlink format Volc TTS cannot produce.
     pub fn new(
         endpoint: impl Into<String>,
         api_key: impl Into<String>,
         resource_id: impl Into<String>,
         speaker: impl Into<String>,
-    ) -> Self {
-        Self {
+        downlink: DownlinkAudio,
+    ) -> Result<Self, TtsError> {
+        if !SUPPORTED_SAMPLE_RATES.contains(&downlink.sample_rate) {
+            return Err(TtsError::from(format!(
+                "unsupported volc tts sample rate {}: expected one of {SUPPORTED_SAMPLE_RATES:?}",
+                downlink.sample_rate
+            )));
+        }
+        if downlink.channels != 1 {
+            return Err(TtsError::from(format!(
+                "unsupported volc tts channel count {}: only mono is supported",
+                downlink.channels
+            )));
+        }
+        Ok(Self {
             endpoint: endpoint.into(),
             api_key: api_key.into(),
             resource_id: resource_id.into(),
             session: SessionConfig {
                 speaker: speaker.into(),
                 format: DEFAULT_FORMAT.to_string(),
-                sample_rate: DEFAULT_SAMPLE_RATE,
+                sample_rate: downlink.sample_rate,
             },
-        }
+        })
     }
 
-    pub fn from_env() -> Option<Self> {
-        let api_key = std::env::var("VOLC_TTS_API_KEY").ok()?;
-        let endpoint = std::env::var("VOLC_TTS_BASE_URL").ok()?;
-        let speaker = std::env::var("VOLC_TTS_SPEAKER").ok()?;
+    pub fn from_env(downlink: DownlinkAudio) -> Result<Option<Self>, TtsError> {
+        let Some(api_key) = std::env::var("VOLC_TTS_API_KEY").ok() else {
+            return Ok(None);
+        };
+        let Some(endpoint) = std::env::var("VOLC_TTS_BASE_URL").ok() else {
+            return Ok(None);
+        };
+        let Some(speaker) = std::env::var("VOLC_TTS_SPEAKER").ok() else {
+            return Ok(None);
+        };
         let resource_id = std::env::var("VOLC_TTS_RESOURCE_ID")
             .unwrap_or_else(|_| DEFAULT_RESOURCE_ID.to_string());
-        Some(Self::new(endpoint, api_key, resource_id, speaker))
+        Ok(Some(Self::new(
+            endpoint,
+            api_key,
+            resource_id,
+            speaker,
+            downlink,
+        )?))
     }
 
     fn build_request(
@@ -538,6 +566,7 @@ fn pcm16_to_f32(bytes: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::DOWNLINK;
     use std::sync::Arc;
 
     #[test]
@@ -559,6 +588,42 @@ mod tests {
             true
         );
         assert!(payload["req_params"].get("text").is_none());
+    }
+
+    #[test]
+    fn rejects_unsupported_downlink_sample_rate() {
+        let downlink = DownlinkAudio {
+            sample_rate: 12000,
+            ..DOWNLINK
+        };
+        let Err(err) = VolcTts::new(
+            "ws://localhost",
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+            downlink,
+        ) else {
+            panic!("unsupported downlink sample rate must be rejected");
+        };
+        assert!(err.to_string().contains("sample rate"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unsupported_downlink_channels() {
+        let downlink = DownlinkAudio {
+            channels: 2,
+            ..DOWNLINK
+        };
+        let Err(err) = VolcTts::new(
+            "ws://localhost",
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+            downlink,
+        ) else {
+            panic!("unsupported downlink channel count must be rejected");
+        };
+        assert!(err.to_string().contains("channel"), "{err}");
     }
 
     fn message(payload: &str) -> TtsMessage {
@@ -664,7 +729,9 @@ mod tests {
             "key",
             DEFAULT_RESOURCE_ID,
             "speaker",
-        );
+            DOWNLINK,
+        )
+        .unwrap();
         let (text_tx, text_rx) = mpsc::channel::<String>(4);
         let text: TextStream =
             Box::pin(futures_util::stream::unfold(text_rx, |mut rx| async move {
@@ -716,7 +783,9 @@ mod tests {
             "key",
             DEFAULT_RESOURCE_ID,
             "speaker",
-        );
+            DOWNLINK,
+        )
+        .unwrap();
         let (_text_tx, text_rx) = mpsc::channel::<String>(4);
         let text: TextStream =
             Box::pin(futures_util::stream::unfold(text_rx, |mut rx| async move {
