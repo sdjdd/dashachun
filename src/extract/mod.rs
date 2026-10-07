@@ -1,3 +1,7 @@
+pub mod validated;
+
+pub use validated::Validated;
+
 use axum::extract::FromRequestParts;
 
 use crate::error::AppError;

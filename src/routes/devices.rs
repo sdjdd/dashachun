@@ -3,12 +3,13 @@ use axum::http::StatusCode;
 use axum::{Json, Router, routing::delete, routing::get, routing::post};
 use uuid::Uuid;
 
-use crate::auth::extract::{AuthUser, Validated};
+use crate::auth::extract::AuthUser;
 use crate::auth::state::AuthState;
 use crate::device::BindOutcome;
 use crate::device::DeviceStore;
 use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
 use crate::error::AppError;
+use crate::extract::Validated;
 
 pub fn routes() -> Router<AuthState> {
     Router::new()
