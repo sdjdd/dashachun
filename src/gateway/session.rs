@@ -1,10 +1,11 @@
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::Message;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
@@ -48,26 +49,38 @@ impl Session {
         }
     }
 
-    pub(super) async fn handle_text(&mut self, text: &str) {
+    pub(super) async fn handle_text(&mut self, text: &str) -> ControlFlow<()> {
         match serde_json::from_str::<InboundMessage>(text) {
             Ok(message) => self.handle(message).await,
-            Err(err) => warn!(%err, %text, "invalid message"),
+            Err(err) => {
+                warn!(%err, %text, "invalid message");
+                ControlFlow::Continue(())
+            }
         }
     }
 
-    async fn handle(&mut self, message: InboundMessage) {
+    async fn handle(&mut self, message: InboundMessage) -> ControlFlow<()> {
         match message {
             InboundMessage::Hello(hello) => self.on_hello(hello).await,
-            InboundMessage::Listen(listen) => self.on_listen(listen).await,
-            InboundMessage::Abort(abort) => self.on_abort(abort).await,
-            InboundMessage::Mcp(mcp) => self.on_mcp(mcp).await,
+            InboundMessage::Listen(listen) => {
+                self.on_listen(listen).await;
+                ControlFlow::Continue(())
+            }
+            InboundMessage::Abort(abort) => {
+                self.on_abort(abort).await;
+                ControlFlow::Continue(())
+            }
+            InboundMessage::Mcp(mcp) => {
+                self.on_mcp(mcp).await;
+                ControlFlow::Continue(())
+            }
         }
     }
 
-    async fn on_hello(&mut self, hello: ClientHello) {
+    async fn on_hello(&mut self, hello: ClientHello) -> ControlFlow<()> {
         if self.id.is_some() {
             warn!("duplicate hello, ignoring");
-            return;
+            return ControlFlow::Continue(());
         }
 
         let id = Uuid::new_v4().to_string();
@@ -90,14 +103,31 @@ impl Session {
                 "only protocol v1 raw opus frames are supported; audio will be garbled"
             );
         }
-        self.decoder =
-            match OpusDecoder::new(audio_params.sample_rate, audio_params.channels as u16) {
-                Ok(decoder) => Some(decoder),
-                Err(err) => {
-                    warn!(%err, "failed to create opus decoder");
-                    None
-                }
-            };
+        let decoder = match OpusDecoder::new(audio_params.sample_rate, audio_params.channels as u16)
+        {
+            Ok(decoder) => decoder,
+            Err(err) => {
+                error!(
+                    %err,
+                    sample_rate = audio_params.sample_rate,
+                    channels = audio_params.channels,
+                    "unsupported uplink audio format, rejecting session"
+                );
+                return ControlFlow::Break(());
+            }
+        };
+        let encoder = match OpusEncoder::new(
+            DOWNLINK.sample_rate,
+            DOWNLINK.channels,
+            DOWNLINK.frame_duration_ms,
+        ) {
+            Ok(encoder) => encoder,
+            Err(err) => {
+                error!(%err, "failed to create opus encoder, rejecting session");
+                return ControlFlow::Break(());
+            }
+        };
+        self.decoder = Some(decoder);
         send_json(&self.tx, &ServerHello::new(id.clone(), DOWNLINK.into())).await;
         self.id = Some(id.clone());
         let session = AgentSession {
@@ -106,10 +136,11 @@ impl Session {
             channels: audio_params.channels as u16,
             frame_duration_ms: audio_params.frame_duration,
         };
-        self.start_agent(session);
+        self.start_agent(session, encoder);
+        ControlFlow::Continue(())
     }
 
-    fn start_agent(&mut self, session: AgentSession) {
+    fn start_agent(&mut self, session: AgentSession, encoder: OpusEncoder) {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentInput>(AGENT_CHANNEL_CAPACITY);
         let input: crate::agent::AgentInputStream = Box::pin(futures_util::stream::unfold(
             agent_rx,
@@ -118,13 +149,6 @@ impl Session {
         let session_id = session.id.clone();
         let output = self.agent.run(session, input);
         let tx = self.tx.clone();
-        let encoder = OpusEncoder::new(
-            DOWNLINK.sample_rate,
-            DOWNLINK.channels,
-            DOWNLINK.frame_duration_ms,
-        )
-        .map_err(|err| warn!(%err, "failed to create opus encoder"))
-        .ok();
         let player = spawn_player(
             tx.clone(),
             DOWNLINK.frame_duration_ms,
@@ -213,7 +237,7 @@ async fn run_agent(
     mut output: AgentOutputStream,
     tx: mpsc::Sender<Message>,
     session_id: String,
-    mut encoder: Option<OpusEncoder>,
+    mut encoder: OpusEncoder,
     player: Player,
 ) {
     use crate::agent::AgentOutput;
@@ -243,26 +267,20 @@ async fn run_agent(
                 player.subtitle(subtitle.start_ms, subtitle.text).await;
             }
             AgentOutput::TtsStop => {
-                if let Some(encoder) = encoder.as_mut()
-                    && let Some(packet) = encoder.flush()
-                {
+                if let Some(packet) = encoder.flush() {
                     player.push(packet).await;
                 }
                 player.finish().await;
                 send_json(&tx, &TtsMessage::stop(session_id.clone())).await;
             }
             AgentOutput::TtsAbort => {
-                if let Some(encoder) = encoder.as_mut() {
-                    encoder.reset();
-                }
+                encoder.reset();
                 player.abort().await;
                 send_json(&tx, &TtsMessage::stop(session_id.clone())).await;
             }
             AgentOutput::Audio(samples) => {
-                if let Some(encoder) = encoder.as_mut() {
-                    for packet in encoder.push(&samples) {
-                        player.push(packet).await;
-                    }
+                for packet in encoder.push(&samples) {
+                    player.push(packet).await;
                 }
             }
             AgentOutput::Emotion { emotion } => {

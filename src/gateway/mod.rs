@@ -55,6 +55,7 @@ impl Gateway {
         let mut shutdown = shutdown;
 
         let mut shutdown_requested = false;
+        let mut rejected = false;
         loop {
             tokio::select! {
                 biased;
@@ -78,7 +79,10 @@ impl Gateway {
                     match msg {
                         Message::Text(txt) => {
                             trace!(%txt, "inbound text");
-                            session.handle_text(txt.as_str()).await;
+                            if session.handle_text(txt.as_str()).await.is_break() {
+                                rejected = true;
+                                break;
+                            }
                         }
                         Message::Binary(data) => {
                             trace!(len = data.len(), "inbound binary");
@@ -92,7 +96,7 @@ impl Gateway {
         }
 
         session.shutdown(grace).await;
-        if shutdown_requested {
+        if shutdown_requested || rejected {
             let _ = tx.send(Message::Close(None)).await;
         }
         drop(session);

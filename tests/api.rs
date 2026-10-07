@@ -218,6 +218,72 @@ async fn shutdown_closes_websocket_and_serve_returns(pool: PgPool) {
         .unwrap();
 }
 
+#[sqlx::test]
+#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+async fn hello_with_unsupported_audio_format_is_rejected(pool: PgPool) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let token = bound_device_token(&pool).await;
+
+    let auth = auth_state(pool.clone());
+    let state = state_with_url(pool, None);
+    let shutdown_tx = state.shutdown_sender();
+    let shutdown_rx = state.shutdown_signal();
+    let app = dashachun::app(state, auth);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let grace = std::time::Duration::from_secs(5);
+    let server = tokio::spawn(dashachun::serve(listener, app, shutdown_rx, grace));
+
+    let mut request =
+        tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(format!(
+            "ws://{addr}/gateway"
+        ))
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("client-id", HeaderValue::from_static(CLIENT_ID));
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+    );
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    ws.send(Message::text(
+        r#"{"type":"hello","version":1,"transport":"websocket","audio_params":{"format":"opus","sample_rate":22050,"channels":1,"frame_duration":60}}"#,
+    ))
+    .await
+    .unwrap();
+
+    let mut acked = false;
+    let mut closed = false;
+    while let Some(message) = ws.next().await {
+        match message {
+            Ok(Message::Text(_)) => {
+                acked = true;
+                break;
+            }
+            Ok(Message::Close(_)) => {
+                closed = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    assert!(!acked, "server must not ack a hello it cannot serve");
+    assert!(closed, "server did not close the socket");
+
+    drop(ws);
+    shutdown_tx.send(true).unwrap();
+    tokio::time::timeout(grace, server)
+        .await
+        .expect("serve did not return within grace")
+        .unwrap();
+}
+
 async fn bound_device_token(pool: &PgPool) -> String {
     let devices = DeviceStore::new(pool.clone());
     let uuid = uuid::Uuid::parse_str(CLIENT_ID).unwrap();
