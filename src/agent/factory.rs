@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::memory::MemoryFactory;
 use super::store::AgentStore;
 use super::{Agent, CompositeAgent, SystemPrompt, ToolRegistry};
 use crate::asr::Asr;
@@ -16,6 +17,7 @@ pub struct AgentFactory {
     llm: Arc<dyn Llm>,
     tts: Arc<dyn Tts>,
     vad: Arc<dyn VadFactory>,
+    memory: Arc<dyn MemoryFactory>,
     tools: Arc<ToolRegistry>,
     agents: AgentStore,
 }
@@ -26,6 +28,7 @@ impl AgentFactory {
         llm: Arc<dyn Llm>,
         tts: Arc<dyn Tts>,
         vad: Arc<dyn VadFactory>,
+        memory: Arc<dyn MemoryFactory>,
         tools: Arc<ToolRegistry>,
         agents: AgentStore,
     ) -> Self {
@@ -34,6 +37,7 @@ impl AgentFactory {
             llm,
             tts,
             vad,
+            memory,
             tools,
             agents,
         }
@@ -52,6 +56,7 @@ impl AgentFactory {
             llm: self.llm.clone(),
             tts: self.tts.clone(),
             vad: self.vad.clone(),
+            memory: self.memory.build(),
             tools: self.tools.clone(),
             system_prompt: SystemPrompt::new(&record.persona_prompt),
         }))

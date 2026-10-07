@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry, tool::GetWeather};
+use dashachun::agent::{
+    AgentFactory, AgentStore, InMemMemoryFactory, ToolRegistry, tool::GetWeather,
+};
 use dashachun::asr::volc::VolcAsr;
 use dashachun::asr::{Asr, StubAsr};
 use dashachun::audio::DOWNLINK;
@@ -67,6 +69,7 @@ async fn main() {
         llm,
         tts,
         vad,
+        Arc::new(InMemMemoryFactory),
         tools,
         AgentStore::new(auth.pool.clone()),
     ));

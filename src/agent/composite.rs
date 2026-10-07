@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
-    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession,
+    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Memory,
     SystemPrompt, ToolRegistry, emotion,
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
@@ -29,6 +29,7 @@ pub struct CompositeAgent {
     pub llm: Arc<dyn Llm>,
     pub tts: Arc<dyn Tts>,
     pub vad: Arc<dyn VadFactory>,
+    pub memory: Arc<dyn Memory>,
     pub tools: Arc<ToolRegistry>,
     pub system_prompt: SystemPrompt,
 }
@@ -102,7 +103,6 @@ async fn drive(
     let mut utterance: Option<Utterance> = None;
     let mut completion: Option<Completion> = None;
     let mut synthesis: Option<Synthesis> = None;
-    let mut history: Vec<ChatItem> = Vec::new();
     let mut generation: u64 = 0;
     let mut emotion_pending = false;
     let mut stripper = emotion::Stripper::new();
@@ -238,7 +238,10 @@ async fn drive(
                             break;
                         }
                         speaking = false;
-                        history.push(ChatItem::user(text));
+                        agent
+                            .memory
+                            .append(vec![ChatItem::user(text)])
+                            .await;
                         emotion_pending = true;
                         stripper = emotion::Stripper::new();
                         completion = Some(spawn_llm(
@@ -247,7 +250,7 @@ async fn drive(
                             &llm_tx,
                             session.id.clone(),
                             generation,
-                            history.clone(),
+                            agent.memory.history().await,
                             agent.system_prompt.clone(),
                         ));
                     }
@@ -320,7 +323,7 @@ async fn drive(
                     LlmMessage::Done { reply, history: items, .. } => {
                         completion = None;
                         info!(session_id = %session.id, %reply, "llm result");
-                        history.extend(items);
+                        agent.memory.append(items).await;
                         let tail = stripper.finish();
                         if !feed_tts(
                             tail,
@@ -909,6 +912,7 @@ async fn run_tts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::InMemMemory;
     use crate::asr::{AsrError, AsrEvents, StubAsr};
     use crate::llm::{LlmEvents, StubLlm};
     use crate::tts::{StubTts, Tts, TtsError, TtsEvent, TtsEvents};
@@ -1068,6 +1072,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1098,6 +1103,7 @@ mod tests {
             llm: Arc::new(StubLlm::default()),
             tts: Arc::new(StubTts),
             vad: Arc::new(ScriptedVadFactory { events: vec![] }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1151,6 +1157,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 300 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1225,6 +1232,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 300 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1265,6 +1273,66 @@ mod tests {
             restarted,
             "next reply must start without waiting for the stalled tts"
         );
+    }
+
+    #[tokio::test]
+    async fn session_history_is_capped_to_the_last_messages() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: calls.clone(),
+            }),
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: (0..7)
+                    .flat_map(|k| {
+                        vec![
+                            VadEvent::SpeechStart { at_ms: k * 100 },
+                            VadEvent::SpeechEnd {
+                                at_ms: k * 100 + 50,
+                            },
+                        ]
+                    })
+                    .collect(),
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        for turn in 1..=7 {
+            tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+            wait_for_calls(&calls, turn).await;
+            // Wait for the turn to complete so its assistant item is in the
+            // memory before the next turn's audio can barge in.
+            loop {
+                match output.next().await {
+                    Some(AgentOutput::TtsStop) => break,
+                    Some(_) => {}
+                    None => panic!("agent output ended before turn {turn} finished"),
+                }
+            }
+        }
+
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 7);
+        for call in &calls {
+            assert!(
+                call.len() <= 10,
+                "history grew past the cap: {}",
+                call.len()
+            );
+        }
+        assert_eq!(calls[5].len(), 10);
+        assert_eq!(calls[6].len(), 10);
+        assert!(matches!(calls[6].first(), Some(ChatItem::Assistant { .. })));
     }
 
     /// Emits `SpeechStart` + `Speech` on every push and `SpeechEnd` on flush,
@@ -1398,6 +1466,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1435,6 +1504,7 @@ mod tests {
             llm: Arc::new(StubLlm::default()),
             tts: Arc::new(StubTts),
             vad: Arc::new(StreamVadFactory),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1498,6 +1568,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 300 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1544,6 +1615,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1607,6 +1679,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1659,6 +1732,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 300 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1702,6 +1776,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::new("Be a helpful assistant."),
         };
@@ -1743,6 +1818,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1791,6 +1867,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1849,6 +1926,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -1901,6 +1979,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };
@@ -2000,6 +2079,7 @@ mod tests {
                     VadEvent::SpeechEnd { at_ms: 100 },
                 ],
             }),
+            memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
         };

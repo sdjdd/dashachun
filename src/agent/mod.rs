@@ -1,6 +1,7 @@
 mod composite;
 mod emotion;
 mod factory;
+mod memory;
 mod prompt;
 mod store;
 pub mod tool;
@@ -11,6 +12,7 @@ use futures_util::Stream;
 
 pub use composite::CompositeAgent;
 pub use factory::AgentFactory;
+pub use memory::{InMemMemory, InMemMemoryFactory, Memory, MemoryFactory};
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
