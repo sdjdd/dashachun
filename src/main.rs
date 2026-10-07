@@ -4,8 +4,8 @@ use std::time::Duration;
 use dashachun::agent::{
     AgentFactory, AgentStore, InMemMemoryFactory, ToolRegistry, tool::GetWeather,
 };
+use dashachun::asr::Asr;
 use dashachun::asr::volc::VolcAsr;
-use dashachun::asr::{Asr, StubAsr};
 use dashachun::audio::DOWNLINK;
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig};
@@ -31,8 +31,8 @@ async fn main() {
             Arc::new(volc)
         }
         None => {
-            tracing::info!("using stub asr provider");
-            Arc::new(StubAsr::default())
+            tracing::error!("VOLC_ASR_API_KEY and VOLC_ASR_BASE_URL are required");
+            std::process::exit(1);
         }
     };
     let vad = Arc::new(SileroVadFactory::from_env());
