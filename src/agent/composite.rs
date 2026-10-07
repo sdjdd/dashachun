@@ -119,9 +119,7 @@ async fn drive(
                             &mut completion,
                             &mut synthesis,
                             &mut speaking,
-                        )
-                        .await
-                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        ) && out_tx.send(AgentOutput::TtsAbort).await.is_err()
                         {
                             break;
                         }
@@ -174,8 +172,7 @@ async fn drive(
                             &mut completion,
                             &mut synthesis,
                             &mut speaking,
-                        )
-                        .await;
+                        );
                         generation += 1;
                         utterance = None;
                         completion = None;
@@ -230,10 +227,10 @@ async fn drive(
                             continue;
                         }
                         if let Some(current) = completion.take() {
-                            current.cancel().await;
+                            current.cancel();
                         }
                         if let Some(current) = synthesis.take() {
-                            current.cancel().await;
+                            current.cancel();
                         }
                         if speaking
                             && out_tx.send(AgentOutput::TtsAbort).await.is_err()
@@ -419,35 +416,29 @@ async fn drive(
         &mut completion,
         &mut synthesis,
         &mut speaking,
-    )
-    .await;
+    );
 }
 
-/// Cancels every in-flight stage and reports whether a spoken reply was still
-/// playing, so the caller can tell the gateway to drop its buffered playback.
-async fn cancel_in_flight(
+/// Cancels every in-flight stage without waiting and reports whether a spoken
+/// reply was still playing, so the caller can tell the gateway to drop its
+/// buffered playback. Each provider handshake runs detached: generation gating
+/// already filters stale events, so a stalled provider must never be allowed
+/// to freeze the driver loop.
+fn cancel_in_flight(
     utterance: &mut Option<Utterance>,
     completion: &mut Option<Completion>,
     synthesis: &mut Option<Synthesis>,
     speaking: &mut bool,
 ) -> bool {
-    tokio::join!(
-        async {
-            if let Some(current) = utterance.take() {
-                current.cancel().await;
-            }
-        },
-        async {
-            if let Some(current) = completion.take() {
-                current.cancel().await;
-            }
-        },
-        async {
-            if let Some(current) = synthesis.take() {
-                current.cancel().await;
-            }
-        },
-    );
+    if let Some(current) = utterance.take() {
+        current.cancel();
+    }
+    if let Some(current) = completion.take() {
+        current.cancel();
+    }
+    if let Some(current) = synthesis.take() {
+        current.cancel();
+    }
     std::mem::take(speaking)
 }
 
@@ -462,11 +453,15 @@ impl Utterance {
         self.handle.take();
     }
 
-    async fn cancel(mut self) {
+    fn cancel(mut self) {
+        let handle = self.handle.take();
         self.cancel.cancel();
-        if let Some(mut handle) = self.handle.take() {
-            stop_task(&mut handle).await;
-        }
+        drop(self);
+        tokio::spawn(async move {
+            if let Some(mut handle) = handle {
+                stop_task(&mut handle).await;
+            }
+        });
     }
 }
 
@@ -484,9 +479,12 @@ struct Completion {
 }
 
 impl Completion {
-    async fn cancel(mut self) {
+    fn cancel(self) {
         self.cancel.cancel();
-        stop_task(&mut self.handle).await;
+        tokio::spawn(async move {
+            let mut this = self;
+            stop_task(&mut this.handle).await;
+        });
     }
 }
 
@@ -507,11 +505,15 @@ impl Synthesis {
         self.handle.take();
     }
 
-    async fn cancel(mut self) {
+    fn cancel(mut self) {
+        let handle = self.handle.take();
         self.cancel.cancel();
-        if let Some(mut handle) = self.handle.take() {
-            stop_task(&mut handle).await;
-        }
+        drop(self);
+        tokio::spawn(async move {
+            if let Some(mut handle) = handle {
+                stop_task(&mut handle).await;
+            }
+        });
     }
 }
 
@@ -1185,6 +1187,84 @@ mod tests {
             }
         }
         assert!(aborted, "second final must abort the in-flight reply");
+    }
+
+    /// Models a provider whose task never exits, even when cancelled: the
+    /// cancel handshake can only resolve through the `CANCEL_TIMEOUT` abort,
+    /// so anything the driver does while waiting must happen detached.
+    struct ImmortalTts;
+
+    impl Tts for ImmortalTts {
+        fn synthesize(&self, mut text: TextStream, _cancel: CancellationToken) -> TtsEvents<'_> {
+            let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
+            tokio::spawn(async move {
+                while let Some(chunk) = text.next().await {
+                    if !chunk.is_empty() {
+                        let _ = tx.send(Ok(TtsEvent::Audio(vec![0.25; 960])));
+                    }
+                }
+                futures_util::future::pending::<()>().await;
+            });
+            Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|event| (event, rx))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_tts_cancel_does_not_delay_next_reply() {
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(HangingLlm),
+            tts: Arc::new(ImmortalTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                    VadEvent::SpeechStart { at_ms: 200 },
+                    VadEvent::SpeechEnd { at_ms: 300 },
+                ],
+            }),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::TtsStart) {
+                break;
+            }
+        }
+
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let quick = tokio::time::Instant::now() + Duration::from_secs(1);
+        let mut restarted = false;
+        while let Some(item) = tokio::time::timeout_at(quick, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::TtsStart) {
+                restarted = true;
+                break;
+            }
+        }
+        assert!(
+            restarted,
+            "next reply must start without waiting for the stalled tts"
+        );
     }
 
     /// Emits `SpeechStart` + `Speech` on every push and `SpeechEnd` on flush,
@@ -1943,6 +2023,13 @@ mod tests {
             .unwrap();
         let item = output.next().await;
         assert!(matches!(item, Some(AgentOutput::TtsAbort)), "got {item:?}");
-        assert!(*cancelled.lock().unwrap(), "tts was not cancelled");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !*cancelled.lock().unwrap() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "tts was not cancelled"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 }
