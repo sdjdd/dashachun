@@ -2,11 +2,12 @@ use std::fmt;
 use std::pin::Pin;
 
 use futures_util::Stream;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 pub type LlmEvents<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -20,7 +21,8 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatItem {
     System {
         content: String,
@@ -29,7 +31,9 @@ pub enum ChatItem {
         content: String,
     },
     Assistant {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
     },
     Tool {
@@ -124,4 +128,85 @@ pub trait Llm: Send + Sync {
         tools: Vec<ToolSpec>,
         cancel: CancellationToken,
     ) -> LlmEvents<'_>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_items_serialize_with_ai_sdk_roles() {
+        assert_eq!(
+            serde_json::to_value(ChatItem::user("hello")).unwrap(),
+            json!({"role": "user", "content": "hello"})
+        );
+        assert_eq!(
+            serde_json::to_value(ChatItem::assistant("hi")).unwrap(),
+            json!({"role": "assistant", "content": "hi"})
+        );
+        let round = ChatItem::assistant_text_tool_calls(
+            "好的，我查一下",
+            vec![ToolCall {
+                id: "call_x".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            }],
+        );
+        assert_eq!(
+            serde_json::to_value(round).unwrap(),
+            json!({
+                "role": "assistant",
+                "content": "好的，我查一下",
+                "tool_calls": [{"id": "call_x", "name": "lookup", "arguments": "{}"}]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ChatItem::tool("call_x", "result")).unwrap(),
+            json!({"role": "tool", "tool_call_id": "call_x", "content": "result"})
+        );
+    }
+
+    #[test]
+    fn assistant_json_omits_absent_fields() {
+        let calls = vec![ToolCall {
+            id: "call_x".into(),
+            name: "lookup".into(),
+            arguments: "{}".into(),
+        }];
+        assert_eq!(
+            serde_json::to_value(ChatItem::assistant_tool_calls(calls)).unwrap(),
+            json!({
+                "role": "assistant",
+                "tool_calls": [{"id": "call_x", "name": "lookup", "arguments": "{}"}]
+            })
+        );
+    }
+
+    #[test]
+    fn chat_item_json_round_trips() {
+        let items = vec![
+            ChatItem::system("system prompt"),
+            ChatItem::user("hello"),
+            ChatItem::assistant("hi"),
+            ChatItem::assistant_text_tool_calls(
+                "好的",
+                vec![ToolCall {
+                    id: "1".into(),
+                    name: "a".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "2".into(),
+                name: "b".into(),
+                arguments: "{}".into(),
+            }]),
+            ChatItem::tool("1", "one"),
+        ];
+        for item in items {
+            let value = serde_json::to_value(&item).unwrap();
+            assert_eq!(serde_json::from_value::<ChatItem>(value).unwrap(), item);
+        }
+    }
 }

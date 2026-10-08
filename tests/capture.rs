@@ -43,7 +43,7 @@ async fn utterance_audio_attaches_to_the_user_row_through_the_hook(pool: PgPool)
             .fetch_one(&pool)
             .await
             .unwrap();
-    let (row_id, role): (i64, String) = sqlx::query_as("SELECT id, role FROM messages")
+    let (row_id, role): (i64, String) = sqlx::query_as("SELECT id, message->>'role' FROM messages")
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -55,13 +55,13 @@ async fn utterance_audio_attaches_to_the_user_row_through_the_hook(pool: PgPool)
 
 #[sqlx::test]
 #[ignore]
-async fn reply_audio_attaches_to_the_turn_row_through_the_hook(pool: PgPool) {
+async fn reply_audio_attaches_to_the_final_reply_row_through_the_hook(pool: PgPool) {
     let (memory, audio) = wired_memory(&pool).await;
 
     let recording = audio.start_reply(&common::session("sess-2"));
     recording.push(&[0.25; 960]);
-    // The turn row is written in the background: finishing before the commit
-    // lands exercises the capture waiting for the hook.
+    // The turn's rows are written in the background: finishing before the
+    // commit lands exercises the capture waiting for the hook.
     memory.log_items(
         &common::session("sess-2"),
         vec![
@@ -81,11 +81,14 @@ async fn reply_audio_attaches_to_the_turn_row_through_the_hook(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    let (row_id, role): (i64, String) = sqlx::query_as("SELECT id, role FROM messages")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let (row_id, role, content): (i64, String, Option<String>) = sqlx::query_as(
+        "SELECT id, message->>'role', message->>'content' FROM messages ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(role, "assistant");
+    assert_eq!(content.as_deref(), Some("sunny today"));
     assert_eq!(message_id, row_id);
 }
 
@@ -105,7 +108,7 @@ async fn partial_reply_audio_attaches_to_the_truncated_row(pool: PgPool) {
         .await
         .unwrap();
     let (row_id, content): (i64, Option<String>) =
-        sqlx::query_as("SELECT id, content FROM messages")
+        sqlx::query_as("SELECT id, message->>'content' FROM messages")
             .fetch_one(&pool)
             .await
             .unwrap();

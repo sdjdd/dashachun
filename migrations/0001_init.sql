@@ -48,13 +48,13 @@ CREATE TABLE devices (
 CREATE INDEX devices_user_id_idx ON devices (user_id);
 CREATE INDEX devices_agent_id_idx ON devices (agent_id);
 
--- The durable conversation log: one row per turn. A user row carries the
--- utterance text; an assistant row carries the turn's final reply text plus
--- the whole tool exchange as an ordered JSONB `parts` array (call arguments
--- and results are kept verbatim as strings — no parsing, no type guessing;
--- the round boundaries are recoverable from the part order). `System` items
--- are never stored (the agent prepends its prompt every turn). Integrity is
--- enforced in the app layer; no foreign keys.
+-- The durable conversation log: one row per message, the JSON form of the
+-- agent's `ChatItem` in the AI SDK ModelMessage shape (`role` as the serde
+-- tag; user rows carry the utterance, assistant rows text and/or tool-call
+-- requests, tool rows one result each — `ORDER BY id` rebuilds the
+-- conversation). `System` messages are never stored (the agent prepends its
+-- prompt every turn). Integrity is enforced in the app layer; no foreign
+-- keys.
 CREATE TABLE messages (
     id           BIGSERIAL PRIMARY KEY,
     session_id   TEXT NOT NULL,
@@ -62,17 +62,16 @@ CREATE TABLE messages (
     agent_id     BIGINT NOT NULL,
     client_id    UUID NOT NULL,
     device_id    TEXT,
-    role         TEXT NOT NULL,          -- 'user' | 'assistant'
-    content      TEXT,                   -- user: utterance text; assistant: final reply text (NULL when the turn ended without one)
-    parts        JSONB,                  -- assistant: [{type:'tool_call',id,name,arguments},{type:'tool_result',tool_call_id,content}]
+    message      JSONB NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX messages_user_id_idx ON messages (user_id, created_at);
 CREATE INDEX messages_session_id_idx ON messages (session_id, created_at);
 
--- FLAC capture (16-bit PCM, metadata blocks + frames) attached to its user
--- message; playback and voice-cloning pipelines read it with any decoder.
+-- FLAC capture (16-bit PCM, metadata blocks + frames) attached to its
+-- message (the user message for uplink, the turn's last message for
+-- downlink); playback and voice-cloning pipelines read it with any decoder.
 CREATE TABLE message_audios (
     id          BIGSERIAL PRIMARY KEY,
     message_id  BIGINT NOT NULL,

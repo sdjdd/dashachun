@@ -91,7 +91,7 @@ impl Capture for AudioCapture {
                 return;
             };
             let Ok(message_id) = rx_id.await else {
-                debug!(session_id, "reply audio discarded: no turn row");
+                debug!(session_id, "reply audio discarded: no message row");
                 return;
             };
             match store_audio(
@@ -121,9 +121,9 @@ pub trait Capture: Send + Sync {
     fn start_utterance(&self, session: &AgentSession) -> UtteranceCapture;
 
     /// Starts capturing the synthesized reply audio (the server's own
-    /// downlink format). Finishing it attaches the audio to the turn row
-    /// the memory commits — full or truncated partial alike; dropping the
-    /// capture discards it.
+    /// downlink format). Finishing it attaches the audio to the last
+    /// message row the memory commits for the turn — full or truncated
+    /// partial alike; dropping the capture discards it.
     fn start_reply(&self, session: &AgentSession) -> ReplyCapture;
 }
 
@@ -166,8 +166,9 @@ impl UtteranceCapture {
 }
 
 /// Handle over one reply's audio capture: the synthesized reply in the
-/// server's downlink format. Finishing attaches the audio to the turn row
-/// the memory commits; dropping it discards the capture.
+/// server's downlink format. Finishing attaches the audio to the last
+/// message row the memory commits for the turn; dropping it discards the
+/// capture.
 pub struct ReplyCapture {
     tx: mpsc::UnboundedSender<Frame>,
 }
@@ -187,10 +188,11 @@ impl ReplyCapture {
         let _ = self.tx.send(Frame::Chunk(samples.to_vec()));
     }
 
-    /// Ends the capture: the audio attaches to the turn row the memory
-    /// commits — the completed turn row, or the truncated partial row for a
-    /// reply cut before the model finished. Dropping the capture without
-    /// finishing discards it.
+    /// Ends the capture: the audio attaches to the last message row the
+    /// memory commits for the turn — the final reply row, the last tool row
+    /// of a reply-less turn, or the truncated partial row for a reply cut
+    /// before the model finished. Dropping the capture without finishing
+    /// discards it.
     pub fn finish(self) {
         let _ = self.tx.send(Frame::Finish);
     }

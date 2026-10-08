@@ -64,16 +64,17 @@ pub trait Memory: Send + Sync {
     /// hooks once it commits. Empty text stores nothing.
     async fn store_utterance(&self, session: &AgentSession, text: &str) -> Result<(), String>;
 
-    /// Writes the turn row — the tool exchange plus the final reply — in a
-    /// background task and notifies the hooks once it commits. A turn that
-    /// produced nothing stores nothing. Fire-and-forget: failures are
+    /// Writes the turn's assistant and tool messages in one background
+    /// transaction and notifies the hooks once it commits — the hook
+    /// carries the last written row's id, the capture attach point. A turn
+    /// that produced nothing stores nothing. Fire-and-forget: failures are
     /// logged, never surfaced.
     fn log_items(&self, session: &AgentSession, items: Vec<ChatItem>);
 
-    /// Writes a truncated assistant row for a reply cut mid-flight before
-    /// the turn completed, and notifies the hooks once it commits. Empty
-    /// text stores nothing. Fire-and-forget: failures are logged, never
-    /// surfaced.
+    /// Writes a truncated assistant message row for a reply cut mid-flight
+    /// before the turn completed, and notifies the hooks once it commits.
+    /// Empty text stores nothing. Fire-and-forget: failures are logged,
+    /// never surfaced.
     fn store_partial_reply(&self, session: &AgentSession, text: &str);
 }
 
@@ -83,8 +84,8 @@ pub trait Memory: Send + Sync {
 /// owning assistant tool-call message is an invalid request for
 /// OpenAI-compatible APIs, so one oversized tool turn may exceed the cap but
 /// an exchange is never split. The preload query uses the same limit in
-/// rows — every turn row unfolds to at least one item, so the loaded window
-/// fills the cap before trimming.
+/// rows — a row is exactly one message, so the loaded window fills the cap
+/// before trimming.
 pub(crate) const HISTORY_LIMIT: usize = 20;
 
 /// Drops the oldest items past the cap, widening the window backwards over
