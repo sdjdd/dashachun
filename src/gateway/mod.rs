@@ -185,7 +185,7 @@ mod tests {
     use super::Gateway;
     use crate::agent::{
         Agent, AgentFactory, AgentInputStream, AgentOutputStream, AgentSession, AgentStore,
-        InMemMemoryFactory, ToolRegistry,
+        ToolRegistry,
     };
     use crate::asr::StubAsr;
     use crate::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
@@ -230,7 +230,6 @@ mod tests {
                 Arc::new(StubLlm::default()),
                 Arc::new(StubTts),
                 Arc::new(SileroVadFactory::new(VadConfig::default())),
-                Arc::new(InMemMemoryFactory),
                 Arc::new(ToolRegistry::new(Vec::new())),
                 AgentStore::new(pool.clone()),
                 pool.clone(),

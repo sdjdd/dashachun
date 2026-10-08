@@ -6,7 +6,7 @@ use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use dashachun::agent::{AgentFactory, AgentStore, InMemMemoryFactory, ToolRegistry};
+use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry};
 use dashachun::asr::StubAsr;
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
@@ -49,7 +49,6 @@ fn state_with_url(pool: PgPool, websocket_url: Option<String>) -> ServerState {
             Arc::new(StubLlm::default()),
             Arc::new(StubTts),
             Arc::new(SileroVadFactory::new(VadConfig::default())),
-            Arc::new(InMemMemoryFactory),
             Arc::new(ToolRegistry::new(Vec::new())),
             AgentStore::new(pool.clone()),
             pool.clone(),

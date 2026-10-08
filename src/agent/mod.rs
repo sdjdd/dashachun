@@ -1,3 +1,4 @@
+mod capture;
 mod composite;
 pub mod dto;
 mod emotion;
@@ -6,22 +7,18 @@ mod memory;
 mod prompt;
 mod store;
 pub mod tool;
-pub mod transcript;
 
 use std::pin::Pin;
 
 use futures_util::Stream;
 
+pub use capture::{AudioCapture, Capture, Frame, ReplyCapture, UtteranceCapture, collect};
 pub use composite::CompositeAgent;
 pub use factory::AgentFactory;
-pub use memory::{InMemMemory, InMemMemoryFactory, Memory, MemoryFactory};
+pub use memory::{DbMemory, InMemMemory, Memory, MemoryHook, MemoryOwner};
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
-pub use transcript::{
-    DbTranscriptSink, ReplyFinish, ReplyReceipt, ReplyRecording, TranscriptOwner, TranscriptSink,
-    UtteranceRecording,
-};
 
 pub type AgentInputStream = Pin<Box<dyn Stream<Item = AgentInput> + Send>>;
 pub type AgentOutputStream = Pin<Box<dyn Stream<Item = AgentOutput> + Send>>;
