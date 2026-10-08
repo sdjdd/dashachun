@@ -1174,6 +1174,28 @@ mod tests {
         }
     }
 
+    impl ScriptedVadFactory {
+        /// One utterance per entry: SpeechStart, one Speech per sample count,
+        /// then SpeechEnd, with `at_ms` advancing 100 ms per event (no test
+        /// asserts on it).
+        fn utterances(utterances: &[&[usize]]) -> Self {
+            let mut events = Vec::new();
+            let mut at_ms = 0;
+            for samples in utterances {
+                events.push(VadEvent::SpeechStart { at_ms });
+                at_ms += 100;
+                for count in *samples {
+                    events.push(VadEvent::Speech {
+                        samples: vec![0.5; *count],
+                    });
+                }
+                events.push(VadEvent::SpeechEnd { at_ms });
+                at_ms += 100;
+            }
+            Self { events }
+        }
+    }
+
     fn input_channel() -> (mpsc::Sender<AgentInput>, AgentInputStream) {
         let (tx, rx) = mpsc::channel::<AgentInput>(8);
         let stream: AgentInputStream =
@@ -1196,64 +1218,154 @@ mod tests {
         Arc::new(ToolRegistry::new(Vec::new()))
     }
 
-    #[tokio::test]
-    async fn audio_drives_vad_asr_to_stt() {
-        let agent = CompositeAgent {
+    const OUTPUT_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// The all-stub agent: every field a quiet default, overridden per test
+    /// through struct-update syntax (`..stub_agent()`).
+    fn stub_agent() -> CompositeAgent {
+        CompositeAgent {
             asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(StubLlm::default()),
             tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
+            vad: Arc::new(ScriptedVadFactory { events: Vec::new() }),
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
             capture: None,
-        };
+        }
+    }
+
+    /// Opens the input channel and runs the agent on the shared test session.
+    fn run(agent: CompositeAgent) -> (mpsc::Sender<AgentInput>, AgentOutputStream) {
         let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        (tx, agent.run(session(), input))
+    }
+
+    /// Drains the output until an item matches, panicking on timeout (or an
+    /// ended stream) with everything seen so far.
+    async fn next_matching(
+        output: &mut AgentOutputStream,
+        pred: impl Fn(&AgentOutput) -> bool,
+    ) -> AgentOutput {
+        next_matching_within(output, OUTPUT_TIMEOUT, pred).await
+    }
+
+    async fn next_matching_within(
+        output: &mut AgentOutputStream,
+        timeout: Duration,
+        pred: impl Fn(&AgentOutput) -> bool,
+    ) -> AgentOutput {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout_at(deadline, output.next()).await {
+                Ok(Some(item)) if pred(&item) => return item,
+                Ok(Some(item)) => seen.push(item),
+                Ok(None) => panic!("output ended without a match; seen: {seen:?}"),
+                Err(_) => panic!("no matching item within {timeout:?}; seen: {seen:?}"),
+            }
+        }
+    }
+
+    /// Drains the output up to and including the reply's `TtsStop`, returning
+    /// every item in order.
+    async fn collect_reply(output: &mut AgentOutputStream) -> Vec<AgentOutput> {
+        let deadline = tokio::time::Instant::now() + OUTPUT_TIMEOUT;
+        let mut seen = Vec::new();
+        loop {
+            match tokio::time::timeout_at(deadline, output.next()).await {
+                Ok(Some(item)) => {
+                    let done = matches!(item, AgentOutput::TtsStop);
+                    seen.push(item);
+                    if done {
+                        return seen;
+                    }
+                }
+                Ok(None) => panic!("output ended before tts stop; seen: {seen:?}"),
+                Err(_) => panic!("no tts stop within {OUTPUT_TIMEOUT:?}; seen: {seen:?}"),
+            }
+        }
+    }
+
+    /// Polls `f` until it yields `Some`, panicking after the deadline.
+    async fn wait_until<T>(what: &str, f: impl Fn() -> Option<T>) -> T {
+        let deadline = tokio::time::Instant::now() + OUTPUT_TIMEOUT;
+        loop {
+            if let Some(value) = f() {
+                return value;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what} not observed"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn wait_for_calls(
+        calls: &Arc<Mutex<Vec<Vec<ChatItem>>>>,
+        len: usize,
+    ) -> Vec<Vec<ChatItem>> {
+        wait_until("llm calls", || {
+            let snapshot = calls.lock().unwrap().clone();
+            (snapshot.len() >= len).then_some(snapshot)
+        })
+        .await
+    }
+
+    async fn wait_for_replies(replies: &StoredReplies, len: usize) -> Vec<FakeReply> {
+        wait_until("fake replies", || {
+            let snapshot = replies.lock().unwrap().clone();
+            (snapshot.len() >= len).then_some(snapshot)
+        })
+        .await
+    }
+
+    async fn wait_for_utterances(utterances: &StoredUtterances, len: usize) -> Vec<Vec<Vec<f32>>> {
+        wait_until("fake utterances", || {
+            let snapshot = utterances.lock().unwrap().clone();
+            (snapshot.len() >= len).then_some(snapshot)
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn audio_drives_vad_asr_to_stt() {
+        let agent = CompositeAgent {
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
+        };
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut finals = Vec::new();
-        while let Some(item) = output.next().await {
-            if let AgentOutput::Stt { text, is_final } = item
-                && is_final
-            {
-                finals.push(text);
-                break;
-            }
-        }
-        assert_eq!(finals, vec!["hello".to_string()]);
+        let item = next_matching(&mut output, |item| {
+            matches!(item, AgentOutput::Stt { is_final: true, .. })
+        })
+        .await;
+        let AgentOutput::Stt {
+            text,
+            is_final: true,
+        } = item
+        else {
+            panic!("matched item was not a final stt: {item:?}");
+        };
+        assert_eq!(text, "hello");
     }
 
     #[tokio::test]
     async fn interrupt_emits_tts_stop() {
-        let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm: Arc::new(StubLlm::default()),
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory { events: vec![] }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
-        };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let agent = stub_agent();
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::Interrupt { reason: None })
             .await
             .unwrap();
 
-        let item = output.next().await;
-        assert!(matches!(item, Some(AgentOutput::TtsAbort)), "got {item:?}");
+        next_matching(&mut output, |item| matches!(item, AgentOutput::TtsAbort)).await;
     }
 
     /// Holds the synthesis open (never emits `Done`) until cancelled, so a
@@ -1281,58 +1393,26 @@ mod tests {
     #[tokio::test]
     async fn new_utterance_final_aborts_in_flight_tts() {
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(ScriptedLlm {
                 reply: "hi".into(),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),
             tts: Arc::new(HeldTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                    VadEvent::SpeechStart { at_ms: 200 },
-                    VadEvent::SpeechEnd { at_ms: 300 },
-                ],
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::TtsStart) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| matches!(item, AgentOutput::TtsStart)).await;
 
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut aborted = false;
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::TtsAbort) {
-                aborted = true;
-                break;
-            }
-        }
-        assert!(aborted, "second final must abort the in-flight reply");
+        next_matching(&mut output, |item| matches!(item, AgentOutput::TtsAbort)).await;
     }
 
     /// Models a provider whose task never exits, even when cancelled: the
@@ -1360,59 +1440,28 @@ mod tests {
     #[tokio::test]
     async fn stalled_tts_cancel_does_not_delay_next_reply() {
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(HangingLlm),
             tts: Arc::new(ImmortalTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                    VadEvent::SpeechStart { at_ms: 200 },
-                    VadEvent::SpeechEnd { at_ms: 300 },
-                ],
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::TtsStart) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| matches!(item, AgentOutput::TtsStart)).await;
 
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let quick = tokio::time::Instant::now() + Duration::from_secs(1);
-        let mut restarted = false;
-        while let Some(item) = tokio::time::timeout_at(quick, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::TtsStart) {
-                restarted = true;
-                break;
-            }
-        }
-        assert!(
-            restarted,
-            "next reply must start without waiting for the stalled tts"
-        );
+        // The next reply must start without waiting for the stalled tts:
+        // the abort path may only block for the short cancel timeout.
+        next_matching_within(&mut output, Duration::from_secs(1), |item| {
+            matches!(item, AgentOutput::TtsStart)
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1422,34 +1471,17 @@ mod tests {
         // LLM runs, its reply after).
         let turns = HISTORY_LIMIT / 2 + 5;
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let silent: &[usize] = &[];
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(ScriptedLlm {
                 reply: "hi".into(),
                 calls: calls.clone(),
             }),
             tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: (0..turns)
-                    .flat_map(|k| {
-                        vec![
-                            VadEvent::SpeechStart {
-                                at_ms: k as u64 * 100,
-                            },
-                            VadEvent::SpeechEnd {
-                                at_ms: k as u64 * 100 + 50,
-                            },
-                        ]
-                    })
-                    .collect(),
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&vec![silent; turns])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -1459,13 +1491,7 @@ mod tests {
             wait_for_calls(&calls, turn).await;
             // Wait for the turn to complete so its assistant item is in the
             // memory before the next turn's audio can barge in.
-            loop {
-                match output.next().await {
-                    Some(AgentOutput::TtsStop) => break,
-                    Some(_) => {}
-                    None => panic!("agent output ended before turn {turn} finished"),
-                }
-            }
+            next_matching(&mut output, |item| matches!(item, AgentOutput::TtsStop)).await;
         }
 
         let calls = calls.lock().unwrap().clone();
@@ -1603,45 +1629,32 @@ mod tests {
     async fn slow_tts_receives_every_delta() {
         let reply = "字".repeat(200);
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(ChunkedLlm {
                 reply: reply.clone(),
             }),
             tts: Arc::new(SlowTts {
                 delay: Duration::from_millis(1),
             }),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut sentence = None;
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if let AgentOutput::TtsSentence { text } = item {
-                sentence = Some(text);
-                break;
-            }
-        }
-        assert_eq!(sentence.as_deref(), Some(reply.as_str()));
+        // 200 one-char deltas through a 1 ms-per-chunk consumer: the
+        // sentence must arrive whole, never truncated by backpressure.
+        let item = next_matching_within(&mut output, Duration::from_secs(5), |item| {
+            matches!(item, AgentOutput::TtsSentence { .. })
+        })
+        .await;
+        let AgentOutput::TtsSentence { text } = item else {
+            panic!("matched item was not a tts sentence: {item:?}");
+        };
+        assert_eq!(text, reply);
     }
 
     #[tokio::test]
@@ -1652,16 +1665,10 @@ mod tests {
                 delay: Duration::from_millis(1),
                 chunks: chunks.clone(),
             }),
-            llm: Arc::new(StubLlm::default()),
-            tts: Arc::new(StubTts),
             vad: Arc::new(StreamVadFactory),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -1671,62 +1678,25 @@ mod tests {
         }
         tx.send(AgentInput::ListenStop).await.unwrap();
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let item = tokio::time::timeout_at(deadline, output.next())
-                .await
-                .ok()
-                .flatten();
-            match item {
-                Some(AgentOutput::Stt { is_final: true, .. }) => break,
-                Some(_) => continue,
-                None => panic!("asr never produced a final transcription"),
-            }
-        }
+        next_matching_within(&mut output, Duration::from_secs(5), |item| {
+            matches!(item, AgentOutput::Stt { is_final: true, .. })
+        })
+        .await;
         assert_eq!(chunks.lock().unwrap().len(), 80);
-    }
-
-    async fn wait_for_calls(
-        calls: &Arc<Mutex<Vec<Vec<ChatItem>>>>,
-        len: usize,
-    ) -> Vec<Vec<ChatItem>> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let snapshot = calls.lock().unwrap().clone();
-            if snapshot.len() >= len {
-                return snapshot;
-            }
-            assert!(tokio::time::Instant::now() < deadline, "llm not called");
-            tokio::task::yield_now().await;
-        }
     }
 
     #[tokio::test]
     async fn llm_receives_history_and_reply_accumulates() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
-            reply: "hi".into(),
-            calls: calls.clone(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                    VadEvent::SpeechStart { at_ms: 200 },
-                    VadEvent::SpeechEnd { at_ms: 300 },
-                ],
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: calls.clone(),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let _output = agent.run(session(), input);
+        let (tx, _output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -1753,42 +1723,23 @@ mod tests {
 
     #[tokio::test]
     async fn emoji_prefix_emits_emotion_and_strips_tts_text() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
-            reply: "🙂你好呀".into(),
-            calls: calls.clone(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ScriptedLlm {
+                reply: "🙂你好呀".into(),
+                calls: Arc::new(Mutex::new(Vec::new())),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(item) = output.next().await {
-            let done = matches!(item, AgentOutput::TtsStop);
-            seen.push(item);
-            if done {
-                break;
-            }
-        }
+        let seen = collect_reply(&mut output).await;
 
         let emotion_pos = seen.iter().position(
             |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "happy"),
@@ -1818,42 +1769,23 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_emoji_is_stripped_but_emits_no_emotion() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
-            reply: "🦄你好".into(),
-            calls: calls.clone(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ScriptedLlm {
+                reply: "🦄你好".into(),
+                calls: Arc::new(Mutex::new(Vec::new())),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(item) = output.next().await {
-            let done = matches!(item, AgentOutput::TtsStop);
-            seen.push(item);
-            if done {
-                break;
-            }
-        }
+        let seen = collect_reply(&mut output).await;
 
         assert!(
             !seen
@@ -1871,29 +1803,15 @@ mod tests {
     #[tokio::test]
     async fn emotion_is_kept_in_history() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
-            reply: "🙂你好".into(),
-            calls: calls.clone(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                    VadEvent::SpeechStart { at_ms: 200 },
-                    VadEvent::SpeechEnd { at_ms: 300 },
-                ],
+            llm: Arc::new(ScriptedLlm {
+                reply: "🙂你好".into(),
+                calls: calls.clone(),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let _output = agent.run(session(), input);
+        let (tx, _output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -1918,27 +1836,16 @@ mod tests {
     #[tokio::test]
     async fn system_prompt_is_prepended_to_llm_history() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
-            reply: "hi".into(),
-            calls: calls.clone(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: calls.clone(),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
             system_prompt: SystemPrompt::new("Be a helpful assistant."),
-            capture: None,
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let _output = agent.run(session(), input);
+        let (tx, _output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -1956,32 +1863,20 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_degrades_gracefully() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
-            calls: calls.clone(),
-            tool_calls: vec![ToolCall {
-                id: "call_x".into(),
-                name: "nonexistent".into(),
-                arguments: "{}".into(),
-            }],
-            reply: "ok".into(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ToolCallingLlm {
+                calls: calls.clone(),
+                tool_calls: vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }],
+                reply: "ok".into(),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let _output = agent.run(session(), input);
+        let (tx, _output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -2005,47 +1900,28 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_emits_thinking_emotion() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
-            calls: calls.clone(),
-            tool_calls: vec![ToolCall {
-                id: "call_x".into(),
-                name: "nonexistent".into(),
-                arguments: "{}".into(),
-            }],
-            reply: "🙂搞定".into(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ToolCallingLlm {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                tool_calls: vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }],
+                reply: "🙂搞定".into(),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(item) = output.next().await {
-            let done = matches!(item, AgentOutput::TtsStop);
-            seen.push(item);
-            if done {
-                break;
-            }
-        }
+        let seen = collect_reply(&mut output).await;
 
         let thinking = seen.iter().position(
             |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "thinking"),
@@ -2065,47 +1941,28 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_without_reply_emoji_resets_to_neutral() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let llm: Arc<dyn Llm> = Arc::new(ToolCallingLlm {
-            calls: calls.clone(),
-            tool_calls: vec![ToolCall {
-                id: "call_x".into(),
-                name: "nonexistent".into(),
-                arguments: "{}".into(),
-            }],
-            reply: "搞定了".into(),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ToolCallingLlm {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                tool_calls: vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }],
+                reply: "搞定了".into(),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(item) = output.next().await {
-            let done = matches!(item, AgentOutput::TtsStop);
-            seen.push(item);
-            if done {
-                break;
-            }
-        }
+        let seen = collect_reply(&mut output).await;
 
         let thinking = seen.iter().position(
             |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "thinking"),
@@ -2125,41 +1982,23 @@ mod tests {
 
     #[tokio::test]
     async fn tts_streams_sentence_audio_then_stop() {
-        let llm: Arc<dyn Llm> = Arc::new(ScriptedLlm {
-            reply: "hi".into(),
-            calls: Arc::new(Mutex::new(Vec::new())),
-        });
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm,
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: Arc::new(Mutex::new(Vec::new())),
             }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let mut seen = Vec::new();
-        while let Some(item) = output.next().await {
-            let done = matches!(item, AgentOutput::TtsStop);
-            seen.push(item);
-            if done {
-                break;
-            }
-        }
+        let seen = collect_reply(&mut output).await;
 
         assert!(matches!(seen.first(), Some(AgentOutput::Stt { .. })));
         assert!(
@@ -2229,50 +2068,28 @@ mod tests {
     async fn interrupt_cancels_in_flight_tts_instead_of_aborting() {
         let cancelled = Arc::new(Mutex::new(false));
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(HangingLlm),
             tts: Arc::new(CancelAwareTts {
                 cancelled: cancelled.clone(),
             }),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        loop {
-            let item = output.next().await;
-            if matches!(item, Some(AgentOutput::Audio(_))) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| matches!(item, AgentOutput::Audio(_))).await;
 
         tx.send(AgentInput::Interrupt { reason: None })
             .await
             .unwrap();
         let item = output.next().await;
         assert!(matches!(item, Some(AgentOutput::TtsAbort)), "got {item:?}");
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while !*cancelled.lock().unwrap() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "tts was not cancelled"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        wait_until("tts cancelled", || cancelled.lock().unwrap().then_some(())).await;
     }
 
     /// In-memory capture: records which utterances and replies finished,
@@ -2328,71 +2145,27 @@ mod tests {
         (capture, utterances, replies)
     }
 
-    async fn wait_for_replies(replies: &StoredReplies, len: usize) -> Vec<FakeReply> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let snapshot = replies.lock().unwrap().clone();
-            if snapshot.len() >= len {
-                return snapshot;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "replies not stored: {snapshot:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-
-    async fn wait_for_utterances(utterances: &StoredUtterances, len: usize) -> Vec<Vec<Vec<f32>>> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let snapshot = utterances.lock().unwrap().clone();
-            if snapshot.len() >= len {
-                return snapshot;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "utterances not stored: {snapshot:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-
     #[tokio::test]
     async fn finalized_utterance_stores_text_and_audio() {
         let memory = Arc::new(InMemMemory::default());
         let (capture, utterances, _replies) = fake_capture();
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm: Arc::new(StubLlm::default()),
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::Speech {
-                        samples: vec![0.5; 960],
-                    },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[960]])),
             memory: memory.clone(),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
             capture: Some(capture),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        while let Some(item) = output.next().await {
-            if matches!(item, AgentOutput::Stt { is_final: true, .. }) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| {
+            matches!(item, AgentOutput::Stt { is_final: true, .. })
+        })
+        .await;
 
         // The memory row is written (and the hook fired) before the capture
         // is finished, so the text is recorded by the time the audio lands.
@@ -2408,9 +2181,7 @@ mod tests {
         let memory = Arc::new(InMemMemory::default());
         let (capture, utterances, _replies) = fake_capture();
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
-            llm: Arc::new(StubLlm::default()),
-            tts: Arc::new(StubTts),
+            // No SpeechEnd: the interrupt must cancel the live utterance.
             vad: Arc::new(ScriptedVadFactory {
                 events: vec![
                     VadEvent::SpeechStart { at_ms: 0 },
@@ -2420,17 +2191,16 @@ mod tests {
                 ],
             }),
             memory: memory.clone(),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
             capture: Some(capture),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let _output = agent.run(session(), input);
+        let (tx, _output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
         // Let the driver spawn the utterance before cancelling it: the token
         // is cancelled before the ASR input closes, so the late final from
         // StubAsr must not finish the recording.
@@ -2450,21 +2220,12 @@ mod tests {
         let (capture, utterances, _replies) = fake_capture();
         let agent = CompositeAgent {
             asr: Arc::new(StubAsr::new("")),
-            llm: Arc::new(StubLlm::default()),
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
             memory: memory.clone(),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
             capture: Some(capture),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -2472,11 +2233,10 @@ mod tests {
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
         // StubAsr still emits its (empty) final; the driver answers nothing.
-        while let Some(item) = output.next().await {
-            if matches!(item, AgentOutput::Stt { is_final: true, .. }) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| {
+            matches!(item, AgentOutput::Stt { is_final: true, .. })
+        })
+        .await;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         assert!(utterances.lock().unwrap().is_empty());
@@ -2488,7 +2248,6 @@ mod tests {
         let memory = Arc::new(InMemMemory::default());
         let calls = Arc::new(Mutex::new(Vec::new()));
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(ToolCallingLlm {
                 calls: calls.clone(),
                 tool_calls: vec![ToolCall {
@@ -2498,20 +2257,11 @@ mod tests {
                 }],
                 reply: "ok".into(),
             }),
-            tts: Arc::new(StubTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
             memory: memory.clone(),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
-            capture: None,
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let _output = agent.run(session(), input);
+        let (tx, _output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -2519,18 +2269,7 @@ mod tests {
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
         wait_for_calls(&calls, 2).await;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let logged = loop {
-            let snapshot = memory.logged_turns();
-            if let Some(items) = snapshot.first() {
-                break items.clone();
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "turn items never logged"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        };
+        let logged = wait_until("turn items", || memory.logged_turns().first().cloned()).await;
         assert_eq!(
             logged,
             vec![
@@ -2549,25 +2288,16 @@ mod tests {
     async fn completed_reply_audio_is_stored() {
         let (capture, _utterances, replies) = fake_capture();
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(ScriptedLlm {
                 reply: "hi".into(),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),
             tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
             capture: Some(capture),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -2576,16 +2306,7 @@ mod tests {
 
         // The natural tts stop finishes the capture; the audio attaches to
         // the turn row through the memory's hook.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::TtsStop) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| matches!(item, AgentOutput::TtsStop)).await;
 
         let stored = wait_for_replies(&replies, 1).await;
         assert_eq!(
@@ -2600,27 +2321,16 @@ mod tests {
     async fn aborted_reply_after_done_keeps_the_full_row_attachment() {
         let (capture, _utterances, replies) = fake_capture();
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(ScriptedLlm {
                 reply: "hi".into(),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),
             tts: Arc::new(HeldTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                    VadEvent::SpeechStart { at_ms: 200 },
-                    VadEvent::SpeechEnd { at_ms: 300 },
-                ],
-            }),
-            memory: Arc::new(InMemMemory::default()),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
             capture: Some(capture),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -2630,16 +2340,7 @@ mod tests {
         // Wait until the reply is playing and its turn has completed (the
         // hook has fired), then start the next utterance: the barge-in must
         // attach the partial audio to the full reply row.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::Audio(_)) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| matches!(item, AgentOutput::Audio(_))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
@@ -2684,22 +2385,14 @@ mod tests {
         let memory = Arc::new(InMemMemory::default());
         let (capture, _utterances, replies) = fake_capture();
         let agent = CompositeAgent {
-            asr: Arc::new(StubAsr::new("hello")),
             llm: Arc::new(FailingLlm { reply: "hi".into() }),
             tts: Arc::new(HeldTts),
-            vad: Arc::new(ScriptedVadFactory {
-                events: vec![
-                    VadEvent::SpeechStart { at_ms: 0 },
-                    VadEvent::SpeechEnd { at_ms: 100 },
-                ],
-            }),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
             memory: memory.clone(),
-            tools: empty_tools(),
-            system_prompt: SystemPrompt::default(),
             capture: Some(capture),
+            ..stub_agent()
         };
-        let (tx, input) = input_channel();
-        let mut output = agent.run(session(), input);
+        let (tx, mut output) = run(agent);
 
         tx.send(AgentInput::ListenStart { mode: None })
             .await
@@ -2709,16 +2402,10 @@ mod tests {
         // The llm error aborts the reply mid-flight: the driver stores the
         // partially streamed text as a truncated assistant row and the
         // capture attaches the partial audio through the hook.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
-            .await
-            .ok()
-            .flatten()
-        {
-            if matches!(item, AgentOutput::Error { .. }) {
-                break;
-            }
-        }
+        next_matching(&mut output, |item| {
+            matches!(item, AgentOutput::Error { .. })
+        })
+        .await;
 
         let stored = wait_for_replies(&replies, 1).await;
         assert_eq!(

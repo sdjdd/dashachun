@@ -1,66 +1,11 @@
+mod common;
+
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use dashachun::auth::state::AuthState;
-use dashachun::config::{AppConfig, OtaConfig, ServerConfig};
-use dashachun::device::DeviceStore;
-use dashachun::state::ServerState;
-
-use std::sync::Arc;
-
-fn test_name() -> String {
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    format!("u{}", &id[..16])
-}
-
-fn auth_state(pool: PgPool) -> AuthState {
-    AuthState {
-        pool,
-        key: Key::from(&[7u8; 64]),
-        ttl_secs: 3600,
-        cookie_name: "xz_session".into(),
-        cookie_secure: false,
-    }
-}
-
-fn server_state(pool: PgPool) -> ServerState {
-    ServerState::new(
-        AppConfig {
-            server: ServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                playback_prebuffer_ms: 180,
-                shutdown_grace_ms: 5000,
-            },
-            ota: OtaConfig {
-                websocket_url: None,
-                timezone_offset: 480,
-            },
-            device: dashachun::config::DeviceConfig {
-                activation_ttl_secs: 600,
-            },
-        },
-        Arc::new(dashachun::agent::AgentFactory::new(
-            Arc::new(dashachun::asr::StubAsr::default()),
-            Arc::new(dashachun::llm::StubLlm::default()),
-            Arc::new(dashachun::tts::StubTts),
-            Arc::new(dashachun::vad::SileroVadFactory::new(
-                dashachun::vad::VadConfig::default(),
-            )),
-            Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
-            dashachun::agent::AgentStore::new(pool.clone()),
-            pool.clone(),
-        )),
-        DeviceStore::new(pool),
-    )
-}
-
-fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
-    let auth = auth_state(pool.clone());
-    dashachun::app(server_state(pool), auth)
-}
+use common::app;
 
 fn post(path: &str, body: &str) -> Request<Body> {
     Request::builder()
@@ -75,17 +20,11 @@ fn get(path: &str) -> Request<Body> {
     Request::builder().uri(path).body(Body::empty()).unwrap()
 }
 
-fn session_cookie(res: &axum::response::Response) -> Option<String> {
-    let value = res.headers().get("set-cookie")?.to_str().ok()?;
-    let pair = value.split(';').next()?;
-    Some(pair.to_owned())
-}
-
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn register_login_me_change_logout(pool: PgPool) {
     let app = app(pool);
-    let username = test_name();
+    let username = common::test_name();
     let password = "supersecret1";
 
     let res = app
@@ -97,7 +36,7 @@ async fn register_login_me_change_logout(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    let cookie = session_cookie(&res).expect("session cookie");
+    let cookie = common::session_cookie(&res);
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await.unwrap()).unwrap();
     assert_eq!(body["username"], username);
@@ -145,7 +84,7 @@ async fn register_login_me_change_logout(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let cookie2 = session_cookie(&res).expect("second session cookie");
+    let cookie2 = common::session_cookie(&res);
 
     let res = app
         .clone()
@@ -166,7 +105,7 @@ async fn register_login_me_change_logout(pool: PgPool) {
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn duplicate_username_conflicts(pool: PgPool) {
     let app = app(pool);
-    let username = test_name();
+    let username = common::test_name();
     let body = format!(r#"{{"username":"{username}","password":"supersecret1"}}"#);
     let first = app
         .clone()
@@ -185,7 +124,7 @@ async fn duplicate_username_conflicts(pool: PgPool) {
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn login_wrong_password_is_unauthorized(pool: PgPool) {
     let app = app(pool);
-    let username = test_name();
+    let username = common::test_name();
     app.clone()
         .oneshot(post(
             "/api/auth/register",

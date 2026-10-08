@@ -1,66 +1,18 @@
-use std::sync::Arc;
+mod common;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Request, StatusCode};
-use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry};
-use dashachun::asr::StubAsr;
-use dashachun::auth::state::AuthState;
-use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
 use dashachun::device::DeviceStore;
-use dashachun::llm::StubLlm;
-use dashachun::state::ServerState;
-use dashachun::tts::StubTts;
-use dashachun::vad::{SileroVadFactory, VadConfig};
 
 const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
-fn auth_state(pool: PgPool) -> AuthState {
-    AuthState {
-        pool,
-        key: Key::from(&[7u8; 64]),
-        ttl_secs: 3600,
-        cookie_name: "xz_session".into(),
-        cookie_secure: false,
-    }
-}
-
-fn state_with_url(pool: PgPool, websocket_url: Option<String>) -> ServerState {
-    ServerState::new(
-        AppConfig {
-            server: ServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                playback_prebuffer_ms: 180,
-                shutdown_grace_ms: 5000,
-            },
-            ota: OtaConfig {
-                websocket_url,
-                timezone_offset: 480,
-            },
-            device: DeviceConfig {
-                activation_ttl_secs: 600,
-            },
-        },
-        Arc::new(AgentFactory::new(
-            Arc::new(StubAsr::default()),
-            Arc::new(StubLlm::default()),
-            Arc::new(StubTts),
-            Arc::new(SileroVadFactory::new(VadConfig::default())),
-            Arc::new(ToolRegistry::new(Vec::new())),
-            AgentStore::new(pool.clone()),
-            pool.clone(),
-        )),
-        DeviceStore::new(pool),
-    )
-}
-
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
-    let auth = auth_state(pool.clone());
+    let auth = common::auth_state(pool.clone());
     dashachun::app(
-        state_with_url(pool, Some("ws://configured/gateway".into())),
+        common::test_state(pool, Some("ws://configured/gateway".into())),
         auth,
     )
 }
@@ -107,8 +59,8 @@ async fn ota_uses_configured_websocket_url(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn ota_derives_websocket_url_from_host(pool: PgPool) {
-    let auth = auth_state(pool.clone());
-    let state = state_with_url(pool, None);
+    let auth = common::auth_state(pool.clone());
+    let state = common::test_state(pool, None);
     let res = dashachun::app(state, auth)
         .oneshot(ota_request("/api/ota"))
         .await
@@ -123,8 +75,8 @@ async fn ota_derives_websocket_url_from_host(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
-    let auth = auth_state(pool.clone());
-    let state = state_with_url(pool, None);
+    let auth = common::auth_state(pool.clone());
+    let state = common::test_state(pool, None);
     let mut req = ota_request("/api/ota");
     req.headers_mut()
         .insert("x-forwarded-proto", HeaderValue::from_static("https"));
@@ -139,8 +91,8 @@ async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn ota_forwarded_proto_http_keeps_ws(pool: PgPool) {
-    let auth = auth_state(pool.clone());
-    let state = state_with_url(pool, None);
+    let auth = common::auth_state(pool.clone());
+    let state = common::test_state(pool, None);
     let mut req = ota_request("/api/ota");
     req.headers_mut()
         .insert("x-forwarded-proto", HeaderValue::from_static("http"));
@@ -195,8 +147,8 @@ async fn shutdown_closes_websocket_and_serve_returns(pool: PgPool) {
 
     let token = bound_device_token(&pool).await;
 
-    let auth = auth_state(pool.clone());
-    let state = state_with_url(pool, None);
+    let auth = common::auth_state(pool.clone());
+    let state = common::test_state(pool, None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = dashachun::app(state, auth);
@@ -258,8 +210,8 @@ async fn hello_with_unsupported_audio_format_is_rejected(pool: PgPool) {
 
     let token = bound_device_token(&pool).await;
 
-    let auth = auth_state(pool.clone());
-    let state = state_with_url(pool, None);
+    let auth = common::auth_state(pool.clone());
+    let state = common::test_state(pool, None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = dashachun::app(state, auth);

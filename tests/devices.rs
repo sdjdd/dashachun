@@ -1,68 +1,14 @@
-use std::sync::Arc;
+mod common;
 
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
 use axum::http::{HeaderValue, Request, StatusCode};
-use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use dashachun::auth::state::AuthState;
-use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
+use common::{body_json, post_json, register};
 use dashachun::device::DeviceStore;
-use dashachun::state::ServerState;
 
 const CLIENT_ID: &str = "11111111-1111-4111-8111-111111111111";
-
-fn test_name() -> String {
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    format!("u{}", &id[..16])
-}
-
-fn auth_state(pool: PgPool) -> AuthState {
-    AuthState {
-        pool,
-        key: Key::from(&[7u8; 64]),
-        ttl_secs: 3600,
-        cookie_name: "xz_session".into(),
-        cookie_secure: false,
-    }
-}
-
-fn server_state(pool: PgPool) -> ServerState {
-    ServerState::new(
-        AppConfig {
-            server: ServerConfig {
-                bind_addr: "127.0.0.1:0".into(),
-                playback_prebuffer_ms: 180,
-                shutdown_grace_ms: 5000,
-            },
-            ota: OtaConfig {
-                websocket_url: None,
-                timezone_offset: 480,
-            },
-            device: DeviceConfig {
-                activation_ttl_secs: 600,
-            },
-        },
-        Arc::new(dashachun::agent::AgentFactory::new(
-            Arc::new(dashachun::asr::StubAsr::default()),
-            Arc::new(dashachun::llm::StubLlm::default()),
-            Arc::new(dashachun::tts::StubTts),
-            Arc::new(dashachun::vad::SileroVadFactory::new(
-                dashachun::vad::VadConfig::default(),
-            )),
-            Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
-            dashachun::agent::AgentStore::new(pool.clone()),
-            pool.clone(),
-        )),
-        DeviceStore::new(pool),
-    )
-}
-
-fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
-    let auth = auth_state(pool.clone());
-    dashachun::app(server_state(pool), auth)
-}
 
 fn ota_request() -> Request<Body> {
     Request::builder()
@@ -87,17 +33,6 @@ fn activate_request() -> Request<Body> {
         .unwrap()
 }
 
-fn post_json(path: &str, body: &str, cookie: Option<String>) -> Request<Body> {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("content-type", "application/json");
-    if let Some(cookie) = cookie {
-        builder = builder.header("cookie", cookie);
-    }
-    builder.body(Body::from(body.to_owned())).unwrap()
-}
-
 fn get_with_cookie(path: &str, cookie: String) -> Request<Body> {
     Request::builder()
         .uri(path)
@@ -115,39 +50,6 @@ fn delete_with_cookie(path: &str, cookie: String) -> Request<Body> {
         .unwrap()
 }
 
-fn session_cookie(res: &axum::response::Response) -> String {
-    let value = res.headers().get("set-cookie").unwrap().to_str().unwrap();
-    value.split(';').next().unwrap().to_owned()
-}
-
-async fn body_json(res: axum::response::Response) -> serde_json::Value {
-    serde_json::from_slice(&to_bytes(res.into_body(), usize::MAX).await.unwrap()).unwrap()
-}
-
-async fn register(
-    app: &tower_http::normalize_path::NormalizePath<axum::Router>,
-    pool: &PgPool,
-) -> (String, i64) {
-    let username = test_name();
-    let res = app
-        .clone()
-        .oneshot(post_json(
-            "/api/auth/register",
-            &format!(r#"{{"username":"{username}","password":"supersecret1"}}"#),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::CREATED);
-    let cookie = session_cookie(&res);
-    let user_id = sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = $1")
-        .bind(&username)
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    (cookie, user_id)
-}
-
 async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, 'default', '') RETURNING id",
@@ -161,7 +63,7 @@ async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn ota_creates_device_and_returns_code(pool: PgPool) {
-    let app = app(pool);
+    let app = common::app(pool);
     let res = app.clone().oneshot(ota_request()).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     let body = body_json(res).await;
@@ -186,7 +88,7 @@ async fn ota_creates_device_and_returns_code(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
-    let app = app(pool.clone());
+    let app = common::app(pool.clone());
     let code = {
         let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
@@ -246,12 +148,12 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     };
     assert_eq!(token.len(), 32);
 
-    let state = server_state(pool.clone());
+    let state = common::test_state(pool.clone(), None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let served = dashachun::app(state, auth_state(pool.clone()));
+    let served = dashachun::app(state, common::auth_state(pool.clone()));
     let server = tokio::spawn(dashachun::serve(
         listener,
         served,
@@ -318,7 +220,7 @@ async fn connect_gateway(
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
-    let app = app(pool.clone());
+    let app = common::app(pool.clone());
     let old_code = {
         let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
@@ -359,7 +261,7 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn binding_taken_code_is_not_found(pool: PgPool) {
-    let app = app(pool.clone());
+    let app = common::app(pool.clone());
     let code = {
         let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
@@ -395,7 +297,7 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgPool) {
-    let app = app(pool.clone());
+    let app = common::app(pool.clone());
     let code = {
         let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
