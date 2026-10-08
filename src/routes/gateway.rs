@@ -47,7 +47,7 @@ async fn handle_device_connect(
         }
     };
 
-    let agent = match state.agent_factory.build(record.agent_id).await {
+    let agent = match state.agent_factory.build(&record).await {
         Ok(agent) => agent,
         Err(err) => {
             warn!(client_id, %err, "gateway rejected: agent unavailable");

@@ -233,6 +233,7 @@ mod tests {
                 Arc::new(InMemMemoryFactory),
                 Arc::new(ToolRegistry::new(Vec::new())),
                 AgentStore::new(pool.clone()),
+                pool.clone(),
             )),
             DeviceStore::new(pool),
         );

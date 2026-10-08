@@ -54,6 +54,7 @@ fn server_state(pool: PgPool) -> ServerState {
             Arc::new(dashachun::agent::InMemMemoryFactory),
             Arc::new(dashachun::agent::ToolRegistry::new(Vec::new())),
             dashachun::agent::AgentStore::new(pool.clone()),
+            pool.clone(),
         )),
         DeviceStore::new(pool),
     )

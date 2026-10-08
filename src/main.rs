@@ -63,7 +63,15 @@ async fn main() {
         }
     };
     let tools = Arc::new(ToolRegistry::new(vec![Arc::new(GetWeather::new())]));
-    let auth = build_auth_state().await;
+    let auth_config = match AuthConfig::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::error!(%err, "invalid auth config");
+            std::process::exit(1);
+        }
+    };
+    let pool = build_pool(&auth_config).await;
+    let auth = build_auth_state(auth_config, pool.clone());
     let agent_factory = Arc::new(AgentFactory::new(
         asr,
         llm,
@@ -71,9 +79,10 @@ async fn main() {
         vad,
         Arc::new(InMemMemoryFactory),
         tools,
-        AgentStore::new(auth.pool.clone()),
+        AgentStore::new(pool.clone()),
+        pool.clone(),
     ));
-    let state = ServerState::new(config, agent_factory, DeviceStore::new(auth.pool.clone()));
+    let state = ServerState::new(config, agent_factory, DeviceStore::new(pool));
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = dashachun::app(state, auth);
@@ -94,14 +103,7 @@ async fn main() {
     tracing::info!("server stopped");
 }
 
-async fn build_auth_state() -> AuthState {
-    let config = match AuthConfig::from_env() {
-        Ok(config) => config,
-        Err(err) => {
-            tracing::error!(%err, "invalid auth config");
-            std::process::exit(1);
-        }
-    };
+async fn build_pool(config: &AuthConfig) -> sqlx::PgPool {
     let pool = match sqlx::PgPool::connect(&config.database_url).await {
         Ok(pool) => pool,
         Err(err) => {
@@ -113,6 +115,10 @@ async fn build_auth_state() -> AuthState {
         tracing::error!(%err, "failed to run migrations");
         std::process::exit(1);
     }
+    pool
+}
+
+fn build_auth_state(config: AuthConfig, pool: sqlx::PgPool) -> AuthState {
     let key = axum_extra::extract::cookie::Key::from(config.session_secret.as_bytes());
     tracing::info!("auth routes enabled");
     AuthState {

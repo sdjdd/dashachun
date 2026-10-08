@@ -52,6 +52,7 @@ fn state_with_url(pool: PgPool, websocket_url: Option<String>) -> ServerState {
             Arc::new(InMemMemoryFactory),
             Arc::new(ToolRegistry::new(Vec::new())),
             AgentStore::new(pool.clone()),
+            pool.clone(),
         )),
         DeviceStore::new(pool),
     )

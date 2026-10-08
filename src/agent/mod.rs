@@ -6,6 +6,7 @@ mod memory;
 mod prompt;
 mod store;
 pub mod tool;
+pub mod transcript;
 
 use std::pin::Pin;
 
@@ -17,6 +18,10 @@ pub use memory::{InMemMemory, InMemMemoryFactory, Memory, MemoryFactory};
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
+pub use transcript::{
+    DbTranscriptSink, ReplyFinish, ReplyReceipt, ReplyRecording, TranscriptOwner, TranscriptSink,
+    UtteranceRecording,
+};
 
 pub type AgentInputStream = Pin<Box<dyn Stream<Item = AgentInput> + Send>>;
 pub type AgentOutputStream = Pin<Box<dyn Stream<Item = AgentOutput> + Send>>;

@@ -9,7 +9,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Memory,
-    SystemPrompt, ToolRegistry, emotion,
+    ReplyReceipt, ReplyRecording, SystemPrompt, ToolRegistry, UtteranceRecording, emotion,
 };
 use crate::asr::{Asr, AsrEvent, AudioStream};
 use crate::llm::{ChatItem, Llm, LlmEvent, ToolCall};
@@ -32,6 +32,7 @@ pub struct CompositeAgent {
     pub memory: Arc<dyn Memory>,
     pub tools: Arc<ToolRegistry>,
     pub system_prompt: SystemPrompt,
+    pub transcript: Option<Arc<dyn crate::agent::TranscriptSink>>,
 }
 
 impl Agent for CompositeAgent {
@@ -107,6 +108,9 @@ async fn drive(
     let mut emotion_pending = false;
     let mut stripper = emotion::Stripper::new();
     let mut speaking = false;
+    let mut reply_recording: Option<ReplyRecording> = None;
+    let mut reply_receipt: Option<ReplyReceipt> = None;
+    let mut streamed_reply = String::new();
 
     loop {
         tokio::select! {
@@ -114,6 +118,11 @@ async fn drive(
                 let Some(item) = item else { break };
                 match item {
                     AgentInput::ListenStart { .. } => {
+                        settle_reply(
+                            &mut reply_recording,
+                            &mut reply_receipt,
+                            &mut streamed_reply,
+                        );
                         if cancel_in_flight(
                             &mut utterance,
                             &mut completion,
@@ -142,11 +151,12 @@ async fn drive(
                             let events = vad.flush();
                             handle_vad_events(
                                 events,
-                                &session.id,
+                                &session,
                                 &agent.asr,
                                 &asr_tx,
                                 &mut generation,
                                 &mut utterance,
+                                agent.transcript.as_deref(),
                             )
                             .await;
                         }
@@ -157,16 +167,22 @@ async fn drive(
                         let events = vad.push(&samples);
                         handle_vad_events(
                             events,
-                            &session.id,
+                            &session,
                             &agent.asr,
                             &asr_tx,
                             &mut generation,
                             &mut utterance,
+                            agent.transcript.as_deref(),
                         )
                         .await;
                     }
                     AgentInput::Interrupt { reason } => {
                         info!(session_id = %session.id, reason = ?reason, "interrupt");
+                        settle_reply(
+                            &mut reply_recording,
+                            &mut reply_receipt,
+                            &mut streamed_reply,
+                        );
                         cancel_in_flight(
                             &mut utterance,
                             &mut completion,
@@ -232,6 +248,11 @@ async fn drive(
                         if let Some(current) = synthesis.take() {
                             current.cancel();
                         }
+                        settle_reply(
+                            &mut reply_recording,
+                            &mut reply_receipt,
+                            &mut streamed_reply,
+                        );
                         if speaking
                             && out_tx.send(AgentOutput::TtsAbort).await.is_err()
                         {
@@ -279,6 +300,7 @@ async fn drive(
                         if text.is_empty() {
                             continue;
                         }
+                        streamed_reply.push_str(&text);
                         if emotion_pending
                             && let Some(emotion) = emotion::detect(&text)
                         {
@@ -323,6 +345,9 @@ async fn drive(
                     LlmMessage::Done { reply, history: items, .. } => {
                         completion = None;
                         info!(session_id = %session.id, %reply, "llm result");
+                        if let Some(sink) = agent.transcript.as_deref() {
+                            reply_receipt = Some(sink.log_items(&session, items.clone()));
+                        }
                         agent.memory.append(items).await;
                         let tail = stripper.finish();
                         if !feed_tts(
@@ -350,6 +375,11 @@ async fn drive(
                     }
                     LlmMessage::Error { message, .. } => {
                         completion = None;
+                        settle_reply(
+                            &mut reply_recording,
+                            &mut reply_receipt,
+                            &mut streamed_reply,
+                        );
                         let tts_active = synthesis.take().is_some();
                         warn!(session_id = %session.id, %message, "llm failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err() {
@@ -388,6 +418,11 @@ async fn drive(
                         }
                     }
                     TtsMessage::Audio { samples, .. } => {
+                        if let Some(sink) = agent.transcript.as_deref() {
+                            let recording =
+                                reply_recording.get_or_insert_with(|| sink.start_reply(&session));
+                            recording.push(&samples);
+                        }
                         if out_tx.send(AgentOutput::Audio(samples)).await.is_err() {
                             break;
                         }
@@ -395,6 +430,13 @@ async fn drive(
                     TtsMessage::Done { .. } => {
                         synthesis = None;
                         speaking = false;
+                        if let Some(recording) = reply_recording.take() {
+                            match reply_receipt.take() {
+                                Some(receipt) => recording.finish(receipt),
+                                None => drop(recording),
+                            }
+                        }
+                        streamed_reply.clear();
                         if out_tx.send(AgentOutput::TtsStop).await.is_err() {
                             break;
                         }
@@ -402,6 +444,11 @@ async fn drive(
                     TtsMessage::Error { message, .. } => {
                         synthesis = None;
                         speaking = false;
+                        settle_reply(
+                            &mut reply_recording,
+                            &mut reply_receipt,
+                            &mut streamed_reply,
+                        );
                         warn!(session_id = %session.id, %message, "tts failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err()
                             || out_tx.send(AgentOutput::TtsAbort).await.is_err()
@@ -445,10 +492,36 @@ fn cancel_in_flight(
     std::mem::take(speaking)
 }
 
+/// Ends the reply audio capture at a cut (barge-in, provider error): with the
+/// receipt when the turn completed, so the partial audio attaches to the full
+/// reply row, otherwise with the partially streamed text, so the collector
+/// writes the truncated assistant row itself. A session teardown just drops
+/// the handles, which discards the capture.
+fn settle_reply(
+    recording: &mut Option<ReplyRecording>,
+    receipt: &mut Option<ReplyReceipt>,
+    streamed: &mut String,
+) {
+    if let Some(recording) = recording.take() {
+        match receipt.take() {
+            Some(receipt) => recording.finish(receipt),
+            None => {
+                let text = std::mem::take(streamed);
+                if !text.is_empty() {
+                    recording.finish_partial(text);
+                }
+            }
+        }
+    }
+    receipt.take();
+    streamed.clear();
+}
+
 struct Utterance {
     tx: mpsc::Sender<Vec<f32>>,
     handle: Option<JoinHandle<()>>,
     cancel: CancellationToken,
+    recording: Option<UtteranceRecording>,
 }
 
 impl Utterance {
@@ -540,24 +613,35 @@ async fn stop_task(handle: &mut JoinHandle<()>) {
 
 async fn handle_vad_events(
     events: Vec<VadEvent>,
-    session_id: &str,
+    session: &AgentSession,
     asr: &Arc<dyn Asr>,
     asr_tx: &mpsc::Sender<AsrMessage>,
     generation: &mut u64,
     utterance: &mut Option<Utterance>,
+    transcript: Option<&dyn crate::agent::TranscriptSink>,
 ) {
     for event in events {
         match event {
             VadEvent::SpeechStart { at_ms } => {
-                info!(session_id, at_ms, "speech start");
+                info!(session_id = %session.id, at_ms, "speech start");
                 *generation += 1;
-                *utterance = Some(spawn_asr(asr, asr_tx, session_id.to_string(), *generation));
+                let recording = transcript.map(|sink| sink.start_utterance(session));
+                *utterance = Some(spawn_asr(
+                    asr,
+                    asr_tx,
+                    session.id.clone(),
+                    *generation,
+                    recording,
+                ));
             }
             VadEvent::Speech { samples } => {
-                if let Some(current) = utterance.as_ref()
-                    && current.tx.send(samples).await.is_err()
-                {
-                    debug!(session_id, "asr input closed, dropping frame");
+                if let Some(current) = utterance.as_ref() {
+                    if let Some(recording) = &current.recording {
+                        recording.push(&samples);
+                    }
+                    if current.tx.send(samples).await.is_err() {
+                        debug!(session_id = %session.id, "asr input closed, dropping frame");
+                    }
                 }
             }
             VadEvent::SpeechEnd { .. } => {
@@ -574,6 +658,7 @@ fn spawn_asr(
     asr_tx: &mpsc::Sender<AsrMessage>,
     session_id: String,
     generation: u64,
+    recording: Option<UtteranceRecording>,
 ) -> Utterance {
     let (tx, rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
     let audio: AudioStream = Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
@@ -583,13 +668,24 @@ fn spawn_asr(
     let asr_tx = asr_tx.clone();
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
+    let push = recording.clone();
     let handle = tokio::spawn(async move {
-        run_asr(asr, audio, asr_tx, session_id, generation, task_cancel).await;
+        run_asr(
+            asr,
+            audio,
+            asr_tx,
+            session_id,
+            generation,
+            task_cancel,
+            recording,
+        )
+        .await;
     });
     Utterance {
         tx,
         handle: Some(handle),
         cancel,
+        recording: push,
     }
 }
 
@@ -600,12 +696,19 @@ async fn run_asr(
     session_id: String,
     generation: u64,
     cancel: CancellationToken,
+    recording: Option<UtteranceRecording>,
 ) {
-    let mut events = asr.transcribe(audio, cancel);
+    let mut events = asr.transcribe(audio, cancel.clone());
     while let Some(result) = events.next().await {
         let message = match result {
             Ok(AsrEvent::Partial { text }) => AsrMessage::Partial { generation, text },
             Ok(AsrEvent::Final { text }) => {
+                if !cancel.is_cancelled()
+                    && !text.is_empty()
+                    && let Some(recording) = recording
+                {
+                    recording.finish(text.clone());
+                }
                 let _ = asr_tx.send(AsrMessage::Final { generation, text }).await;
                 return;
             }
@@ -1075,6 +1178,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1106,6 +1210,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1160,6 +1265,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1235,6 +1341,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1300,6 +1407,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1469,6 +1577,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1507,6 +1616,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1571,6 +1681,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let _output = agent.run(session(), input);
@@ -1618,6 +1729,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1682,6 +1794,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1735,6 +1848,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let _output = agent.run(session(), input);
@@ -1779,6 +1893,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::new("Be a helpful assistant."),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let _output = agent.run(session(), input);
@@ -1821,6 +1936,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let _output = agent.run(session(), input);
@@ -1870,6 +1986,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1929,6 +2046,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -1982,6 +2100,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -2082,6 +2201,7 @@ mod tests {
             memory: Arc::new(InMemMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
+            transcript: None,
         };
         let (tx, input) = input_channel();
         let mut output = agent.run(session(), input);
@@ -2111,5 +2231,493 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    /// In-memory transcript sink: pairs each finished utterance's chunks with
+    /// its transcript text and records every logged item batch.
+    struct FakeTranscript {
+        utterances: StoredUtterances,
+        logged: LoggedItems,
+        replies: StoredReplies,
+    }
+
+    /// How a fake reply capture ended, mirroring the collector's outcomes.
+    #[derive(Debug, Clone, PartialEq)]
+    enum FakeReply {
+        Attached {
+            chunks: Vec<Vec<f32>>,
+            message_id: i64,
+        },
+        Unlinked,
+        Partial {
+            chunks: Vec<Vec<f32>>,
+            text: String,
+        },
+        Discarded,
+    }
+
+    impl crate::agent::TranscriptSink for FakeTranscript {
+        fn start_utterance(&self, _session: &AgentSession) -> crate::agent::UtteranceRecording {
+            let (recording, mut rx) = crate::agent::UtteranceRecording::channel();
+            let utterances = self.utterances.clone();
+            tokio::spawn(async move {
+                if let Some((chunks, text)) = crate::agent::transcript::collect(&mut rx).await {
+                    utterances.lock().unwrap().push((chunks, text));
+                }
+            });
+            recording
+        }
+
+        fn log_items(
+            &self,
+            _session: &AgentSession,
+            items: Vec<ChatItem>,
+        ) -> crate::agent::ReplyReceipt {
+            self.logged.lock().unwrap().push(items.clone());
+            let has_reply = items.iter().any(|item| {
+                matches!(item, ChatItem::Assistant { content: Some(_), tool_calls } if tool_calls.is_empty())
+            });
+            crate::agent::ReplyReceipt::ready(has_reply.then_some(42))
+        }
+
+        fn start_reply(&self, _session: &AgentSession) -> crate::agent::ReplyRecording {
+            let (recording, mut rx) = crate::agent::ReplyRecording::channel();
+            let replies = self.replies.clone();
+            tokio::spawn(async move {
+                let Some((chunks, finish)) = crate::agent::transcript::collect_reply(&mut rx).await
+                else {
+                    replies.lock().unwrap().push(FakeReply::Discarded);
+                    return;
+                };
+                let reply = match finish {
+                    crate::agent::ReplyFinish::Receipt(receipt) => match receipt.resolve().await {
+                        Some(message_id) => FakeReply::Attached { chunks, message_id },
+                        None => FakeReply::Unlinked,
+                    },
+                    crate::agent::ReplyFinish::Partial(text) => FakeReply::Partial { chunks, text },
+                };
+                replies.lock().unwrap().push(reply);
+            });
+            recording
+        }
+    }
+
+    type StoredUtterances = Arc<Mutex<Vec<(Vec<Vec<f32>>, String)>>>;
+    type LoggedItems = Arc<Mutex<Vec<Vec<ChatItem>>>>;
+    type StoredReplies = Arc<Mutex<Vec<FakeReply>>>;
+
+    fn fake_transcript() -> (
+        Arc<FakeTranscript>,
+        StoredUtterances,
+        LoggedItems,
+        StoredReplies,
+    ) {
+        let utterances = Arc::new(Mutex::new(Vec::new()));
+        let logged = Arc::new(Mutex::new(Vec::new()));
+        let replies = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::new(FakeTranscript {
+            utterances: utterances.clone(),
+            logged: logged.clone(),
+            replies: replies.clone(),
+        });
+        (sink, utterances, logged, replies)
+    }
+
+    async fn wait_for_replies(replies: &StoredReplies, len: usize) -> Vec<FakeReply> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = replies.lock().unwrap().clone();
+            if snapshot.len() >= len {
+                return snapshot;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "replies not stored: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    async fn wait_for_utterances(
+        utterances: &StoredUtterances,
+        len: usize,
+    ) -> Vec<(Vec<Vec<f32>>, String)> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = utterances.lock().unwrap().clone();
+            if snapshot.len() >= len {
+                return snapshot;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "utterances not stored: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn finalized_utterance_is_stored_with_transcript_and_audio() {
+        let (transcript, utterances, _logged, _replies) = fake_transcript();
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(StubLlm::default()),
+            tts: Arc::new(StubTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::Speech {
+                        samples: vec![0.5; 960],
+                    },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        while let Some(item) = output.next().await {
+            if matches!(item, AgentOutput::Stt { is_final: true, .. }) {
+                break;
+            }
+        }
+
+        let stored = wait_for_utterances(&utterances, 1).await;
+        assert_eq!(stored[0].1, "hello");
+        assert_eq!(stored[0].0, vec![vec![0.5; 960]]);
+    }
+
+    #[tokio::test]
+    async fn interrupted_utterance_is_discarded() {
+        let (transcript, utterances, logged, _replies) = fake_transcript();
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(StubLlm::default()),
+            tts: Arc::new(StubTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::Speech {
+                        samples: vec![0.5; 960],
+                    },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let _output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+        // Let the driver spawn the utterance before cancelling it: the token
+        // is cancelled before the ASR input closes, so the late final from
+        // StubAsr must not finish the recording.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(AgentInput::Interrupt { reason: None })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(utterances.lock().unwrap().is_empty());
+        assert!(logged.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_transcript_stores_nothing() {
+        let (transcript, utterances, logged, _replies) = fake_transcript();
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("")),
+            llm: Arc::new(StubLlm::default()),
+            tts: Arc::new(StubTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        // StubAsr still emits its (empty) final; the driver answers nothing.
+        while let Some(item) = output.next().await {
+            if matches!(item, AgentOutput::Stt { is_final: true, .. }) {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(utterances.lock().unwrap().is_empty());
+        assert!(logged.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn completed_turn_logs_reply_and_tool_items() {
+        let (transcript, _utterances, logged, _replies) = fake_transcript();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(ToolCallingLlm {
+                calls: calls.clone(),
+                tool_calls: vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }],
+                reply: "ok".into(),
+            }),
+            tts: Arc::new(StubTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let _output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+        wait_for_calls(&calls, 2).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let logged = loop {
+            let snapshot = logged.lock().unwrap().clone();
+            if let Some(items) = snapshot.first() {
+                break items.clone();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "turn items never logged"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert_eq!(
+            logged,
+            vec![
+                ChatItem::assistant_tool_calls(vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "nonexistent".into(),
+                    arguments: "{}".into(),
+                }]),
+                ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
+                ChatItem::assistant("ok"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_reply_audio_is_stored_with_receipt() {
+        let (transcript, _utterances, _logged, replies) = fake_transcript();
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            tts: Arc::new(ScriptedTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        // The natural tts stop finishes the capture with the receipt.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::TtsStop) {
+                break;
+            }
+        }
+
+        let stored = wait_for_replies(&replies, 1).await;
+        assert_eq!(
+            stored,
+            vec![FakeReply::Attached {
+                chunks: vec![vec![0.25; 960]],
+                message_id: 42,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn aborted_reply_after_done_attaches_partial_audio_to_the_reply_row() {
+        let (transcript, _utterances, _logged, replies) = fake_transcript();
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }),
+            tts: Arc::new(HeldTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                    VadEvent::SpeechStart { at_ms: 200 },
+                    VadEvent::SpeechEnd { at_ms: 300 },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        // Wait until the reply is playing and its turn has completed (the
+        // receipt is in the driver's hands), then start the next utterance:
+        // the barge-in must attach the partial audio to the full reply row.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::Audio(_)) {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let stored = wait_for_replies(&replies, 1).await;
+        assert_eq!(
+            stored,
+            vec![FakeReply::Attached {
+                chunks: vec![vec![0.25; 960]],
+                message_id: 42,
+            }]
+        );
+    }
+
+    /// Streams deltas then fails: the reply is cut before the model finished.
+    struct FailingLlm {
+        reply: String,
+    }
+
+    impl Llm for FailingLlm {
+        fn chat(
+            &self,
+            _history: Vec<ChatItem>,
+            _tools: Vec<crate::llm::ToolSpec>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            // The pause before the failure lets the driver process the first
+            // synthesized chunk, so the abort settles an open capture.
+            let deltas = futures_util::stream::iter(self.reply.chars().map(|c| {
+                Ok(LlmEvent::Delta {
+                    text: c.to_string(),
+                })
+            }));
+            let failure = futures_util::stream::once(async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                Err(crate::llm::LlmError::Failed("boom".into()))
+            });
+            Box::pin(deltas.chain(failure))
+        }
+    }
+
+    #[tokio::test]
+    async fn aborted_reply_before_done_stores_the_truncated_row() {
+        let (transcript, _utterances, logged, replies) = fake_transcript();
+        let agent = CompositeAgent {
+            asr: Arc::new(StubAsr::new("hello")),
+            llm: Arc::new(FailingLlm { reply: "hi".into() }),
+            tts: Arc::new(HeldTts),
+            vad: Arc::new(ScriptedVadFactory {
+                events: vec![
+                    VadEvent::SpeechStart { at_ms: 0 },
+                    VadEvent::SpeechEnd { at_ms: 100 },
+                ],
+            }),
+            memory: Arc::new(InMemMemory::default()),
+            tools: empty_tools(),
+            system_prompt: SystemPrompt::default(),
+            transcript: Some(transcript),
+        };
+        let (tx, input) = input_channel();
+        let mut output = agent.run(session(), input);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        // The llm error aborts the reply mid-flight; the partial audio goes
+        // to the collector together with the partially streamed text.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while let Some(item) = tokio::time::timeout_at(deadline, output.next())
+            .await
+            .ok()
+            .flatten()
+        {
+            if matches!(item, AgentOutput::Error { .. }) {
+                break;
+            }
+        }
+
+        let stored = wait_for_replies(&replies, 1).await;
+        assert_eq!(
+            stored,
+            vec![FakeReply::Partial {
+                chunks: vec![vec![0.25; 960]],
+                text: "hi".into(),
+            }]
+        );
+        assert!(logged.lock().unwrap().is_empty());
     }
 }
