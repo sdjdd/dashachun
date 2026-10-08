@@ -1,6 +1,7 @@
 use std::fmt;
 use std::pin::Pin;
 
+use async_trait::async_trait;
 use futures_util::Stream;
 use tokio_util::sync::CancellationToken;
 
@@ -52,6 +53,9 @@ impl From<&str> for TtsError {
 /// Streaming speech synthesis. Implementations must keep consuming the text
 /// stream even while nobody polls the event stream, since the agent applies
 /// backpressure on the text channel while draining events.
+#[async_trait]
 pub trait Tts: Send + Sync {
     fn synthesize(&self, text: TextStream, cancel: CancellationToken) -> TtsEvents<'_>;
+
+    async fn shutdown(&self) {}
 }

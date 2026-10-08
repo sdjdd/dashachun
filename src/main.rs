@@ -13,6 +13,8 @@ use dashachun::provider::tts::VolcTts;
 use dashachun::state::ServerState;
 use dashachun::vad::SileroVadFactory;
 
+const SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -75,7 +77,7 @@ async fn main() {
     let agent_factory = Arc::new(AgentFactory::new(
         asr,
         llm,
-        tts,
+        tts.clone(),
         vad,
         tools,
         AgentStore::new(pool.clone()),
@@ -93,12 +95,13 @@ async fn main() {
         shutdown_on_signal().await;
         tracing::info!("shutdown signal received, draining");
         let _ = shutdown_tx.send(true);
-        tokio::time::sleep(grace).await;
+        tokio::time::sleep(grace + SHUTDOWN_BUDGET).await;
         tracing::warn!("graceful shutdown timed out, forcing exit");
         std::process::exit(0);
     });
 
     dashachun::serve(listener, app, shutdown_rx, grace).await;
+    tts.shutdown().await;
     tracing::info!("server stopped");
 }
 

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -157,6 +158,7 @@ impl VolcTts {
     }
 }
 
+#[async_trait]
 impl Tts for VolcTts {
     fn synthesize(&self, text: TextStream, cancel: CancellationToken) -> TtsEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
@@ -170,6 +172,10 @@ impl Tts for VolcTts {
         Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|event| (event, rx))
         }))
+    }
+
+    async fn shutdown(&self) {
+        self.pool.shutdown().await;
     }
 }
 
@@ -209,6 +215,7 @@ async fn run(
         }
         SelectOutcome::Ready(result) => result?,
     };
+    let _lease = pool.lease();
     if cancel.is_cancelled() {
         pool.checkin(parked);
         let _ = tx.send(Ok(TtsEvent::Done));
@@ -333,6 +340,7 @@ async fn run(
                         let samples = pcm16_to_f32(message.audio());
                         audio_frames += 1;
                         if tx.send(Ok(TtsEvent::Audio(samples))).is_err() {
+                            pool.abandon(parked);
                             return Ok(());
                         }
                     }
@@ -340,6 +348,7 @@ async fn run(
                         if let Some(subtitle) = subtitle(&message)
                             && tx.send(Ok(TtsEvent::Subtitle(subtitle))).is_err()
                         {
+                            pool.abandon(parked);
                             return Ok(());
                         }
                     }
@@ -376,7 +385,7 @@ async fn run(
             debug!(connect_id = %parked.connect_id, "tts parking connection");
             pool.checkin(parked);
         }
-        SessionEnd::Abandoned => {}
+        SessionEnd::Abandoned => pool.abandon(parked),
     }
     let _ = tx.send(Ok(TtsEvent::Done));
     Ok(())
@@ -952,5 +961,101 @@ mod tests {
             ]
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_parked_connections() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let order = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let session_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server = spawn_mock_tts_server(listener, order.clone(), session_ids.clone());
+
+        let tts = VolcTts::new(
+            format!("ws://{addr}"),
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+            DOWNLINK,
+        )
+        .unwrap();
+        let (text_tx, text) = text_stream();
+        let mut events = tts.synthesize(text, CancellationToken::new());
+        text_tx.send("你好".to_string()).await.unwrap();
+        drop(text_tx);
+        collect_until_done(&mut events).await;
+        assert_eq!(tts.pool.parked_count(), 1);
+
+        tts.pool.shutdown().await;
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                protocol::EVENT_START_SESSION,
+                protocol::EVENT_FINISH_SESSION,
+                protocol::EVENT_FINISH_CONNECTION,
+            ]
+        );
+        assert_eq!(tts.pool.parked_count(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_connections_returned_during_drain() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let order = Arc::new(Mutex::new(Vec::<i32>::new()));
+        let session_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        let server = spawn_mock_tts_server(listener, order.clone(), session_ids.clone());
+
+        let tts = VolcTts::new(
+            format!("ws://{addr}"),
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+            DOWNLINK,
+        )
+        .unwrap();
+        let (text_tx, text) = text_stream();
+        let cancel = CancellationToken::new();
+        let mut events = tts.synthesize(text, cancel.clone());
+        text_tx.send("你好".to_string()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let pool = tts.pool.clone();
+        let drain = tokio::spawn(async move { pool.shutdown().await });
+        cancel.cancel();
+        collect_until_done(&mut events).await;
+        drain.await.unwrap();
+
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![
+                protocol::EVENT_START_SESSION,
+                protocol::EVENT_CANCEL_SESSION,
+                protocol::EVENT_FINISH_CONNECTION,
+            ]
+        );
+        assert_eq!(tts.pool.parked_count(), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn acquire_fails_after_shutdown() {
+        let tts = VolcTts::new(
+            "ws://127.0.0.1:1",
+            "key",
+            DEFAULT_RESOURCE_ID,
+            "speaker",
+            DOWNLINK,
+        )
+        .unwrap();
+
+        tts.pool.shutdown().await;
+
+        let Err(err) = tts.pool.acquire().await else {
+            panic!("acquire must fail after shutdown");
+        };
+        assert!(err.to_string().contains("shutting down"), "{err}");
     }
 }

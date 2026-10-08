@@ -1,14 +1,16 @@
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use futures_util::future::join_all;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, Stream, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::CANCEL_TIMEOUT;
 use super::Connection;
@@ -20,6 +22,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_IDLE_CONNS: usize = 16;
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 
 pub(crate) struct Parked {
     pub(crate) sink: SplitSink<Connection, Message>,
@@ -82,6 +86,8 @@ pub(crate) struct ConnPool {
     spec: ConnSpec,
     idle: Mutex<Vec<Entry>>,
     max_idle: usize,
+    closing: AtomicBool,
+    in_flight: AtomicUsize,
 }
 
 impl ConnPool {
@@ -90,12 +96,22 @@ impl ConnPool {
             spec,
             idle: Mutex::new(Vec::new()),
             max_idle: timing.max_idle,
+            closing: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
         });
         spawn_idle_sweeper(pool.clone(), timing.idle_timeout, timing.sweep_interval);
         pool
     }
 
+    pub(crate) fn lease(self: &Arc<Self>) -> Lease {
+        Lease::new(self.clone())
+    }
+
     pub(crate) fn checkin(&self, conn: Parked) {
+        if self.closing.load(Ordering::SeqCst) {
+            self.handoff(conn);
+            return;
+        }
         let overflow = {
             let mut idle = self.idle.lock().unwrap();
             if idle.len() >= self.max_idle {
@@ -114,7 +130,50 @@ impl ConnPool {
         }
     }
 
+    pub(crate) fn abandon(&self, conn: Parked) {
+        if self.closing.load(Ordering::SeqCst) {
+            self.handoff(conn);
+            return;
+        }
+        drop(conn);
+    }
+
+    fn handoff(&self, conn: Parked) {
+        self.idle.lock().unwrap().push(Entry {
+            conn,
+            parked_at: Instant::now(),
+        });
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        loop {
+            let batch = self.expire(Duration::ZERO);
+            let in_flight = self.in_flight.load(Ordering::SeqCst);
+            if batch.is_empty() && in_flight == 0 {
+                debug!("tts pool drained");
+                return;
+            }
+            if !batch.is_empty() {
+                join_all(batch.into_iter().map(close_conn)).await;
+                continue;
+            }
+            if Instant::now() >= deadline {
+                warn!(
+                    in_flight,
+                    "tts pool drain timed out, abandoning connections"
+                );
+                return;
+            }
+            tokio::time::sleep(SHUTDOWN_POLL).await;
+        }
+    }
+
     pub(crate) async fn acquire(&self) -> Result<Parked, TtsError> {
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(TtsError::from("tts pool is shutting down"));
+        }
         loop {
             let Some(mut parked) = self.checkout() else {
                 return self.open().await;
@@ -167,6 +226,23 @@ impl ConnPool {
     #[cfg(test)]
     pub(crate) fn parked_count(&self) -> usize {
         self.idle.lock().unwrap().len()
+    }
+}
+
+pub(crate) struct Lease {
+    pool: Arc<ConnPool>,
+}
+
+impl Lease {
+    fn new(pool: Arc<ConnPool>) -> Self {
+        pool.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self { pool }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.pool.in_flight.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
