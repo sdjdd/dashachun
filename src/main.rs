@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashachun::agent::{AgentFactory, AgentStore, Asr, Llm, ToolRegistry, Tts, tool::GetWeather};
+use dashachun::agent::tool::{GetDateTime, GetWeather};
+use dashachun::agent::{AgentFactory, AgentStore, Asr, Llm, ToolRegistry, Tts};
 use dashachun::audio::DOWNLINK;
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig};
@@ -58,7 +59,10 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let tools = Arc::new(ToolRegistry::new(vec![Arc::new(GetWeather::new())]));
+    let tools = Arc::new(ToolRegistry::new(vec![
+        Arc::new(GetWeather::new()),
+        Arc::new(GetDateTime::new(config.ota.timezone_offset)),
+    ]));
     let auth_config = match AuthConfig::from_env() {
         Ok(config) => config,
         Err(err) => {

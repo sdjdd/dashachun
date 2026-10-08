@@ -7,8 +7,10 @@ use serde_json::Value;
 use crate::agent::AgentOutput;
 use crate::agent::ToolSpec;
 
+mod datetime;
 mod weather;
 
+pub use datetime::GetDateTime;
 pub use weather::GetWeather;
 
 pub(crate) fn params_schema<T: JsonSchema>() -> Value {
