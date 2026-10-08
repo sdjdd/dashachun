@@ -1,14 +1,10 @@
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, Stream, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -17,7 +13,7 @@ mod protocol;
 
 use crate::agent::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 use crate::audio::DownlinkAudio;
-use pool::{ConnPool, Parked};
+use pool::{ConnPool, ConnSpec, PoolTiming};
 use protocol::Message as TtsMessage;
 
 pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
@@ -25,11 +21,7 @@ pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
 /// Sample rates the Volcengine bidirectional streaming TTS accepts.
 const SUPPORTED_SAMPLE_RATES: &[u32] = &[8000, 16000, 22050, 24000, 32000, 44100, 48000];
 const DEFAULT_FORMAT: &str = "pcm";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
-const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const IDLE_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_IDLE_CONNS: usize = 16;
 
 type Connection =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -59,45 +51,7 @@ impl SessionConfig {
     }
 }
 
-#[derive(Clone)]
-struct ConnSpec {
-    endpoint: String,
-    api_key: String,
-    resource_id: String,
-}
-
-impl ConnSpec {
-    fn build_request(&self) -> Result<(Request, String), TtsError> {
-        let mut request = self
-            .endpoint
-            .as_str()
-            .into_client_request()
-            .map_err(|err| TtsError::from(format!("invalid endpoint: {err}")))?;
-        let connect_id = uuid::Uuid::new_v4().to_string();
-        let headers = request.headers_mut();
-        for (name, value) in [
-            ("X-Api-Key", self.api_key.as_str()),
-            ("X-Api-Resource-Id", self.resource_id.as_str()),
-            ("X-Api-Connect-Id", connect_id.as_str()),
-            ("X-Control-Require-Usage-Tokens-Return", "*"),
-        ] {
-            let value = value
-                .parse()
-                .map_err(|err| TtsError::from(format!("invalid header {name}: {err}")))?;
-            headers.insert(name, value);
-        }
-        Ok((request, connect_id))
-    }
-}
-
-struct PoolTiming {
-    idle_timeout: Duration,
-    sweep_interval: Duration,
-    max_idle: usize,
-}
-
 pub struct VolcTts {
-    spec: ConnSpec,
     session: SessionConfig,
     pool: Arc<ConnPool>,
 }
@@ -117,11 +71,7 @@ impl VolcTts {
             resource_id,
             speaker,
             downlink,
-            PoolTiming {
-                idle_timeout: CONN_IDLE_TIMEOUT,
-                sweep_interval: IDLE_SWEEP_INTERVAL,
-                max_idle: MAX_IDLE_CONNS,
-            },
+            PoolTiming::default(),
         )
     }
 
@@ -145,14 +95,15 @@ impl VolcTts {
                 downlink.channels
             )));
         }
-        let pool = Arc::new(ConnPool::new(timing.max_idle));
-        spawn_idle_sweeper(pool.clone(), timing.idle_timeout, timing.sweep_interval);
-        Ok(Self {
-            spec: ConnSpec {
+        let pool = ConnPool::new(
+            ConnSpec {
                 endpoint: endpoint.into(),
                 api_key: api_key.into(),
                 resource_id: resource_id.into(),
             },
+            timing,
+        );
+        Ok(Self {
             session: SessionConfig {
                 speaker: speaker.into(),
                 format: DEFAULT_FORMAT.to_string(),
@@ -210,10 +161,9 @@ impl Tts for VolcTts {
     fn synthesize(&self, text: TextStream, cancel: CancellationToken) -> TtsEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
         let pool = self.pool.clone();
-        let spec = self.spec.clone();
         let session = self.session.clone();
         tokio::spawn(async move {
-            if let Err(err) = run(pool, spec, session, text, tx.clone(), cancel).await {
+            if let Err(err) = run(pool, session, text, tx.clone(), cancel).await {
                 let _ = tx.send(Err(err));
             }
         });
@@ -225,7 +175,6 @@ impl Tts for VolcTts {
 
 async fn run(
     pool: Arc<ConnPool>,
-    spec: ConnSpec,
     session: SessionConfig,
     mut text: TextStream,
     tx: mpsc::UnboundedSender<Result<TtsEvent, TtsError>>,
@@ -253,7 +202,7 @@ async fn run(
         return Ok(());
     };
 
-    let mut parked = match select_cancel(cancel.clone(), acquire(&pool, &spec)).await {
+    let mut parked = match select_cancel(cancel.clone(), pool.acquire()).await {
         SelectOutcome::Cancelled => {
             let _ = tx.send(Ok(TtsEvent::Done));
             return Ok(());
@@ -261,7 +210,7 @@ async fn run(
         SelectOutcome::Ready(result) => result?,
     };
     if cancel.is_cancelled() {
-        park(&pool, parked);
+        pool.checkin(parked);
         let _ = tx.send(Ok(TtsEvent::Done));
         return Ok(());
     }
@@ -284,7 +233,7 @@ async fn run(
     match select_cancel(cancel.clone(), start_session).await {
         SelectOutcome::Cancelled => {
             if cancel_session(&mut parked.sink, &mut parked.stream, &session_id).await {
-                park(&pool, parked);
+                pool.checkin(parked);
             }
             let _ = tx.send(Ok(TtsEvent::Done));
             return Ok(());
@@ -304,7 +253,7 @@ async fn run(
 
     if cancel.is_cancelled() {
         if cancel_session(&mut parked.sink, &mut parked.stream, &session_id).await {
-            park(&pool, parked);
+            pool.checkin(parked);
         }
         let _ = tx.send(Ok(TtsEvent::Done));
         return Ok(());
@@ -425,7 +374,7 @@ async fn run(
     match end {
         SessionEnd::Finished | SessionEnd::Canceled => {
             debug!(connect_id = %parked.connect_id, "tts parking connection");
-            park(&pool, parked);
+            pool.checkin(parked);
         }
         SessionEnd::Abandoned => {}
     }
@@ -453,119 +402,6 @@ where
         _ = cancel.cancelled() => SelectOutcome::Cancelled,
         output = future => SelectOutcome::Ready(output),
     }
-}
-
-async fn acquire(pool: &ConnPool, spec: &ConnSpec) -> Result<Parked, TtsError> {
-    loop {
-        let Some(mut parked) = pool.checkout() else {
-            return open_connection(spec).await;
-        };
-        if connection_alive(&mut parked) {
-            debug!(connect_id = %parked.connect_id, "tts reusing pooled connection");
-            return Ok(parked);
-        }
-        debug!(connect_id = %parked.connect_id, "tts pooled connection stale, dropping");
-    }
-}
-
-async fn open_connection(spec: &ConnSpec) -> Result<Parked, TtsError> {
-    let (request, connect_id) = spec.build_request()?;
-    let socket = connect(request).await?;
-    let (sink, stream) = socket.split();
-    let mut parked = Parked {
-        sink,
-        stream,
-        connect_id,
-    };
-    parked
-        .sink
-        .send(Message::Binary(protocol::start_connection().into()))
-        .await
-        .map_err(|err| TtsError::from(format!("send start connection: {err}")))?;
-    next_matching(
-        &mut parked.stream,
-        protocol::MSG_FULL_SERVER_RESPONSE,
-        protocol::EVENT_CONNECTION_STARTED,
-    )
-    .await?;
-    debug!(connect_id = %parked.connect_id, "tts connection started");
-    Ok(parked)
-}
-
-async fn connect(request: Request) -> Result<Connection, TtsError> {
-    let (socket, _response) = tokio::time::timeout(CONNECT_TIMEOUT, async {
-        tokio_tungstenite::connect_async(request).await
-    })
-    .await
-    .map_err(|_| TtsError::from("connect timeout"))?
-    .map_err(|err| TtsError::from(format!("connect failed: {err}")))?;
-
-    debug!("tts websocket connected");
-    Ok(socket)
-}
-
-/// Checks a parked connection for a server-side close while it sat idle: any
-/// frames already delivered (stale session leftovers, keepalives) are drained
-/// and discarded. `false` means the connection died and must not be reused.
-fn connection_alive(conn: &mut Parked) -> bool {
-    let waker = Waker::noop();
-    let mut cx = Context::from_waker(waker);
-    loop {
-        match Pin::new(&mut conn.stream).poll_next(&mut cx) {
-            Poll::Pending => return true,
-            Poll::Ready(None)
-            | Poll::Ready(Some(Err(_)))
-            | Poll::Ready(Some(Ok(Message::Close(_)))) => return false,
-            Poll::Ready(Some(Ok(_))) => continue,
-        }
-    }
-}
-
-fn park(pool: &ConnPool, conn: Parked) {
-    if let Some(conn) = pool.checkin(conn) {
-        debug!(connect_id = %conn.connect_id, "tts pool full, closing connection");
-        tokio::spawn(close_conn(conn));
-    }
-}
-
-fn spawn_idle_sweeper(pool: Arc<ConnPool>, idle_timeout: Duration, sweep_interval: Duration) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(sweep_interval);
-        loop {
-            tick.tick().await;
-            for conn in pool.expire(idle_timeout) {
-                debug!(
-                    connect_id = %conn.connect_id,
-                    "tts idle connection expired, closing"
-                );
-                close_conn(conn).await;
-            }
-        }
-    });
-}
-
-async fn close_conn(conn: Parked) {
-    let Parked {
-        mut sink,
-        mut stream,
-        ..
-    } = conn;
-    if sink
-        .send(Message::Binary(protocol::finish_connection().into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
-    let _ = tokio::time::timeout(
-        CANCEL_TIMEOUT,
-        next_matching(
-            &mut stream,
-            protocol::MSG_FULL_SERVER_RESPONSE,
-            protocol::EVENT_CONNECTION_FINISHED,
-        ),
-    )
-    .await;
 }
 
 /// Sends CancelSession and reports whether the server confirmed it; a confirmed
