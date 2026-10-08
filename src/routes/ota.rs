@@ -38,7 +38,8 @@ async fn handle_ota(
                 .ok_or(AppError::MissingHeader("host"))?
                 .to_str()
                 .map_err(|_| AppError::InvalidHeader("host"))?;
-            format!("ws://{host}/gateway")
+            let scheme = forwarded_scheme(&headers);
+            format!("{scheme}://{host}/gateway")
         }
     };
 
@@ -109,4 +110,19 @@ async fn handle_activate(
 
 fn parse_client_id(value: &str) -> Result<Uuid, AppError> {
     Uuid::parse_str(value).map_err(|_| AppError::InvalidHeader("client-id"))
+}
+
+fn forwarded_scheme(headers: &HeaderMap) -> &'static str {
+    let Some(value) = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+    else {
+        return "ws";
+    };
+    let outer = value.split(',').next().unwrap_or_default().trim();
+    if outer.eq_ignore_ascii_case("https") {
+        "wss"
+    } else {
+        "ws"
+    }
 }

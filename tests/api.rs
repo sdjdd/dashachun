@@ -122,6 +122,38 @@ async fn ota_derives_websocket_url_from_host(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
+    let auth = auth_state(pool.clone());
+    let state = state_with_url(pool, None);
+    let mut req = ota_request("/api/ota");
+    req.headers_mut()
+        .insert("x-forwarded-proto", HeaderValue::from_static("https"));
+    let res = dashachun::app(state, auth).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["websocket"]["url"], "wss://192.168.1.50:3000/gateway");
+}
+
+#[sqlx::test]
+#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+async fn ota_forwarded_proto_http_keeps_ws(pool: PgPool) {
+    let auth = auth_state(pool.clone());
+    let state = state_with_url(pool, None);
+    let mut req = ota_request("/api/ota");
+    req.headers_mut()
+        .insert("x-forwarded-proto", HeaderValue::from_static("http"));
+    let res = dashachun::app(state, auth).oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["websocket"]["url"], "ws://192.168.1.50:3000/gateway");
+}
+
+#[sqlx::test]
+#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
 async fn ota_trailing_slash_is_normalized(pool: PgPool) {
     let res = app(pool).oneshot(ota_request("/api/ota/")).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
