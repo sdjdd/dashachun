@@ -6,7 +6,7 @@ use tracing::debug;
 use tracing::warn;
 
 use crate::agent::AgentSession;
-use crate::llm::{ChatItem, ToolCall};
+use crate::agent::{ChatItem, ToolCall};
 
 use super::{HISTORY_LIMIT, Memory, MemoryHook, MemoryOwner, trim};
 
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn conversation_items_fold_into_one_turn_row() {
-        use crate::llm::ToolCall;
+        use crate::agent::ToolCall;
 
         let row = turn_row(&[
             ChatItem::system("system prompt"),
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn turn_row_stores_nothing_without_parts_or_text() {
-        use crate::llm::ToolCall;
+        use crate::agent::ToolCall;
 
         assert!(turn_row(&[]).is_none());
         assert!(turn_row(&[ChatItem::system("system prompt")]).is_none());
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn stored_rows_replay_back_to_items() {
-        use crate::llm::ToolCall;
+        use crate::agent::ToolCall;
 
         let calls = |id: &str| {
             vec![ToolCall {
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn tool_only_rows_replay_without_a_final_reply() {
-        use crate::llm::ToolCall;
+        use crate::agent::ToolCall;
 
         let row = turn_row(&[
             ChatItem::assistant_tool_calls(vec![

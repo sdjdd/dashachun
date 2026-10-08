@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use super::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
+use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
 
 fn parse_reasoning_effort(
     value: &str,

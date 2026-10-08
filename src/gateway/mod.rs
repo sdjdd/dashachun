@@ -187,12 +187,12 @@ mod tests {
         Agent, AgentFactory, AgentInputStream, AgentOutputStream, AgentSession, AgentStore,
         ToolRegistry,
     };
-    use crate::asr::StubAsr;
     use crate::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
     use crate::device::DeviceStore;
-    use crate::llm::StubLlm;
+    use crate::provider::asr::StubAsr;
+    use crate::provider::llm::StubLlm;
+    use crate::provider::tts::StubTts;
     use crate::state::ServerState;
-    use crate::tts::StubTts;
     use crate::vad::{SileroVadFactory, VadConfig};
 
     const HELLO: &str = r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":false,"aec":false}}"#;

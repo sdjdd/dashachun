@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::llm::ToolSpec;
+use crate::agent::ToolSpec;
 
 use super::{ToolHandler, ToolOutcome, params_schema};
 

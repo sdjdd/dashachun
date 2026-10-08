@@ -6,7 +6,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use dashachun::agent::{AudioCapture, Capture, DbMemory, Memory, MemoryHook};
-use dashachun::llm::{ChatItem, ToolCall};
+use dashachun::agent::{ChatItem, ToolCall};
 
 /// A memory wired with the audio capture as its hook — the production
 /// assembly under test.

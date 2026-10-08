@@ -1,24 +1,30 @@
+mod asr;
 mod capture;
 mod composite;
 pub mod dto;
 mod emotion;
 mod factory;
+mod llm;
 mod memory;
 mod prompt;
 mod store;
 pub mod tool;
+mod tts;
 
-use std::pin::Pin;
-
-use futures_util::Stream;
-
+pub use asr::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
 pub use capture::{AudioCapture, Capture, Frame, ReplyCapture, UtteranceCapture, collect};
 pub use composite::CompositeAgent;
 pub use factory::AgentFactory;
+pub use llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
 pub use memory::{DbMemory, InMemMemory, Memory, MemoryHook, MemoryOwner};
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
+pub use tts::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
+
+use std::pin::Pin;
+
+use futures_util::Stream;
 
 pub type AgentInputStream = Pin<Box<dyn Stream<Item = AgentInput> + Send>>;
 pub type AgentOutputStream = Pin<Box<dyn Stream<Item = AgentOutput> + Send>>;
@@ -48,7 +54,7 @@ pub enum AgentOutput {
     Stt { text: String, is_final: bool },
     TtsStart,
     TtsSentence { text: String },
-    TtsSubtitle { subtitle: crate::tts::Subtitle },
+    TtsSubtitle { subtitle: Subtitle },
     Audio(Vec<f32>),
     TtsStop,
     TtsAbort,

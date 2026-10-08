@@ -1,8 +1,8 @@
 use std::time::Instant;
 
+use dashachun::agent::{TextStream, Tts, TtsEvent};
 use dashachun::audio::DOWNLINK;
-use dashachun::tts::volc::VolcTts;
-use dashachun::tts::{TextStream, Tts, TtsEvent};
+use dashachun::provider::tts::VolcTts;
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 

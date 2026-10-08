@@ -9,7 +9,7 @@ use tracing::{debug, warn};
 
 mod protocol;
 
-use super::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
+use crate::agent::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
 use protocol::Response;
 
 pub const DEFAULT_RESOURCE_ID: &str = "volc.seedasr.sauc.duration";

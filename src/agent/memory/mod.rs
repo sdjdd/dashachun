@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::agent::AgentSession;
-use crate::llm::ChatItem;
+use crate::agent::ChatItem;
 
 pub use db::DbMemory;
 pub use inmem::InMemMemory;

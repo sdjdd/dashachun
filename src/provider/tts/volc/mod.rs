@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 mod pool;
 mod protocol;
 
-use super::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
+use crate::agent::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 use crate::audio::DownlinkAudio;
 use pool::{ConnPool, Parked};
 use protocol::Message as TtsMessage;

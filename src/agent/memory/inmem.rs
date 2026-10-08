@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::agent::AgentSession;
-use crate::llm::ChatItem;
+use crate::agent::ChatItem;
 
 use super::{Memory, trim};
 
@@ -74,8 +74,8 @@ impl Memory for InMemMemory {
 mod tests {
     use super::*;
 
+    use crate::agent::ToolCall;
     use crate::agent::memory::HISTORY_LIMIT;
-    use crate::llm::ToolCall;
 
     #[tokio::test]
     async fn keeps_only_the_last_messages() {

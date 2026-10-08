@@ -1,4 +1,4 @@
-use crate::llm::ChatItem;
+use crate::agent::ChatItem;
 
 /// Fixed prefix prepended to every system message, before the configurable
 /// persona prompt. Carries the TTS plain-text output rules and the

@@ -10,7 +10,6 @@ use crate::auth::state::AuthState;
 use crate::state::ServerState;
 
 pub mod agent;
-pub mod asr;
 pub mod audio;
 pub mod auth;
 pub mod config;
@@ -19,10 +18,9 @@ pub mod dto;
 pub mod error;
 pub mod extract;
 pub mod gateway;
-pub mod llm;
+pub mod provider;
 pub mod routes;
 pub mod state;
-pub mod tts;
 pub mod vad;
 
 pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {

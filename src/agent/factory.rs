@@ -5,12 +5,9 @@ use sqlx::PgPool;
 use super::capture::AudioCapture;
 use super::memory::{DbMemory, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
-use super::{Agent, Capture, CompositeAgent, Memory, SystemPrompt, ToolRegistry};
-use crate::asr::Asr;
+use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolRegistry, Tts};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
-use crate::llm::Llm;
-use crate::tts::Tts;
 use crate::vad::VadFactory;
 
 /// Shared, expensive provider bundle plus the per-device configuration source.

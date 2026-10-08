@@ -5,7 +5,7 @@ use schemars::generate::{SchemaGenerator, SchemaSettings};
 use serde_json::Value;
 
 use crate::agent::AgentOutput;
-use crate::llm::ToolSpec;
+use crate::agent::ToolSpec;
 
 mod weather;
 

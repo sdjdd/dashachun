@@ -8,12 +8,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
-    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Capture,
-    Memory, ReplyCapture, SystemPrompt, ToolRegistry, UtteranceCapture, emotion,
+    Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
+    AsrEvent, AudioStream, Capture, ChatItem, Llm, LlmEvent, Memory, ReplyCapture, Subtitle,
+    SystemPrompt, TextStream, ToolCall, ToolRegistry, Tts, TtsEvent, UtteranceCapture, emotion,
 };
-use crate::asr::{Asr, AsrEvent, AudioStream};
-use crate::llm::{ChatItem, Llm, LlmEvent, ToolCall};
-use crate::tts::{Subtitle, TextStream, Tts, TtsEvent};
 use crate::vad::{Vad, VadEvent, VadFactory};
 
 const ASR_CHANNEL_CAPACITY: usize = 64;
@@ -1049,9 +1047,10 @@ mod tests {
     use crate::agent::InMemMemory;
     use crate::agent::collect;
     use crate::agent::memory::HISTORY_LIMIT;
-    use crate::asr::{AsrError, AsrEvents, StubAsr};
-    use crate::llm::{LlmEvents, StubLlm};
-    use crate::tts::{StubTts, Tts, TtsError, TtsEvent, TtsEvents};
+    use crate::agent::{AsrError, AsrEvents, LlmEvents, Tts, TtsError, TtsEvent, TtsEvents};
+    use crate::provider::asr::StubAsr;
+    use crate::provider::llm::StubLlm;
+    use crate::provider::tts::StubTts;
     use crate::vad::{Vad, VadError, VadEvent};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -1089,7 +1088,7 @@ mod tests {
         fn chat(
             &self,
             history: Vec<ChatItem>,
-            _tools: Vec<crate::llm::ToolSpec>,
+            _tools: Vec<crate::agent::ToolSpec>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             self.calls.lock().unwrap().push(history);
@@ -1111,7 +1110,7 @@ mod tests {
         fn chat(
             &self,
             history: Vec<ChatItem>,
-            _tools: Vec<crate::llm::ToolSpec>,
+            _tools: Vec<crate::agent::ToolSpec>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -1120,7 +1119,7 @@ mod tests {
                 calls.len()
             };
             if round == 1 {
-                let mut events: Vec<Result<LlmEvent, crate::llm::LlmError>> = self
+                let mut events: Vec<Result<LlmEvent, crate::agent::LlmError>> = self
                     .tool_calls
                     .iter()
                     .cloned()
@@ -1584,7 +1583,7 @@ mod tests {
         fn chat(
             &self,
             _history: Vec<ChatItem>,
-            _tools: Vec<crate::llm::ToolSpec>,
+            _tools: Vec<crate::agent::ToolSpec>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let events = self
@@ -2048,7 +2047,7 @@ mod tests {
         fn chat(
             &self,
             _history: Vec<ChatItem>,
-            _tools: Vec<crate::llm::ToolSpec>,
+            _tools: Vec<crate::agent::ToolSpec>,
             cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::unfold(false, move |delivered| {
@@ -2362,7 +2361,7 @@ mod tests {
         fn chat(
             &self,
             _history: Vec<ChatItem>,
-            _tools: Vec<crate::llm::ToolSpec>,
+            _tools: Vec<crate::agent::ToolSpec>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             // The pause before the failure lets the driver process the first
@@ -2374,7 +2373,7 @@ mod tests {
             }));
             let failure = futures_util::stream::once(async {
                 tokio::time::sleep(Duration::from_millis(10)).await;
-                Err(crate::llm::LlmError::Failed("boom".into()))
+                Err(crate::agent::LlmError::Failed("boom".into()))
             });
             Box::pin(deltas.chain(failure))
         }

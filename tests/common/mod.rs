@@ -18,13 +18,13 @@ use tower::ServiceExt;
 use dashachun::agent::{
     AgentFactory, AgentSession, AgentStore, MemoryHook, MemoryOwner, ToolRegistry,
 };
-use dashachun::asr::StubAsr;
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
 use dashachun::device::DeviceStore;
-use dashachun::llm::StubLlm;
+use dashachun::provider::asr::StubAsr;
+use dashachun::provider::llm::StubLlm;
+use dashachun::provider::tts::StubTts;
 use dashachun::state::ServerState;
-use dashachun::tts::StubTts;
 use dashachun::vad::{SileroVadFactory, VadConfig};
 
 // ---------------------------------------------------------------- REST app

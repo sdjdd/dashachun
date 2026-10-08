@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use dashachun::asr::volc::VolcAsr;
-use dashachun::asr::{Asr, AsrEvent, AudioStream};
+use dashachun::agent::{Asr, AsrEvent, AudioStream};
+use dashachun::provider::asr::VolcAsr;
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
