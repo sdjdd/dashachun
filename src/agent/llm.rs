@@ -65,6 +65,16 @@ impl ChatItem {
         }
     }
 
+    pub fn assistant_text_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        Self::Assistant {
+            content: Some(content.into()),
+            tool_calls,
+        }
+    }
+
     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self::Tool {
             tool_call_id: tool_call_id.into(),

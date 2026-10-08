@@ -132,9 +132,11 @@ struct TurnRow {
 /// reply — into a single message row, in execution order. Arguments and
 /// results stay verbatim strings; round boundaries are recoverable from the
 /// part order (a `tool_call` following a `tool_result` opens the next
-/// round). `System`/`User` items are never stored here: the user message is
-/// written by [`Memory::store_utterance`], the system prompt is prepended
-/// every turn.
+/// round). Text spoken before a round's tool calls is kept as a `text` part
+/// ahead of that round's calls; the row's `content` stays the final reply.
+/// `System`/`User` items are never stored here: the user message is written
+/// by [`Memory::store_utterance`], the system prompt is prepended every
+/// turn.
 fn turn_row(items: &[ChatItem]) -> Option<TurnRow> {
     let mut parts = Vec::new();
     let mut content = None;
@@ -145,6 +147,18 @@ fn turn_row(items: &[ChatItem]) -> Option<TurnRow> {
                 content: text,
                 tool_calls,
             } => {
+                if tool_calls.is_empty() {
+                    if text.as_deref().is_some_and(|text| !text.is_empty()) {
+                        content = text.clone();
+                    }
+                    continue;
+                }
+                if let Some(text) = text.as_deref().filter(|text| !text.is_empty()) {
+                    parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
                 for call in tool_calls {
                     parts.push(serde_json::json!({
                         "type": "tool_call",
@@ -152,9 +166,6 @@ fn turn_row(items: &[ChatItem]) -> Option<TurnRow> {
                         "name": call.name,
                         "arguments": call.arguments,
                     }));
-                }
-                if text.as_deref().is_some_and(|text| !text.is_empty()) {
-                    content = text.clone();
                 }
             }
             ChatItem::Tool {
@@ -180,10 +191,11 @@ fn turn_row(items: &[ChatItem]) -> Option<TurnRow> {
 
 /// Rebuilds the conversation items from message rows, oldest first — the
 /// inverse of [`turn_row`]. A user row becomes a `User` item; an assistant
-/// row unfolds its `parts` in order (consecutive `tool_call` parts merge
-/// into one round's `assistant_tool_calls` item, each `tool_result` becomes
-/// a `Tool` item) and its non-empty `content` closes the turn as the final
-/// reply. Rows are atomic, so a tool exchange is never split.
+/// row unfolds its `parts` in order (a `text` part becomes the spoken
+/// preamble of the round its consecutive `tool_call` parts merge into, each
+/// `tool_result` becomes a `Tool` item) and its non-empty `content` closes
+/// the turn as the final reply. Rows are atomic, so a tool exchange is never
+/// split.
 fn rows_to_items(rows: Vec<(String, Option<String>, Option<serde_json::Value>)>) -> Vec<ChatItem> {
     let mut items = Vec::new();
     for (role, content, parts) in rows {
@@ -200,8 +212,18 @@ fn rows_to_items(rows: Vec<(String, Option<String>, Option<serde_json::Value>)>)
             continue;
         };
         let mut round = Vec::new();
+        let mut preamble = None;
         for part in parts {
             match part.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => {
+                    if let Some(text) = part
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        preamble = Some(text.to_string());
+                    }
+                }
                 Some("tool_call") => round.push(ToolCall {
                     id: part
                         .get("id")
@@ -220,9 +242,7 @@ fn rows_to_items(rows: Vec<(String, Option<String>, Option<serde_json::Value>)>)
                         .into(),
                 }),
                 Some("tool_result") => {
-                    if !round.is_empty() {
-                        items.push(ChatItem::assistant_tool_calls(std::mem::take(&mut round)));
-                    }
+                    flush_round(&mut items, &mut preamble, &mut round);
                     items.push(ChatItem::tool(
                         part.get("tool_call_id")
                             .and_then(serde_json::Value::as_str)
@@ -235,14 +255,30 @@ fn rows_to_items(rows: Vec<(String, Option<String>, Option<serde_json::Value>)>)
                 _ => {}
             }
         }
-        if !round.is_empty() {
-            items.push(ChatItem::assistant_tool_calls(round));
-        }
+        flush_round(&mut items, &mut preamble, &mut round);
         if let Some(content) = content.filter(|content| !content.is_empty()) {
             items.push(ChatItem::assistant(content));
         }
     }
     items
+}
+
+/// Emits the round being rebuilt: the merged tool calls carrying their
+/// preamble as the item's content, the preamble alone when no calls follow
+/// it, or nothing when the round is empty.
+fn flush_round(
+    items: &mut Vec<ChatItem>,
+    preamble: &mut Option<String>,
+    round: &mut Vec<ToolCall>,
+) {
+    let calls = std::mem::take(round);
+    let preamble = preamble.take();
+    match (preamble, calls.is_empty()) {
+        (Some(text), false) => items.push(ChatItem::assistant_text_tool_calls(text, calls)),
+        (Some(text), true) => items.push(ChatItem::assistant(text)),
+        (None, false) => items.push(ChatItem::assistant_tool_calls(calls)),
+        (None, true) => {}
+    }
 }
 
 async fn store_utterance_row(
@@ -453,6 +489,72 @@ mod tests {
                 ChatItem::tool("1", "one"),
                 ChatItem::tool("2", "two"),
             ]
+        );
+    }
+
+    #[test]
+    fn spoken_preamble_folds_into_a_text_part() {
+        use crate::agent::ToolCall;
+
+        let row = turn_row(&[
+            ChatItem::assistant_text_tool_calls(
+                "好的，我查一下",
+                vec![ToolCall {
+                    id: "call_x".into(),
+                    name: "lookup".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            ChatItem::tool("call_x", "result"),
+            ChatItem::assistant("答复"),
+        ])
+        .expect("the turn produced items");
+
+        assert_eq!(row.content.as_deref(), Some("答复"));
+        let parts = row.parts.unwrap().as_array().unwrap().clone();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "好的，我查一下");
+        assert_eq!(parts[1]["type"], "tool_call");
+        assert_eq!(parts[2]["type"], "tool_result");
+    }
+
+    #[test]
+    fn spoken_preamble_replays_as_the_round_content() {
+        use crate::agent::ToolCall;
+
+        let call = || {
+            vec![ToolCall {
+                id: "call_x".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            }]
+        };
+        let row = turn_row(&[
+            ChatItem::assistant_text_tool_calls("好的，我查一下", call()),
+            ChatItem::tool("call_x", "result"),
+            ChatItem::assistant("答复"),
+        ])
+        .expect("the turn produced items");
+
+        assert_eq!(
+            rows_to_items(vec![("assistant".into(), row.content, row.parts)]),
+            vec![
+                ChatItem::assistant_text_tool_calls("好的，我查一下", call()),
+                ChatItem::tool("call_x", "result"),
+                ChatItem::assistant("答复"),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_part_without_calls_replays_as_plain_assistant() {
+        use serde_json::json;
+
+        let parts = json!([{ "type": "text", "text": "孤立的一段话" }]);
+        assert_eq!(
+            rows_to_items(vec![("assistant".into(), None, Some(parts))]),
+            vec![ChatItem::assistant("孤立的一段话")]
         );
     }
 }

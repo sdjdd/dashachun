@@ -869,8 +869,14 @@ async fn run_llm(
             debug!(session_id, "llm output closed");
             return;
         }
-        new_items.push(ChatItem::assistant_tool_calls(calls.clone()));
-        working.push(ChatItem::assistant_tool_calls(calls.clone()));
+        let round = if text.is_empty() {
+            ChatItem::assistant_tool_calls(calls.clone())
+        } else {
+            reply.push_str(&text);
+            ChatItem::assistant_text_tool_calls(text, calls.clone())
+        };
+        new_items.push(round.clone());
+        working.push(round);
         for call in calls {
             let (content, output) = execute_tool(&tools, &call, &session_id).await;
             if let Some(output) = output
@@ -1126,6 +1132,49 @@ mod tests {
                     .map(|call| Ok(LlmEvent::ToolCall(call)))
                     .collect();
                 events.push(Ok(LlmEvent::Done));
+                Box::pin(futures_util::stream::iter(events))
+            } else {
+                let text = self.reply.clone();
+                Box::pin(futures_util::stream::iter([
+                    Ok(LlmEvent::Delta { text }),
+                    Ok(LlmEvent::Done),
+                ]))
+            }
+        }
+    }
+
+    /// Streams a spoken preamble before the tool call in round 1, then
+    /// replies in round 2.
+    struct PreambleToolLlm {
+        calls: Arc<Mutex<Vec<Vec<ChatItem>>>>,
+        preamble: String,
+        reply: String,
+    }
+
+    impl Llm for PreambleToolLlm {
+        fn chat(
+            &self,
+            history: Vec<ChatItem>,
+            _tools: Vec<crate::agent::ToolSpec>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            let round = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(history);
+                calls.len()
+            };
+            if round == 1 {
+                let events: Vec<Result<LlmEvent, crate::agent::LlmError>> = vec![
+                    Ok(LlmEvent::Delta {
+                        text: self.preamble.clone(),
+                    }),
+                    Ok(LlmEvent::ToolCall(ToolCall {
+                        id: "call_x".into(),
+                        name: "nonexistent".into(),
+                        arguments: "{}".into(),
+                    })),
+                    Ok(LlmEvent::Done),
+                ];
                 Box::pin(futures_util::stream::iter(events))
             } else {
                 let text = self.reply.clone();
@@ -2279,6 +2328,54 @@ mod tests {
                 }]),
                 ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
                 ChatItem::assistant("ok"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn spoken_preamble_before_tool_call_is_kept() {
+        let memory = Arc::new(InMemMemory::default());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = CompositeAgent {
+            llm: Arc::new(PreambleToolLlm {
+                calls: calls.clone(),
+                preamble: "好的，我查一下".into(),
+                reply: "答复".into(),
+            }),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            memory: memory.clone(),
+            ..stub_agent()
+        };
+        let (tx, _output) = run(agent);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+        let rounds = wait_for_calls(&calls, 2).await;
+
+        let call = || ToolCall {
+            id: "call_x".into(),
+            name: "nonexistent".into(),
+            arguments: "{}".into(),
+        };
+        // The preamble rides on the round item, so the next LLM round sees it.
+        assert_eq!(
+            rounds[1],
+            vec![
+                ChatItem::user("hello"),
+                ChatItem::assistant_text_tool_calls("好的，我查一下", vec![call()]),
+                ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
+            ]
+        );
+        // And it is stored with the turn's tool exchange.
+        let logged = wait_until("turn items", || memory.logged_turns().first().cloned()).await;
+        assert_eq!(
+            logged,
+            vec![
+                ChatItem::assistant_text_tool_calls("好的，我查一下", vec![call()]),
+                ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
+                ChatItem::assistant("答复"),
             ]
         );
     }
