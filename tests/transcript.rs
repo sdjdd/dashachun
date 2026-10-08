@@ -143,7 +143,7 @@ async fn empty_transcript_writes_nothing(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
-async fn turn_items_persist_assistant_tool_and_reply_rows(pool: PgPool) {
+async fn turn_items_persist_as_one_row_with_tool_parts(pool: PgPool) {
     use dashachun::llm::{ChatItem, ToolCall};
 
     let receipt = sink(pool.clone()).log_items(
@@ -159,34 +159,105 @@ async fn turn_items_persist_assistant_tool_and_reply_rows(pool: PgPool) {
         ],
     );
 
-    wait_for_message_count(&pool, 3).await;
-    let rows = sqlx::query_as::<
-        _,
-        (
-            i64,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<serde_json::Value>,
-        ),
-    >("SELECT id, role, content, tool_call_id, tool_calls FROM messages ORDER BY id")
-    .fetch_all(&pool)
+    wait_for_message_count(&pool, 1).await;
+    let row = sqlx::query_as::<_, (String, Option<String>, serde_json::Value)>(
+        "SELECT role, content, parts FROM messages",
+    )
+    .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(rows[0].1, "assistant");
-    assert_eq!(rows[0].2, None);
-    let calls = rows[0].4.as_ref().unwrap();
-    assert_eq!(calls[0]["id"], "call_x");
-    assert_eq!(calls[0]["name"], "get_weather");
-    assert_eq!(calls[0]["arguments"], "{\"city\":\"hangzhou\"}");
-    assert_eq!(rows[1].1, "tool");
-    assert_eq!(rows[1].2.as_deref(), Some("sunny 26 degrees"));
-    assert_eq!(rows[1].3.as_deref(), Some("call_x"));
-    assert_eq!(rows[2].1, "assistant");
-    assert_eq!(rows[2].2.as_deref(), Some("🙂sunny today"));
-    assert!(rows[2].4.is_none());
-    // The receipt resolves to the reply's message row.
-    assert_eq!(receipt.resolve().await, Some(rows[2].0));
+    assert_eq!(row.0, "assistant");
+    assert_eq!(row.1.as_deref(), Some("🙂sunny today"));
+    let parts = row.2.as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["type"], "tool_call");
+    assert_eq!(parts[0]["id"], "call_x");
+    assert_eq!(parts[0]["name"], "get_weather");
+    assert_eq!(parts[0]["arguments"], "{\"city\":\"hangzhou\"}");
+    assert_eq!(parts[1]["type"], "tool_result");
+    assert_eq!(parts[1]["tool_call_id"], "call_x");
+    assert_eq!(parts[1]["content"], "sunny 26 degrees");
+    // The receipt resolves to the turn's row.
+    let id: i64 = sqlx::query_scalar("SELECT id FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(receipt.resolve().await, Some(id));
+}
+
+#[sqlx::test]
+#[ignore]
+async fn multi_round_tool_exchange_flattens_into_parts_in_order(pool: PgPool) {
+    use dashachun::llm::{ChatItem, ToolCall};
+
+    sink(pool.clone()).log_items(
+        &session("sess-9"),
+        vec![
+            ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_a".into(),
+                name: "lookup".into(),
+                arguments: "{\"q\":\"a\"}".into(),
+            }]),
+            ChatItem::tool("call_a", "result a"),
+            ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_b".into(),
+                name: "lookup".into(),
+                arguments: "{\"q\":\"b\"}".into(),
+            }]),
+            ChatItem::tool("call_b", "result b"),
+            ChatItem::assistant("done"),
+        ],
+    );
+
+    wait_for_message_count(&pool, 1).await;
+    let parts: serde_json::Value = sqlx::query_scalar("SELECT parts FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let parts = parts.as_array().unwrap();
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0]["type"], "tool_call");
+    assert_eq!(parts[0]["id"], "call_a");
+    assert_eq!(parts[1]["type"], "tool_result");
+    assert_eq!(parts[1]["tool_call_id"], "call_a");
+    assert_eq!(parts[2]["type"], "tool_call");
+    assert_eq!(parts[2]["id"], "call_b");
+    assert_eq!(parts[3]["type"], "tool_result");
+    assert_eq!(parts[3]["tool_call_id"], "call_b");
+}
+
+#[sqlx::test]
+#[ignore]
+async fn tool_only_turn_stores_null_content_and_a_resolved_receipt(pool: PgPool) {
+    use dashachun::llm::{ChatItem, ToolCall};
+
+    let receipt = sink(pool.clone()).log_items(
+        &session("sess-10"),
+        vec![
+            ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_x".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            }]),
+            ChatItem::tool("call_x", "result"),
+        ],
+    );
+
+    wait_for_message_count(&pool, 1).await;
+    let row = sqlx::query_as::<_, (Option<String>, serde_json::Value)>(
+        "SELECT content, parts FROM messages",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, None);
+    assert_eq!(row.1.as_array().unwrap().len(), 2);
+    // Even without a final reply text the turn row is a valid audio anchor.
+    let id: i64 = sqlx::query_scalar("SELECT id FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(receipt.resolve().await, Some(id));
 }
 
 #[sqlx::test]
@@ -194,11 +265,12 @@ async fn turn_items_persist_assistant_tool_and_reply_rows(pool: PgPool) {
 async fn system_items_are_never_stored(pool: PgPool) {
     use dashachun::llm::ChatItem;
 
-    let _ =
+    let receipt =
         sink(pool.clone()).log_items(&session("sess-3"), vec![ChatItem::system("system prompt")]);
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert_eq!(message_count(&pool).await, 0);
+    assert_eq!(receipt.resolve().await, None);
 }
 
 #[sqlx::test]

@@ -48,8 +48,12 @@ CREATE TABLE devices (
 CREATE INDEX devices_user_id_idx ON devices (user_id);
 CREATE INDEX devices_agent_id_idx ON devices (agent_id);
 
--- The durable conversation log: one row per ChatItem. `System` items are
--- never stored (the agent prepends its prompt every turn). Integrity is
+-- The durable conversation log: one row per turn. A user row carries the
+-- utterance text; an assistant row carries the turn's final reply text plus
+-- the whole tool exchange as an ordered JSONB `parts` array (call arguments
+-- and results are kept verbatim as strings — no parsing, no type guessing;
+-- the round boundaries are recoverable from the part order). `System` items
+-- are never stored (the agent prepends its prompt every turn). Integrity is
 -- enforced in the app layer; no foreign keys.
 CREATE TABLE messages (
     id           BIGSERIAL PRIMARY KEY,
@@ -58,10 +62,9 @@ CREATE TABLE messages (
     agent_id     BIGINT NOT NULL,
     client_id    UUID NOT NULL,
     device_id    TEXT,
-    role         TEXT NOT NULL,          -- 'user' | 'assistant' | 'tool'
-    content      TEXT,                   -- user/assistant/tool text; NULL for tool-call-only assistant items
-    tool_call_id TEXT,                   -- role='tool': id of the originating call
-    tool_calls   JSONB,                  -- assistant tool-call items: [{id,name,arguments}]
+    role         TEXT NOT NULL,          -- 'user' | 'assistant'
+    content      TEXT,                   -- user: utterance text; assistant: final reply text (NULL when the turn ended without one)
+    parts        JSONB,                  -- assistant: [{type:'tool_call',id,name,arguments},{type:'tool_result',tool_call_id,content}]
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

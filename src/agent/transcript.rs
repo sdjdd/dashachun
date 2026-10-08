@@ -7,7 +7,6 @@
 //! [`ReplyRecording`]) and never waits on Postgres or the encoder.
 
 use sqlx::PgPool;
-use sqlx::Row;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -36,10 +35,10 @@ pub trait TranscriptSink: Send + Sync {
     /// attached to; dropping it without finishing discards the capture.
     fn start_utterance(&self, session: &AgentSession) -> UtteranceRecording;
 
-    /// Persists one turn's conversation items (assistant reply, tool
-    /// exchange) in the background and returns a receipt resolving to the
-    /// reply's message row id (`None` when the turn had no assistant text
-    /// row). Fire-and-forget: failures are logged, never surfaced.
+    /// Persists one turn's conversation items — the tool exchange plus the
+    /// final reply — as a single row in the background and returns a receipt
+    /// resolving to that row's id (`None` when the turn produced nothing to
+    /// store). Fire-and-forget: failures are logged, never surfaced.
     fn log_items(&self, session: &AgentSession, items: Vec<ChatItem>) -> ReplyReceipt;
 
     /// Starts capturing the synthesized reply audio (the server's own
@@ -88,8 +87,8 @@ impl UtteranceRecording {
     }
 }
 
-/// Resolves to the reply's message row id once the turn's items are stored;
-/// `None` when the turn had no assistant text row (empty reply, items lost).
+/// Resolves to the turn's message row id once the turn's items are stored;
+/// `None` when the turn produced nothing to store.
 pub struct ReplyReceipt {
     rx: oneshot::Receiver<Option<i64>>,
 }
@@ -311,57 +310,58 @@ pub async fn collect_reply(
     None
 }
 
-struct MessageRow {
-    role: &'static str,
+struct TurnRow {
     content: Option<String>,
-    tool_call_id: Option<String>,
-    tool_calls: Option<serde_json::Value>,
+    parts: Option<serde_json::Value>,
 }
 
-/// Maps a conversation item to its transcript row. `System` items are never
-/// stored: the agent prepends its prompt every turn.
-fn message_row(item: &ChatItem) -> Option<MessageRow> {
-    let row = match item {
-        ChatItem::System { .. } => return None,
-        ChatItem::User { content } => MessageRow {
-            role: "user",
-            content: Some(content.clone()),
-            tool_call_id: None,
-            tool_calls: None,
-        },
-        ChatItem::Assistant {
-            content,
-            tool_calls,
-        } => MessageRow {
-            role: "assistant",
-            content: content.clone(),
-            tool_call_id: None,
-            tool_calls: (!tool_calls.is_empty()).then(|| {
-                serde_json::Value::Array(
-                    tool_calls
-                        .iter()
-                        .map(|call| {
-                            serde_json::json!({
-                                "id": call.id,
-                                "name": call.name,
-                                "arguments": call.arguments,
-                            })
-                        })
-                        .collect(),
-                )
-            }),
-        },
-        ChatItem::Tool {
-            tool_call_id,
-            content,
-        } => MessageRow {
-            role: "tool",
-            content: Some(content.clone()),
-            tool_call_id: Some(tool_call_id.clone()),
-            tool_calls: None,
-        },
-    };
-    Some(row)
+/// Folds one turn's conversation items — the tool exchange plus the final
+/// reply — into a single transcript row, in execution order. Arguments and
+/// results stay verbatim strings; round boundaries are recoverable from the
+/// part order (a `tool_call` following a `tool_result` opens the next round).
+/// `System`/`User` items are never stored here: the user message is written
+/// by the utterance capture, the system prompt is prepended every turn.
+fn turn_row(items: &[ChatItem]) -> Option<TurnRow> {
+    let mut parts = Vec::new();
+    let mut content = None;
+    for item in items {
+        match item {
+            ChatItem::System { .. } | ChatItem::User { .. } => {}
+            ChatItem::Assistant {
+                content: text,
+                tool_calls,
+            } => {
+                for call in tool_calls {
+                    parts.push(serde_json::json!({
+                        "type": "tool_call",
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }));
+                }
+                if text.as_deref().is_some_and(|text| !text.is_empty()) {
+                    content = text.clone();
+                }
+            }
+            ChatItem::Tool {
+                tool_call_id,
+                content,
+            } => {
+                parts.push(serde_json::json!({
+                    "type": "tool_result",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                }));
+            }
+        }
+    }
+    if parts.is_empty() && content.is_none() {
+        return None;
+    }
+    Some(TurnRow {
+        content,
+        parts: (!parts.is_empty()).then_some(serde_json::Value::Array(parts)),
+    })
 }
 
 async fn store_items(
@@ -370,41 +370,25 @@ async fn store_items(
     session_id: &str,
     items: &[ChatItem],
 ) -> Result<Option<i64>, String> {
-    let rows: Vec<MessageRow> = items.iter().filter_map(message_row).collect();
-    if rows.is_empty() {
+    let Some(row) = turn_row(items) else {
         return Ok(None);
-    }
-    let mut builder = sqlx::QueryBuilder::new(
+    };
+    let id: i64 = sqlx::query_scalar(
         "INSERT INTO messages (session_id, user_id, agent_id, client_id, device_id, \
-         role, content, tool_call_id, tool_calls) ",
-    );
-    builder.push_values(rows.iter(), |mut b, row| {
-        b.push_bind(session_id)
-            .push_bind(owner.user_id)
-            .push_bind(owner.agent_id)
-            .push_bind(owner.client_id)
-            .push_bind(&owner.device_id)
-            .push_bind(row.role)
-            .push_bind(&row.content)
-            .push_bind(&row.tool_call_id)
-            .push_bind(&row.tool_calls);
-    });
-    builder.push(" RETURNING id, role, content");
-    let inserted = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .map_err(|err| err.to_string())?;
-    let mut reply_id = None;
-    for row in inserted.iter().rev() {
-        let role: String = row.try_get(1).map_err(|err| err.to_string())?;
-        let content: Option<String> = row.try_get(2).map_err(|err| err.to_string())?;
-        if role == "assistant" && content.is_some() {
-            reply_id = Some(row.try_get::<i64, _>(0).map_err(|err| err.to_string())?);
-            break;
-        }
-    }
-    Ok(reply_id)
+         role, content, parts) \
+         VALUES ($1, $2, $3, $4, $5, 'assistant', $6, $7) RETURNING id",
+    )
+    .bind(session_id)
+    .bind(owner.user_id)
+    .bind(owner.agent_id)
+    .bind(owner.client_id)
+    .bind(&owner.device_id)
+    .bind(&row.content)
+    .bind(&row.parts)
+    .fetch_one(pool)
+    .await
+    .map_err(|err| err.to_string())?;
+    Ok(Some(id))
 }
 
 async fn store_utterance(
@@ -608,10 +592,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn conversation_items_map_to_rows() {
+    fn conversation_items_fold_into_one_turn_row() {
         use crate::llm::ToolCall;
 
-        let rows: Vec<MessageRow> = [
+        let row = turn_row(&[
             ChatItem::system("system prompt"),
             ChatItem::user("hello"),
             ChatItem::assistant_tool_calls(vec![ToolCall {
@@ -621,26 +605,41 @@ mod tests {
             }]),
             ChatItem::tool("call_x", "sunny 26 degrees"),
             ChatItem::assistant("🙂sunny today"),
-        ]
-        .iter()
-        .filter_map(message_row)
-        .collect();
+        ])
+        .expect("the turn produced items");
 
-        assert_eq!(rows.len(), 4, "system items are never stored");
-        assert_eq!(rows[0].role, "user");
-        assert_eq!(rows[0].content.as_deref(), Some("hello"));
-        assert_eq!(rows[1].role, "assistant");
-        assert_eq!(rows[1].content, None);
-        let calls = rows[1].tool_calls.as_ref().unwrap();
-        assert_eq!(calls[0]["id"], "call_x");
-        assert_eq!(calls[0]["name"], "get_weather");
-        assert_eq!(calls[0]["arguments"], "{\"city\":\"hangzhou\"}");
-        assert_eq!(rows[2].role, "tool");
-        assert_eq!(rows[2].tool_call_id.as_deref(), Some("call_x"));
-        assert_eq!(rows[2].content.as_deref(), Some("sunny 26 degrees"));
-        assert_eq!(rows[3].role, "assistant");
-        assert_eq!(rows[3].content.as_deref(), Some("🙂sunny today"));
-        assert!(rows[3].tool_calls.is_none());
+        assert_eq!(row.content.as_deref(), Some("🙂sunny today"));
+        let parts = row.parts.unwrap().as_array().unwrap().clone();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "tool_call");
+        assert_eq!(parts[0]["id"], "call_x");
+        assert_eq!(parts[0]["name"], "get_weather");
+        assert_eq!(parts[0]["arguments"], "{\"city\":\"hangzhou\"}");
+        assert_eq!(parts[1]["type"], "tool_result");
+        assert_eq!(parts[1]["tool_call_id"], "call_x");
+        assert_eq!(parts[1]["content"], "sunny 26 degrees");
+    }
+
+    #[test]
+    fn turn_row_stores_nothing_without_parts_or_text() {
+        use crate::llm::ToolCall;
+
+        assert!(turn_row(&[]).is_none());
+        assert!(turn_row(&[ChatItem::system("system prompt")]).is_none());
+        // An empty final reply over no tool exchange stores nothing either.
+        assert!(turn_row(&[ChatItem::assistant("")]).is_none());
+        // A tool round without a final reply still stores.
+        let row = turn_row(&[
+            ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_x".into(),
+                name: "lookup".into(),
+                arguments: "{}".into(),
+            }]),
+            ChatItem::tool("call_x", "result"),
+        ])
+        .expect("tool parts are stored");
+        assert_eq!(row.content, None);
+        assert_eq!(row.parts.unwrap().as_array().unwrap().len(), 2);
     }
 
     #[test]

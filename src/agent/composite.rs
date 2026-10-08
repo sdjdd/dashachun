@@ -2274,10 +2274,13 @@ mod tests {
             items: Vec<ChatItem>,
         ) -> crate::agent::ReplyReceipt {
             self.logged.lock().unwrap().push(items.clone());
-            let has_reply = items.iter().any(|item| {
-                matches!(item, ChatItem::Assistant { content: Some(_), tool_calls } if tool_calls.is_empty())
-            });
-            crate::agent::ReplyReceipt::ready(has_reply.then_some(42))
+            // Mirrors the sink's contract: the turn row exists — and the
+            // receipt resolves — whenever the turn produced any assistant or
+            // tool item, even without a final reply text.
+            let stored = items
+                .iter()
+                .any(|item| matches!(item, ChatItem::Assistant { .. } | ChatItem::Tool { .. }));
+            crate::agent::ReplyReceipt::ready(stored.then_some(42))
         }
 
         fn start_reply(&self, _session: &AgentSession) -> crate::agent::ReplyRecording {
