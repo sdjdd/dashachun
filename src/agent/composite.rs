@@ -10,8 +10,8 @@ use tracing::{debug, info, trace, warn};
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
     AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, LlmEvent, Memory, ReplyCapture,
-    Subtitle, SystemPrompt, TextStream, ToolCall, ToolRegistry, Tts, TtsEvent, UtteranceCapture,
-    emotion,
+    Subtitle, SystemPrompt, TextStream, ToolCall, ToolOutcome, ToolRegistry, Tts, TtsEvent,
+    UtteranceCapture, emotion,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -873,6 +873,7 @@ async fn run_llm(
             debug!(session_id, "llm output closed");
             return;
         }
+        let spoke = !text.is_empty();
         let round = if text.is_empty() {
             ChatItem::assistant_tool_calls(calls.clone())
         } else {
@@ -881,9 +882,10 @@ async fn run_llm(
         };
         new_items.push(round.clone());
         working.push(round);
+        let mut needs_reply = false;
         for call in calls {
-            let (content, output) = execute_tool(&tools, &call, &session_id).await;
-            if let Some(output) = output
+            let outcome = execute_tool(&tools, &call, &session_id).await;
+            if let Some(output) = outcome.output
                 && llm_tx
                     .send(LlmMessage::Output { generation, output })
                     .await
@@ -892,8 +894,11 @@ async fn run_llm(
                 debug!(session_id, "llm output closed");
                 return;
             }
-            new_items.push(ChatItem::tool(call.id.clone(), content.clone()));
-            working.push(ChatItem::tool(call.id, content));
+            if outcome.needs_reply {
+                needs_reply = true;
+            }
+            new_items.push(ChatItem::tool(call.id.clone(), outcome.content.clone()));
+            working.push(ChatItem::tool(call.id, outcome.content));
         }
         if llm_tx
             .send(LlmMessage::Emotion {
@@ -906,14 +911,23 @@ async fn run_llm(
             debug!(session_id, "llm output closed");
             return;
         }
+        if spoke && !needs_reply {
+            // The round's spoken text already answered and every tool was
+            // silent plumbing; asking the model again would only produce a
+            // second confirmation of what it just said.
+            let _ = llm_tx
+                .send(LlmMessage::Done {
+                    generation,
+                    reply,
+                    history: new_items,
+                })
+                .await;
+            return;
+        }
     }
 }
 
-async fn execute_tool(
-    tools: &ToolRegistry,
-    call: &ToolCall,
-    session_id: &str,
-) -> (String, Option<AgentOutput>) {
+async fn execute_tool(tools: &ToolRegistry, call: &ToolCall, session_id: &str) -> ToolOutcome {
     debug!(
         session_id,
         tool = %call.name,
@@ -922,7 +936,11 @@ async fn execute_tool(
     );
     let Some(handler) = tools.get(&call.name) else {
         warn!(session_id, tool = %call.name, "unknown tool requested");
-        return (format!("error: unknown tool `{}`", call.name), None);
+        return ToolOutcome {
+            content: format!("error: unknown tool `{}`", call.name),
+            output: None,
+            needs_reply: true,
+        };
     };
     let args = if call.arguments.trim().is_empty() {
         serde_json::Value::Null
@@ -931,21 +949,29 @@ async fn execute_tool(
             Ok(args) => args,
             Err(err) => {
                 warn!(session_id, tool = %call.name, %err, "invalid tool arguments");
-                return (format!("error: invalid arguments: {err}"), None);
+                return ToolOutcome {
+                    content: format!("error: invalid arguments: {err}"),
+                    output: None,
+                    needs_reply: true,
+                };
             }
         }
     };
     let result = match handler.call(&args).await {
-        Ok(outcome) => (outcome.content, outcome.output),
+        Ok(outcome) => outcome,
         Err(err) => {
             warn!(session_id, tool = %call.name, %err, "tool failed");
-            (format!("error: {err}"), None)
+            ToolOutcome {
+                content: format!("error: {err}"),
+                output: None,
+                needs_reply: true,
+            }
         }
     };
     debug!(
         session_id,
         tool = %call.name,
-        result = %result.0,
+        result = %result.content,
         "tool result"
     );
     result
@@ -1944,8 +1970,9 @@ mod tests {
         ));
     }
 
-    /// Turn 1 speaks a preamble, stores a fact through the memory tool and
-    /// closes; turn 2 must see the stored entry in its system prompt.
+    /// Turn 1 speaks a preamble and stores a fact through the memory tool;
+    /// the loop closes the turn right there instead of asking again. Turn 2
+    /// must see the stored entry in its system prompt.
     struct MemoryLlm {
         calls: Arc<Mutex<Vec<Vec<ChatItem>>>>,
     }
@@ -2007,14 +2034,22 @@ mod tests {
             .await
             .unwrap();
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
-        wait_for_calls(&calls, 2).await;
+        wait_for_calls(&calls, 1).await;
 
+        // The tool result needs no reply, so turn 1 closed after its single
+        // round instead of asking the model again.
         tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "a spoken round with a silent tool must not be followed by another round"
+        );
+
         tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
-        let rounds = wait_for_calls(&calls, 3).await;
+        let second = wait_for_calls(&calls, 2).await;
         assert!(matches!(
-            rounds[2].first(),
+            second[1].first(),
             Some(ChatItem::System { content }) if content.contains("[mem_01] likes tea")
         ));
     }

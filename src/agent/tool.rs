@@ -23,9 +23,18 @@ pub(crate) fn params_schema<T: JsonSchema>() -> Value {
         .to_value()
 }
 
+/// The result of one tool call: the content fed back to the model as the
+/// tool message, an optional side-channel output for the device, and
+/// whether the model must produce a follow-up reply after seeing the
+/// result. Query tools and failures need one — the reply depends on the
+/// result or must correct a claim the model already made; a memory write
+/// that succeeded does not, which lets the tool loop close a turn that
+/// already spoke instead of asking the model again (a second round could
+/// only re-confirm what was just said).
 pub struct ToolOutcome {
     pub content: String,
     pub output: Option<AgentOutput>,
+    pub needs_reply: bool,
 }
 
 #[async_trait::async_trait]

@@ -41,6 +41,7 @@ impl ToolHandler for GetDateTime {
         Ok(ToolOutcome {
             content: describe(now),
             output: None,
+            needs_reply: true,
         })
     }
 }

@@ -96,6 +96,7 @@ impl ToolHandler for GetWeather {
         Ok(ToolOutcome {
             content,
             output: None,
+            needs_reply: true,
         })
     }
 }

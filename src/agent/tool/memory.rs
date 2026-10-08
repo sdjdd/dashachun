@@ -70,9 +70,8 @@ impl ToolHandler for MemoryAdd {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_add".to_string(),
-            description: "Store a durable fact about the user for future conversations. Call \
-                it only after composing your reply, never before. The call is rejected \
-                while the memory is full."
+            description: "Add a durable fact about the user to your long-term memory. The \
+                call is rejected while the memory is full."
                 .to_string(),
             parameters: params_schema::<MemoryAddArgs>(),
         }
@@ -86,12 +85,14 @@ impl ToolHandler for MemoryAdd {
             Ok(entry) => Ok(ToolOutcome {
                 content: format!("stored as [{}]", entry_id(entry.mem_no)),
                 output: None,
+                needs_reply: false,
             }),
             Err(AddError::Full) => Ok(ToolOutcome {
                 content: format!(
                     "memory is full ({MAX_ENTRIES} entries); update or delete an existing entry instead"
                 ),
                 output: None,
+                needs_reply: true,
             }),
             Err(AddError::Failed(err)) => Err(err),
         }
@@ -113,9 +114,7 @@ impl ToolHandler for MemoryUpdate {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_update".to_string(),
-            description: "Replace the text of a stored memory entry by its ID. Call it only \
-                after composing your reply, never before."
-                .to_string(),
+            description: "Replace the text of a remembered fact by its ID.".to_string(),
             parameters: params_schema::<MemoryUpdateArgs>(),
         }
     }
@@ -135,11 +134,13 @@ impl ToolHandler for MemoryUpdate {
             Ok(ToolOutcome {
                 content: format!("updated [{id}]"),
                 output: None,
+                needs_reply: false,
             })
         } else {
             Ok(ToolOutcome {
                 content: format!("no memory entry [{id}]"),
                 output: None,
+                needs_reply: false,
             })
         }
     }
@@ -160,9 +161,7 @@ impl ToolHandler for MemoryDelete {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "memory_delete".to_string(),
-            description: "Delete a stored memory entry by its ID. Call it only after \
-                composing your reply, never before."
-                .to_string(),
+            description: "Remove a fact from your long-term memory by its ID.".to_string(),
             parameters: params_schema::<MemoryDeleteArgs>(),
         }
     }
@@ -181,11 +180,13 @@ impl ToolHandler for MemoryDelete {
             Ok(ToolOutcome {
                 content: format!("deleted [{id}]"),
                 output: None,
+                needs_reply: false,
             })
         } else {
             Ok(ToolOutcome {
                 content: format!("no memory entry [{id}]"),
                 output: None,
+                needs_reply: false,
             })
         }
     }
