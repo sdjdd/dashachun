@@ -16,7 +16,10 @@ pub use capture::{AudioCapture, Capture, Frame, ReplyCapture, UtteranceCapture, 
 pub use composite::CompositeAgent;
 pub use factory::AgentFactory;
 pub use llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
-pub use memory::{DbMemory, InMemMemory, Memory, MemoryHook, MemoryOwner};
+pub use memory::{
+    AddError, DbEntryMemory, DbMemory, EntryMemory, InMemEntryMemory, InMemMemory, MAX_ENTRIES,
+    Memory, MemoryEntry, MemoryHook, MemoryOwner,
+};
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};

@@ -1,9 +1,11 @@
 //! The conversation memory: a warm in-process window over the durable
-//! `messages` log. Text only — audio storage is a separate feature
-//! ([`AudioCapture`]) that attaches to committed rows through
+//! `messages` log, plus the entry-based user memory the prompt reads and
+//! the memory tools maintain. Text only — audio storage is a separate
+//! feature ([`AudioCapture`]) that attaches to committed rows through
 //! [`MemoryHook`].
 
 mod db;
+mod entries;
 mod inmem;
 
 use async_trait::async_trait;
@@ -13,6 +15,9 @@ use crate::agent::AgentSession;
 use crate::agent::ChatItem;
 
 pub use db::DbMemory;
+pub use entries::{
+    AddError, DbEntryMemory, EntryMemory, InMemEntryMemory, MAX_ENTRIES, MemoryEntry, entry_id,
+};
 pub use inmem::InMemMemory;
 
 /// Device-side identity stamped onto every message row, taken from the

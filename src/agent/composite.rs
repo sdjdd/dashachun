@@ -9,8 +9,9 @@ use tracing::{debug, info, trace, warn};
 
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
-    AsrEvent, AudioStream, Capture, ChatItem, Llm, LlmEvent, Memory, ReplyCapture, Subtitle,
-    SystemPrompt, TextStream, ToolCall, ToolRegistry, Tts, TtsEvent, UtteranceCapture, emotion,
+    AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, LlmEvent, Memory, ReplyCapture,
+    Subtitle, SystemPrompt, TextStream, ToolCall, ToolRegistry, Tts, TtsEvent, UtteranceCapture,
+    emotion,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -28,6 +29,7 @@ pub struct CompositeAgent {
     pub tts: Arc<dyn Tts>,
     pub vad: Arc<dyn VadFactory>,
     pub memory: Arc<dyn Memory>,
+    pub entries: Arc<dyn EntryMemory>,
     pub tools: Arc<ToolRegistry>,
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
@@ -271,6 +273,8 @@ async fn drive(
                             .await;
                         emotion_pending = true;
                         stripper = emotion::Stripper::new();
+                        let entries = agent.entries.list().await;
+                        let prompt = agent.system_prompt.for_turn(&entries);
                         completion = Some(spawn_llm(
                             &agent.llm,
                             &agent.tools,
@@ -278,7 +282,7 @@ async fn drive(
                             session.id.clone(),
                             generation,
                             agent.memory.history().await,
-                            agent.system_prompt.clone(),
+                            prompt,
                         ));
                     }
                     AsrMessage::Error { message, .. } => {
@@ -1050,9 +1054,11 @@ async fn run_tts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::InMemEntryMemory;
     use crate::agent::InMemMemory;
     use crate::agent::collect;
     use crate::agent::memory::HISTORY_LIMIT;
+    use crate::agent::tool::MemoryAdd;
     use crate::agent::{AsrError, AsrEvents, LlmEvents, Tts, TtsError, TtsEvent, TtsEvents};
     use crate::provider::asr::StubAsr;
     use crate::provider::llm::StubLlm;
@@ -1277,6 +1283,7 @@ mod tests {
             tts: Arc::new(StubTts),
             vad: Arc::new(ScriptedVadFactory { events: Vec::new() }),
             memory: Arc::new(InMemMemory::default()),
+            entries: Arc::new(InMemEntryMemory::default()),
             tools: empty_tools(),
             system_prompt: SystemPrompt::default(),
             capture: None,
@@ -1906,6 +1913,110 @@ mod tests {
             first[0],
             vec![prompt.chat_item().unwrap(), ChatItem::user("hello")]
         );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_carries_the_user_memory() {
+        let entries = InMemEntryMemory::default();
+        entries.add("likes tea").await.unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = CompositeAgent {
+            llm: Arc::new(ScriptedLlm {
+                reply: "hi".into(),
+                calls: calls.clone(),
+            }),
+            entries: Arc::new(entries),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+            system_prompt: SystemPrompt::new("Be helpful."),
+            ..stub_agent()
+        };
+        let (tx, _output) = run(agent);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let first = wait_for_calls(&calls, 1).await;
+        assert!(matches!(
+            first[0].first(),
+            Some(ChatItem::System { content }) if content.contains("[mem_01] likes tea")
+        ));
+    }
+
+    /// Turn 1 speaks a preamble, stores a fact through the memory tool and
+    /// closes; turn 2 must see the stored entry in its system prompt.
+    struct MemoryLlm {
+        calls: Arc<Mutex<Vec<Vec<ChatItem>>>>,
+    }
+
+    impl Llm for MemoryLlm {
+        fn chat(
+            &self,
+            history: Vec<ChatItem>,
+            _tools: Vec<crate::agent::ToolSpec>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            let round = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(history);
+                calls.len()
+            };
+            let events: Vec<Result<LlmEvent, crate::agent::LlmError>> = match round {
+                1 => vec![
+                    Ok(LlmEvent::Delta {
+                        text: "好的，我记一下".into(),
+                    }),
+                    Ok(LlmEvent::ToolCall(ToolCall {
+                        id: "call_1".into(),
+                        name: "memory_add".into(),
+                        arguments: "{\"content\":\"likes tea\"}".into(),
+                    })),
+                    Ok(LlmEvent::Done),
+                ],
+                _ => vec![
+                    Ok(LlmEvent::Delta {
+                        text: "记好了".into(),
+                    }),
+                    Ok(LlmEvent::Done),
+                ],
+            };
+            Box::pin(futures_util::stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_tool_stores_an_entry_the_next_turn_sees() {
+        let entries = Arc::new(InMemEntryMemory::default());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = CompositeAgent {
+            llm: Arc::new(MemoryLlm {
+                calls: calls.clone(),
+            }),
+            tools: Arc::new(ToolRegistry::new(vec![Arc::new(MemoryAdd::new(
+                entries.clone(),
+            ))])),
+            entries,
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+            system_prompt: SystemPrompt::new("Be helpful."),
+            ..stub_agent()
+        };
+        let (tx, _output) = run(agent);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+        wait_for_calls(&calls, 2).await;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let rounds = wait_for_calls(&calls, 3).await;
+        assert!(matches!(
+            rounds[2].first(),
+            Some(ChatItem::System { content }) if content.contains("[mem_01] likes tea")
+        ));
     }
 
     #[tokio::test]

@@ -5,8 +5,73 @@ mod common;
 use sqlx::PgPool;
 
 use common::{RecordingHook, owner, session};
+use dashachun::agent::{
+    AddError, DbEntryMemory, DbMemory, EntryMemory, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook,
+};
 use dashachun::agent::{ChatItem, ToolCall};
-use dashachun::agent::{DbMemory, Memory, MemoryHook};
+
+#[sqlx::test]
+#[ignore]
+async fn entry_memory_roundtrips_through_the_db(pool: PgPool) {
+    let memory = DbEntryMemory::new(pool.clone(), 7, 3);
+    let first = memory.add("likes Rust").await.unwrap();
+    let second = memory.add("building an ESP32 assistant").await.unwrap();
+    assert_eq!(first.mem_no, 1);
+    assert_eq!(first.content, "likes Rust");
+    assert_eq!(second.mem_no, 2);
+
+    assert_eq!(memory.list().await, vec![first.clone(), second.clone()]);
+
+    assert!(memory.update(1, "loves Rust").await.unwrap());
+    let listed = memory.list().await;
+    assert_eq!(listed[0].content, "loves Rust");
+
+    // Deleting frees nothing: the next id is monotonic, so a stale prompt
+    // reference can never point at a different entry.
+    assert!(memory.delete(2).await.unwrap());
+    let third = memory.add("third fact").await.unwrap();
+    assert_eq!(third.mem_no, 3);
+    assert_eq!(
+        memory.list().await,
+        vec![
+            MemoryEntry {
+                mem_no: 1,
+                content: "loves Rust".into()
+            },
+            third.clone(),
+        ]
+    );
+
+    // Unknown ids report false instead of failing.
+    assert!(!memory.update(9, "x").await.unwrap());
+    assert!(!memory.delete(9).await.unwrap());
+
+    // Another scope sees nothing of it.
+    let other = DbEntryMemory::new(pool, 8, 4);
+    assert!(other.list().await.is_empty());
+    let other_entry = other.add("bob's fact").await.unwrap();
+    assert_eq!(other_entry.mem_no, 1);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn entry_memory_enforces_the_cap(pool: PgPool) {
+    let memory = DbEntryMemory::new(pool, 7, 3);
+    for i in 0..MAX_ENTRIES {
+        memory.add(&format!("fact {i}")).await.unwrap();
+    }
+    match memory.add("one more").await {
+        Err(AddError::Full) => {}
+        other => panic!("expected Full, got {other:?}"),
+    }
+    assert_eq!(memory.list().await.len(), MAX_ENTRIES);
+
+    // Deleting frees a slot but not an id.
+    assert!(memory.delete(20).await.unwrap());
+    let entry = memory.add("after delete").await.unwrap();
+    assert_eq!(entry.mem_no, 21);
+    assert_eq!(memory.list().await.len(), MAX_ENTRIES);
+}
 
 #[sqlx::test]
 #[ignore]

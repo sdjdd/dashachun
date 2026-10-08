@@ -84,3 +84,20 @@ CREATE TABLE message_audios (
 );
 
 CREATE INDEX message_audios_message_id_idx ON message_audios (message_id);
+
+-- Entry-based user memory: short durable facts the LLM maintains through the
+-- memory tools, injected into the system prompt each turn. `mem_no` is
+-- monotonic per (user_id, agent_id) and never reused — deletions are soft
+-- (`deleted_at`) so a stale prompt reference can never point at a different
+-- entry. Integrity is enforced in the app layer; no foreign keys.
+CREATE TABLE memory_entries (
+    id         BIGSERIAL PRIMARY KEY,
+    user_id    BIGINT NOT NULL,
+    agent_id   BIGINT NOT NULL,
+    mem_no     INT NOT NULL,
+    content    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at TIMESTAMPTZ,
+    UNIQUE (user_id, agent_id, mem_no)
+);

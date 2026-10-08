@@ -3,8 +3,9 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use super::capture::AudioCapture;
-use super::memory::{DbMemory, MemoryHook, MemoryOwner};
+use super::memory::{DbEntryMemory, DbMemory, EntryMemory, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
+use super::tool::{MemoryAdd, MemoryDelete, MemoryUpdate};
 use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolRegistry, Tts};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
@@ -75,13 +76,23 @@ impl AgentFactory {
             vec![audio.clone() as Arc<dyn MemoryHook>],
         )
         .await?;
+        // The entry memory is scope-bound per connection; the memory tools
+        // close over the same instance, so the prompt reads what they write.
+        let entries: Arc<dyn EntryMemory> =
+            Arc::new(DbEntryMemory::new(self.pool.clone(), user_id, agent_id));
+        let tools = Arc::new(self.tools.extended(vec![
+            Arc::new(MemoryAdd::new(entries.clone())),
+            Arc::new(MemoryUpdate::new(entries.clone())),
+            Arc::new(MemoryDelete::new(entries.clone())),
+        ]));
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
             llm: self.llm.clone(),
             tts: self.tts.clone(),
             vad: self.vad.clone(),
             memory: Arc::new(memory) as Arc<dyn Memory>,
-            tools: self.tools.clone(),
+            entries,
+            tools,
             system_prompt: SystemPrompt::new(&agent.persona_prompt),
             capture: Some(audio as Arc<dyn Capture>),
         }))

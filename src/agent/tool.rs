@@ -8,9 +8,11 @@ use crate::agent::AgentOutput;
 use crate::agent::ToolSpec;
 
 mod datetime;
+mod memory;
 mod weather;
 
 pub use datetime::GetDateTime;
+pub use memory::{MemoryAdd, MemoryDelete, MemoryUpdate};
 pub use weather::GetWeather;
 
 pub(crate) fn params_schema<T: JsonSchema>() -> Value {
@@ -38,6 +40,15 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new(tools: Vec<Arc<dyn ToolHandler>>) -> Self {
+        Self { tools }
+    }
+
+    /// The shared registry plus per-connection handlers, built fresh by the
+    /// factory for every device: tools that need the connection's owner
+    /// (the memory tools) cannot live in the process-wide registry.
+    pub fn extended(&self, extra: Vec<Arc<dyn ToolHandler>>) -> Self {
+        let mut tools = self.tools.clone();
+        tools.extend(extra);
         Self { tools }
     }
 
