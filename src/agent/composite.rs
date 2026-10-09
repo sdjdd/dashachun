@@ -16,8 +16,8 @@ use crate::agent::{
 use crate::vad::{Vad, VadEvent, VadFactory};
 
 const ASR_CHANNEL_CAPACITY: usize = 64;
-const LLM_CHANNEL_CAPACITY: usize = 64;
-const TTS_CHANNEL_CAPACITY: usize = 64;
+const UTTERANCE_CHANNEL_CAPACITY: usize = 64;
+const TURN_EVENT_CAPACITY: usize = 64;
 const TTS_TEXT_CHANNEL_CAPACITY: usize = 64;
 const OUTPUT_CHANNEL_CAPACITY: usize = 64;
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -53,85 +53,102 @@ impl Agent for CompositeAgent {
     }
 }
 
-enum AsrMessage {
-    Partial { generation: u64, text: String },
-    Final { generation: u64, text: String },
-    Error { generation: u64, message: String },
-}
-
-enum LlmMessage {
-    Delta {
-        generation: u64,
+/// What the listening side hands to the reply side. Each utterance carries its
+/// own cancellation token: the listener keeps the authority to kill the
+/// in-flight reply the moment new speech or an interrupt arrives, the reply
+/// side only observes it.
+enum ListenEvent {
+    Utterance {
         text: String,
+        turn: CancellationToken,
     },
-    Emotion {
-        generation: u64,
-        emotion: emotion::Emotion,
-    },
-    Output {
-        generation: u64,
-        output: AgentOutput,
-    },
-    Done {
-        generation: u64,
-        reply: String,
-        history: Vec<ChatItem>,
-    },
-    Error {
-        generation: u64,
-        message: String,
-    },
+    Interrupt,
+    Reset,
 }
 
-enum TtsMessage {
-    SentenceStart { generation: u64, text: String },
-    Subtitle { generation: u64, subtitle: Subtitle },
-    Audio { generation: u64, samples: Vec<f32> },
-    Done { generation: u64 },
-    Error { generation: u64, message: String },
+enum AsrUpdate {
+    Partial { epoch: u64, text: String },
+    Final { epoch: u64, text: String },
+    Error { epoch: u64, message: String },
+}
+
+/// One turn's progress, tagged with the turn id so the reply stage can drop
+/// everything belonging to a superseded turn.
+enum ReplyEvent {
+    TtsStart,
+    SentenceStart { text: String },
+    Subtitle { subtitle: Subtitle },
+    Audio { samples: Vec<f32> },
+    TtsStop,
+    SpeakError { message: String },
+    Delta { text: String },
+    Emotion { emotion: emotion::Emotion },
+    Output { output: AgentOutput },
+    ReplyDone { reply: String, items: Vec<ChatItem> },
+    Failed { message: String },
+}
+
+enum TurnOutcome {
+    Done,
+    Failed,
+    Cancelled,
+}
+
+struct TurnDeps {
+    llm: Arc<dyn Llm>,
+    tools: Arc<ToolRegistry>,
+    tts: Arc<dyn Tts>,
+    session_id: String,
 }
 
 async fn drive(
     agent: CompositeAgent,
     session: AgentSession,
+    input: AgentInputStream,
+    out_tx: mpsc::Sender<AgentOutput>,
+) {
+    let (utterances, utterance_rx) = mpsc::channel::<ListenEvent>(UTTERANCE_CHANNEL_CAPACITY);
+    let (events_tx, events_rx) = mpsc::channel::<(u64, ReplyEvent)>(TURN_EVENT_CAPACITY);
+    tokio::spawn(listen_stage(
+        agent.clone(),
+        session.clone(),
+        input,
+        utterances,
+        out_tx.clone(),
+    ));
+    reply_stage(agent, session, utterance_rx, events_tx, events_rx, out_tx).await;
+}
+
+/// The listening leg. Owns the device input, the VAD and the per-utterance ASR
+/// tasks for the whole session; forwards `Stt`/`Mcp`/`Error` directly and
+/// hands every final utterance to the reply stage together with a fresh turn
+/// token, cancelling the previous one first.
+async fn listen_stage(
+    agent: CompositeAgent,
+    session: AgentSession,
     mut input: AgentInputStream,
+    utterances: mpsc::Sender<ListenEvent>,
     out_tx: mpsc::Sender<AgentOutput>,
 ) {
     let mut vad: Option<Box<dyn Vad>> = None;
-    let (asr_tx, mut asr_rx) = mpsc::channel::<AsrMessage>(ASR_CHANNEL_CAPACITY);
-    let (llm_tx, mut llm_rx) = mpsc::channel::<LlmMessage>(LLM_CHANNEL_CAPACITY);
-    let (tts_tx, mut tts_rx) = mpsc::channel::<TtsMessage>(TTS_CHANNEL_CAPACITY);
-    let mut utterance: Option<Utterance> = None;
-    let mut completion: Option<Completion> = None;
-    let mut synthesis: Option<Synthesis> = None;
-    let mut generation: u64 = 0;
-    let mut emotion_pending = false;
-    let mut stripper = emotion::Stripper::new();
-    let mut speaking = false;
-    let mut reply_capture: Option<ReplyCapture> = None;
-    let mut reply_turn_logged = false;
-    let mut streamed_reply = String::new();
-
+    let (asr_tx, mut asr_rx) = mpsc::channel::<AsrUpdate>(ASR_CHANNEL_CAPACITY);
+    let mut slot: Option<AsrSlot> = None;
+    let mut epoch: u64 = 0;
+    let mut live_turn: Option<CancellationToken> = None;
     loop {
         tokio::select! {
             item = input.next() => {
                 let Some(item) = item else { break };
                 match item {
                     AgentInput::ListenStart { .. } => {
-                        settle_reply(
-                            &agent.memory,
-                            &session,
-                            &mut reply_capture,
-                            &mut reply_turn_logged,
-                            &mut streamed_reply,
-                        );
-                        if cancel_in_flight(
-                            &mut utterance,
-                            &mut completion,
-                            &mut synthesis,
-                            &mut speaking,
-                        ) && out_tx.send(AgentOutput::TtsAbort).await.is_err()
-                        {
+                        epoch += 1;
+                        if let Some(current) = slot.take() {
+                            current.cancel();
+                        }
+                        if let Some(turn) = live_turn.take() {
+                            turn.cancel();
+                        }
+                        if utterances.send(ListenEvent::Reset).await.is_err() {
                             break;
                         }
                         vad = match agent.vad.build(session.sample_rate) {
@@ -141,11 +158,6 @@ async fn drive(
                                 None
                             }
                         };
-                        generation += 1;
-                        utterance = None;
-                        completion = None;
-                        synthesis = None;
-                        emotion_pending = false;
                     }
                     AgentInput::ListenStop => {
                         info!(session_id = %session.id, "listen stop");
@@ -156,14 +168,14 @@ async fn drive(
                                 &session,
                                 &agent.asr,
                                 &asr_tx,
-                                &mut generation,
-                                &mut utterance,
+                                &mut epoch,
+                                &mut slot,
                                 &agent.memory,
                                 agent.capture.as_deref(),
                             )
                             .await;
                         }
-                        utterance = None;
+                        slot = None;
                     }
                     AgentInput::Audio(samples) => {
                         let Some(vad) = vad.as_mut() else { continue };
@@ -173,8 +185,8 @@ async fn drive(
                             &session,
                             &agent.asr,
                             &asr_tx,
-                            &mut generation,
-                            &mut utterance,
+                            &mut epoch,
+                            &mut slot,
                             &agent.memory,
                             agent.capture.as_deref(),
                         )
@@ -182,25 +194,14 @@ async fn drive(
                     }
                     AgentInput::Interrupt { reason } => {
                         info!(session_id = %session.id, reason = ?reason, "interrupt");
-                        settle_reply(
-                            &agent.memory,
-                            &session,
-                            &mut reply_capture,
-                            &mut reply_turn_logged,
-                            &mut streamed_reply,
-                        );
-                        cancel_in_flight(
-                            &mut utterance,
-                            &mut completion,
-                            &mut synthesis,
-                            &mut speaking,
-                        );
-                        generation += 1;
-                        utterance = None;
-                        completion = None;
-                        synthesis = None;
-                        emotion_pending = false;
-                        if out_tx.send(AgentOutput::TtsAbort).await.is_err() {
+                        epoch += 1;
+                        if let Some(current) = slot.take() {
+                            current.cancel();
+                        }
+                        if let Some(turn) = live_turn.take() {
+                            turn.cancel();
+                        }
+                        if utterances.send(ListenEvent::Interrupt).await.is_err() {
                             break;
                         }
                     }
@@ -213,15 +214,15 @@ async fn drive(
             }
             Some(message) = asr_rx.recv() => {
                 let current = match &message {
-                    AsrMessage::Partial { generation, .. }
-                    | AsrMessage::Final { generation, .. }
-                    | AsrMessage::Error { generation, .. } => *generation,
+                    AsrUpdate::Partial { epoch, .. }
+                    | AsrUpdate::Final { epoch, .. }
+                    | AsrUpdate::Error { epoch, .. } => *epoch,
                 };
-                if current != generation {
+                if current != epoch {
                     continue;
                 }
                 match message {
-                    AsrMessage::Partial { text, .. } => {
+                    AsrUpdate::Partial { text, .. } => {
                         if out_tx
                             .send(AgentOutput::Stt {
                                 text,
@@ -233,7 +234,7 @@ async fn drive(
                             break;
                         }
                     }
-                    AsrMessage::Final { text, .. } => {
+                    AsrUpdate::Final { text, .. } => {
                         info!(session_id = %session.id, %text, "asr result");
                         if out_tx
                             .send(AgentOutput::Stt {
@@ -248,44 +249,19 @@ async fn drive(
                         if text.is_empty() {
                             continue;
                         }
-                        if let Some(current) = completion.take() {
-                            current.cancel();
+                        let turn = CancellationToken::new();
+                        if let Some(previous) = live_turn.replace(turn.clone()) {
+                            previous.cancel();
                         }
-                        if let Some(current) = synthesis.take() {
-                            current.cancel();
-                        }
-                        settle_reply(
-                            &agent.memory,
-                            &session,
-                            &mut reply_capture,
-                            &mut reply_turn_logged,
-                            &mut streamed_reply,
-                        );
-                        if speaking
-                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        if utterances
+                            .send(ListenEvent::Utterance { text, turn })
+                            .await
+                            .is_err()
                         {
                             break;
                         }
-                        speaking = false;
-                        agent
-                            .memory
-                            .append(vec![ChatItem::user(text)])
-                            .await;
-                        emotion_pending = true;
-                        stripper = emotion::Stripper::new();
-                        let entries = agent.entries.list().await;
-                        let prompt = agent.system_prompt.for_turn(&entries);
-                        completion = Some(spawn_llm(
-                            &agent.llm,
-                            &agent.tools,
-                            &llm_tx,
-                            session.id.clone(),
-                            generation,
-                            agent.memory.history().await,
-                            prompt,
-                        ));
                     }
-                    AsrMessage::Error { message, .. } => {
+                    AsrUpdate::Error { message, .. } => {
                         warn!(session_id = %session.id, %message, "asr failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err() {
                             break;
@@ -293,337 +269,13 @@ async fn drive(
                     }
                 }
             }
-            Some(message) = llm_rx.recv() => {
-                let current = match &message {
-                    LlmMessage::Delta { generation, .. }
-                    | LlmMessage::Emotion { generation, .. }
-                    | LlmMessage::Output { generation, .. }
-                    | LlmMessage::Done { generation, .. }
-                    | LlmMessage::Error { generation, .. } => *generation,
-                };
-                if current != generation {
-                    continue;
-                }
-                match message {
-                    LlmMessage::Delta { text, .. } => {
-                        trace!(session_id = %session.id, %text, "llm delta");
-                        if text.is_empty() {
-                            continue;
-                        }
-                        streamed_reply.push_str(&text);
-                        if emotion_pending
-                            && let Some(emotion) = emotion::detect(&text)
-                        {
-                            emotion_pending = false;
-                            if out_tx
-                                .send(AgentOutput::Emotion {
-                                    emotion: emotion.to_string(),
-                                })
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        let text = stripper.push(&text);
-                        if !feed_tts(
-                            text,
-                            &mut synthesis,
-                            &mut speaking,
-                            &agent.tts,
-                            &tts_tx,
-                            &out_tx,
-                            &session.id,
-                            generation,
-                        )
-                        .await
-                        {
-                            break;
-                        }
-                    }
-                    LlmMessage::Emotion { emotion, .. } => {
-                        if out_tx
-                            .send(AgentOutput::Emotion {
-                                emotion: emotion.to_string(),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    LlmMessage::Done { reply, history: items, .. } => {
-                        completion = None;
-                        info!(session_id = %session.id, %reply, "llm result");
-                        agent.memory.log_items(&session, items.clone());
-                        reply_turn_logged = true;
-                        agent.memory.append(items).await;
-                        let tail = stripper.finish();
-                        if !feed_tts(
-                            tail,
-                            &mut synthesis,
-                            &mut speaking,
-                            &agent.tts,
-                            &tts_tx,
-                            &out_tx,
-                            &session.id,
-                            generation,
-                        )
-                        .await
-                        {
-                            break;
-                        }
-                        if let Some(current) = synthesis.take() {
-                            current.detach();
-                        }
-                    }
-                    LlmMessage::Output { output, .. } => {
-                        if out_tx.send(output).await.is_err() {
-                            break;
-                        }
-                    }
-                    LlmMessage::Error { message, .. } => {
-                        completion = None;
-                        settle_reply(
-                            &agent.memory,
-                            &session,
-                            &mut reply_capture,
-                            &mut reply_turn_logged,
-                            &mut streamed_reply,
-                        );
-                        let tts_active = synthesis.take().is_some();
-                        warn!(session_id = %session.id, %message, "llm failed");
-                        if out_tx.send(AgentOutput::Error { message }).await.is_err() {
-                            break;
-                        }
-                        if tts_active && out_tx.send(AgentOutput::TtsAbort).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            Some(message) = tts_rx.recv() => {
-                let current = match &message {
-                    TtsMessage::SentenceStart { generation, .. }
-                    | TtsMessage::Subtitle { generation, .. }
-                    | TtsMessage::Audio { generation, .. }
-                    | TtsMessage::Done { generation, .. }
-                    | TtsMessage::Error { generation, .. } => *generation,
-                };
-                if current != generation {
-                    continue;
-                }
-                match message {
-                    TtsMessage::SentenceStart { text, .. } => {
-                        if out_tx.send(AgentOutput::TtsSentence { text }).await.is_err() {
-                            break;
-                        }
-                    }
-                    TtsMessage::Subtitle { subtitle, .. } => {
-                        if out_tx
-                            .send(AgentOutput::TtsSubtitle { subtitle })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    TtsMessage::Audio { samples, .. } => {
-                        if let Some(capture) = agent.capture.as_deref() {
-                            let recording =
-                                reply_capture.get_or_insert_with(|| capture.start_reply(&session));
-                            recording.push(&samples);
-                        }
-                        if out_tx.send(AgentOutput::Audio(samples)).await.is_err() {
-                            break;
-                        }
-                    }
-                    TtsMessage::Done { .. } => {
-                        synthesis = None;
-                        speaking = false;
-                        if let Some(recording) = reply_capture.take() {
-                            recording.finish();
-                        }
-                        reply_turn_logged = false;
-                        streamed_reply.clear();
-                        if out_tx.send(AgentOutput::TtsStop).await.is_err() {
-                            break;
-                        }
-                    }
-                    TtsMessage::Error { message, .. } => {
-                        synthesis = None;
-                        speaking = false;
-                        settle_reply(
-                            &agent.memory,
-                            &session,
-                            &mut reply_capture,
-                            &mut reply_turn_logged,
-                            &mut streamed_reply,
-                        );
-                        warn!(session_id = %session.id, %message, "tts failed");
-                        if out_tx.send(AgentOutput::Error { message }).await.is_err()
-                            || out_tx.send(AgentOutput::TtsAbort).await.is_err()
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
         }
     }
-
-    cancel_in_flight(
-        &mut utterance,
-        &mut completion,
-        &mut synthesis,
-        &mut speaking,
-    );
-}
-
-/// Cancels every in-flight stage without waiting and reports whether a spoken
-/// reply was still playing, so the caller can tell the gateway to drop its
-/// buffered playback. Each provider handshake runs detached: generation gating
-/// already filters stale events, so a stalled provider must never be allowed
-/// to freeze the driver loop.
-fn cancel_in_flight(
-    utterance: &mut Option<Utterance>,
-    completion: &mut Option<Completion>,
-    synthesis: &mut Option<Synthesis>,
-    speaking: &mut bool,
-) -> bool {
-    if let Some(current) = utterance.take() {
+    if let Some(current) = slot.take() {
         current.cancel();
     }
-    if let Some(current) = completion.take() {
-        current.cancel();
-    }
-    if let Some(current) = synthesis.take() {
-        current.cancel();
-    }
-    std::mem::take(speaking)
-}
-
-/// Ends the reply audio capture at a cut (barge-in, provider error): when
-/// the turn completed the audio attaches to the stored reply row, otherwise
-/// the partially streamed text is stored as a truncated assistant row and
-/// the partial audio attaches to it — both through the memory's hooks. A
-/// reply that never produced text (and no turn row) just discards the
-/// capture. A session teardown drops the handles, which discards it too.
-fn settle_reply(
-    memory: &Arc<dyn Memory>,
-    session: &AgentSession,
-    capture: &mut Option<ReplyCapture>,
-    turn_logged: &mut bool,
-    streamed: &mut String,
-) {
-    if let Some(recording) = capture.take() {
-        if *turn_logged {
-            recording.finish();
-        } else {
-            let text = std::mem::take(streamed);
-            if text.is_empty() {
-                drop(recording);
-            } else {
-                memory.store_partial_reply(session, &text);
-                recording.finish();
-            }
-        }
-    }
-    *turn_logged = false;
-    streamed.clear();
-}
-
-struct Utterance {
-    tx: mpsc::Sender<Vec<f32>>,
-    handle: Option<JoinHandle<()>>,
-    cancel: CancellationToken,
-    capture: Option<UtteranceCapture>,
-}
-
-impl Utterance {
-    fn detach(mut self) {
-        self.handle.take();
-    }
-
-    fn cancel(mut self) {
-        let handle = self.handle.take();
-        self.cancel.cancel();
-        drop(self);
-        tokio::spawn(async move {
-            if let Some(mut handle) = handle {
-                stop_task(&mut handle).await;
-            }
-        });
-    }
-}
-
-impl Drop for Utterance {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-}
-
-struct Completion {
-    handle: JoinHandle<()>,
-    cancel: CancellationToken,
-}
-
-impl Completion {
-    fn cancel(self) {
-        self.cancel.cancel();
-        tokio::spawn(async move {
-            let mut this = self;
-            stop_task(&mut this.handle).await;
-        });
-    }
-}
-
-impl Drop for Completion {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
-struct Synthesis {
-    tx: mpsc::Sender<String>,
-    handle: Option<JoinHandle<()>>,
-    cancel: CancellationToken,
-}
-
-impl Synthesis {
-    fn detach(mut self) {
-        self.handle.take();
-    }
-
-    fn cancel(mut self) {
-        let handle = self.handle.take();
-        self.cancel.cancel();
-        drop(self);
-        tokio::spawn(async move {
-            if let Some(mut handle) = handle {
-                stop_task(&mut handle).await;
-            }
-        });
-    }
-}
-
-impl Drop for Synthesis {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-}
-
-async fn stop_task(handle: &mut JoinHandle<()>) {
-    if tokio::time::timeout(CANCEL_TIMEOUT, &mut *handle)
-        .await
-        .is_err()
-    {
-        warn!("provider did not cancel in time, aborting");
-        handle.abort();
+    if let Some(turn) = live_turn.take() {
+        turn.cancel();
     }
 }
 
@@ -632,9 +284,9 @@ async fn handle_vad_events(
     events: Vec<VadEvent>,
     session: &AgentSession,
     asr: &Arc<dyn Asr>,
-    asr_tx: &mpsc::Sender<AsrMessage>,
-    generation: &mut u64,
-    utterance: &mut Option<Utterance>,
+    asr_tx: &mpsc::Sender<AsrUpdate>,
+    epoch: &mut u64,
+    slot: &mut Option<AsrSlot>,
     memory: &Arc<dyn Memory>,
     capture: Option<&dyn Capture>,
 ) {
@@ -642,19 +294,19 @@ async fn handle_vad_events(
         match event {
             VadEvent::SpeechStart { at_ms } => {
                 info!(session_id = %session.id, at_ms, "speech start");
-                *generation += 1;
+                *epoch += 1;
                 let capture = capture.map(|capture| capture.start_utterance(session));
-                *utterance = Some(spawn_asr(
+                *slot = Some(spawn_asr(
                     asr,
                     asr_tx,
                     session.clone(),
-                    *generation,
+                    *epoch,
                     memory.clone(),
                     capture,
                 ));
             }
             VadEvent::Speech { samples } => {
-                if let Some(current) = utterance.as_ref() {
+                if let Some(current) = slot.as_ref() {
                     if let Some(capture) = &current.capture {
                         capture.push(&samples);
                     }
@@ -664,7 +316,7 @@ async fn handle_vad_events(
                 }
             }
             VadEvent::SpeechEnd { .. } => {
-                if let Some(current) = utterance.take() {
+                if let Some(current) = slot.take() {
                     current.detach();
                 }
             }
@@ -672,14 +324,48 @@ async fn handle_vad_events(
     }
 }
 
+/// One live per-utterance ASR task: its audio feed, the cancellation token and
+/// the utterance capture.
+struct AsrSlot {
+    tx: mpsc::Sender<Vec<f32>>,
+    handle: Option<JoinHandle<()>>,
+    cancel: CancellationToken,
+    capture: Option<UtteranceCapture>,
+}
+
+impl AsrSlot {
+    fn detach(mut self) {
+        self.handle.take();
+    }
+
+    fn cancel(mut self) {
+        let handle = self.handle.take();
+        self.cancel.cancel();
+        drop(self);
+        tokio::spawn(async move {
+            if let Some(mut handle) = handle {
+                stop_task(&mut handle).await;
+            }
+        });
+    }
+}
+
+impl Drop for AsrSlot {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 fn spawn_asr(
     asr: &Arc<dyn Asr>,
-    asr_tx: &mpsc::Sender<AsrMessage>,
+    asr_tx: &mpsc::Sender<AsrUpdate>,
     session: AgentSession,
-    generation: u64,
+    epoch: u64,
     memory: Arc<dyn Memory>,
     capture: Option<UtteranceCapture>,
-) -> Utterance {
+) -> AsrSlot {
     let (tx, rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
     let audio: AudioStream = Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|chunk| (chunk, rx))
@@ -695,14 +381,14 @@ fn spawn_asr(
             audio,
             asr_tx,
             session,
-            generation,
+            epoch,
             task_cancel,
             memory,
             capture,
         )
         .await;
     });
-    Utterance {
+    AsrSlot {
         tx,
         handle: Some(handle),
         cancel,
@@ -714,9 +400,9 @@ fn spawn_asr(
 async fn run_asr(
     asr: Arc<dyn Asr>,
     audio: AudioStream,
-    asr_tx: mpsc::Sender<AsrMessage>,
+    asr_tx: mpsc::Sender<AsrUpdate>,
     session: AgentSession,
-    generation: u64,
+    epoch: u64,
     cancel: CancellationToken,
     memory: Arc<dyn Memory>,
     capture: Option<UtteranceCapture>,
@@ -724,7 +410,7 @@ async fn run_asr(
     let mut events = asr.transcribe(audio, cancel.clone());
     while let Some(result) = events.next().await {
         let message = match result {
-            Ok(AsrEvent::Partial { text }) => AsrMessage::Partial { generation, text },
+            Ok(AsrEvent::Partial { text }) => AsrUpdate::Partial { epoch, text },
             Ok(AsrEvent::Final { text }) => {
                 // The utterance is real speech even when the turn was
                 // superseded, so the row is stored regardless of the cancel
@@ -742,11 +428,11 @@ async fn run_asr(
                         }
                     }
                 }
-                let _ = asr_tx.send(AsrMessage::Final { generation, text }).await;
+                let _ = asr_tx.send(AsrUpdate::Final { epoch, text }).await;
                 return;
             }
-            Err(err) => AsrMessage::Error {
-                generation,
+            Err(err) => AsrUpdate::Error {
+                epoch,
                 message: err.to_string(),
             },
         };
@@ -757,92 +443,403 @@ async fn run_asr(
     }
 }
 
-fn spawn_llm(
-    llm: &Arc<dyn Llm>,
-    tools: &Arc<ToolRegistry>,
-    llm_tx: &mpsc::Sender<LlmMessage>,
-    session_id: String,
-    generation: u64,
-    history: Vec<ChatItem>,
-    system_prompt: SystemPrompt,
-) -> Completion {
-    let llm = llm.clone();
-    let tools = tools.clone();
-    let llm_tx = llm_tx.clone();
-    let cancel = CancellationToken::new();
-    let task_cancel = cancel.clone();
-    let handle = tokio::spawn(async move {
-        run_llm(
-            llm,
-            tools,
-            history,
-            llm_tx,
-            session_id,
-            generation,
-            system_prompt,
-            task_cancel,
-        )
-        .await;
-    });
-    Completion { handle, cancel }
+/// A spawned reply turn: the join handle plus the token that kills it.
+struct Turn {
+    id: u64,
+    token: CancellationToken,
+    handle: JoinHandle<()>,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_llm(
-    llm: Arc<dyn Llm>,
-    tools: Arc<ToolRegistry>,
+impl Turn {
+    fn cancel(self) {
+        self.token.cancel();
+        tokio::spawn(async move {
+            let mut this = self;
+            stop_task(&mut this.handle).await;
+        });
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn spawn_turn(
+    agent: &CompositeAgent,
+    session: &AgentSession,
     history: Vec<ChatItem>,
-    llm_tx: mpsc::Sender<LlmMessage>,
-    session_id: String,
-    generation: u64,
-    system_prompt: SystemPrompt,
-    cancel: CancellationToken,
+    prompt: SystemPrompt,
+    turn_id: u64,
+    token: CancellationToken,
+    events: mpsc::Sender<(u64, ReplyEvent)>,
+) -> Turn {
+    let deps = TurnDeps {
+        llm: agent.llm.clone(),
+        tools: agent.tools.clone(),
+        tts: agent.tts.clone(),
+        session_id: session.id.clone(),
+    };
+    let handle = tokio::spawn(run_turn(
+        deps,
+        history,
+        prompt,
+        turn_id,
+        events,
+        token.clone(),
+    ));
+    Turn {
+        id: turn_id,
+        token,
+        handle,
+    }
+}
+
+/// The reply leg. One `Turn` per utterance; forwards the live turn's events,
+/// drops everything belonging to a superseded one, and owns the reply-side
+/// bookkeeping: speaking state, reply capture and the partial-reply settle.
+async fn reply_stage(
+    agent: CompositeAgent,
+    session: AgentSession,
+    mut utterances: mpsc::Receiver<ListenEvent>,
+    events_tx: mpsc::Sender<(u64, ReplyEvent)>,
+    mut events_rx: mpsc::Receiver<(u64, ReplyEvent)>,
+    out_tx: mpsc::Sender<AgentOutput>,
 ) {
+    let mut turn: Option<Turn> = None;
+    let mut turn_id: u64 = 0;
+    let mut speaking = false;
+    let mut reply_capture: Option<ReplyCapture> = None;
+    let mut reply_turn_logged = false;
+    let mut streamed_reply = String::new();
+    loop {
+        tokio::select! {
+            item = utterances.recv() => {
+                let Some(item) = item else { break };
+                match item {
+                    ListenEvent::Interrupt => {
+                        settle_reply(
+                            &agent.memory,
+                            &session,
+                            &mut reply_capture,
+                            &mut reply_turn_logged,
+                            &mut streamed_reply,
+                        );
+                        if let Some(current) = turn.take() {
+                            current.cancel();
+                        }
+                        speaking = false;
+                        if out_tx.send(AgentOutput::TtsAbort).await.is_err() {
+                            break;
+                        }
+                    }
+                    ListenEvent::Reset => {
+                        settle_reply(
+                            &agent.memory,
+                            &session,
+                            &mut reply_capture,
+                            &mut reply_turn_logged,
+                            &mut streamed_reply,
+                        );
+                        if let Some(current) = turn.take() {
+                            current.cancel();
+                        }
+                        if speaking
+                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        {
+                            break;
+                        }
+                        speaking = false;
+                    }
+                    ListenEvent::Utterance { text, turn: token } => {
+                        settle_reply(
+                            &agent.memory,
+                            &session,
+                            &mut reply_capture,
+                            &mut reply_turn_logged,
+                            &mut streamed_reply,
+                        );
+                        if let Some(current) = turn.take() {
+                            current.cancel();
+                        }
+                        if speaking
+                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        {
+                            break;
+                        }
+                        speaking = false;
+                        agent
+                            .memory
+                            .append(vec![ChatItem::user(text)])
+                            .await;
+                        let entries = agent.entries.list().await;
+                        let prompt = agent.system_prompt.for_turn(&entries);
+                        let history = agent.memory.history().await;
+                        turn_id += 1;
+                        turn = Some(spawn_turn(
+                            &agent,
+                            &session,
+                            history,
+                            prompt,
+                            turn_id,
+                            token,
+                            events_tx.clone(),
+                        ));
+                    }
+                }
+            }
+            Some((id, event)) = events_rx.recv() => {
+                let Some(current) = turn.as_ref() else { continue };
+                if current.id != id || current.token.is_cancelled() {
+                    continue;
+                }
+                match event {
+                    ReplyEvent::TtsStart => {
+                        speaking = true;
+                        if out_tx.send(AgentOutput::TtsStart).await.is_err() {
+                            break;
+                        }
+                    }
+                    ReplyEvent::SentenceStart { text } => {
+                        if out_tx
+                            .send(AgentOutput::TtsSentence { text })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    ReplyEvent::Subtitle { subtitle } => {
+                        if out_tx
+                            .send(AgentOutput::TtsSubtitle { subtitle })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    ReplyEvent::Audio { samples } => {
+                        if let Some(capture) = agent.capture.as_deref() {
+                            let recording = reply_capture
+                                .get_or_insert_with(|| capture.start_reply(&session));
+                            recording.push(&samples);
+                        }
+                        if out_tx.send(AgentOutput::Audio(samples)).await.is_err() {
+                            break;
+                        }
+                    }
+                    ReplyEvent::TtsStop => {
+                        speaking = false;
+                        if let Some(recording) = reply_capture.take() {
+                            recording.finish();
+                        }
+                        reply_turn_logged = false;
+                        streamed_reply.clear();
+                        if out_tx.send(AgentOutput::TtsStop).await.is_err() {
+                            break;
+                        }
+                    }
+                    ReplyEvent::SpeakError { message } => {
+                        speaking = false;
+                        settle_reply(
+                            &agent.memory,
+                            &session,
+                            &mut reply_capture,
+                            &mut reply_turn_logged,
+                            &mut streamed_reply,
+                        );
+                        warn!(session_id = %session.id, %message, "tts failed");
+                        if out_tx.send(AgentOutput::Error { message }).await.is_err()
+                            || out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    ReplyEvent::Delta { text } => {
+                        streamed_reply.push_str(&text);
+                    }
+                    ReplyEvent::Emotion { emotion } => {
+                        if out_tx
+                            .send(AgentOutput::Emotion {
+                                emotion: emotion.to_string(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    ReplyEvent::Output { output } => {
+                        if out_tx.send(output).await.is_err() {
+                            break;
+                        }
+                    }
+                    ReplyEvent::ReplyDone { reply, items } => {
+                        info!(session_id = %session.id, %reply, "llm result");
+                        agent.memory.log_items(&session, items.clone());
+                        reply_turn_logged = true;
+                        agent.memory.append(items).await;
+                    }
+                    ReplyEvent::Failed { message } => {
+                        settle_reply(
+                            &agent.memory,
+                            &session,
+                            &mut reply_capture,
+                            &mut reply_turn_logged,
+                            &mut streamed_reply,
+                        );
+                        warn!(session_id = %session.id, %message, "llm failed");
+                        if out_tx.send(AgentOutput::Error { message }).await.is_err() {
+                            break;
+                        }
+                        if speaking
+                            && out_tx.send(AgentOutput::TtsAbort).await.is_err()
+                        {
+                            break;
+                        }
+                        speaking = false;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(current) = turn.take() {
+        current.cancel();
+    }
+}
+
+async fn run_turn(
+    deps: TurnDeps,
+    history: Vec<ChatItem>,
+    prompt: SystemPrompt,
+    turn_id: u64,
+    events: mpsc::Sender<(u64, ReplyEvent)>,
+    token: CancellationToken,
+) {
+    let (speak_tx, speak_rx) = mpsc::channel::<String>(TTS_TEXT_CHANNEL_CAPACITY);
+    let speak = tokio::spawn(speak_stage(
+        deps.tts.clone(),
+        speak_rx,
+        events.clone(),
+        turn_id,
+        token.clone(),
+        deps.session_id.clone(),
+    ));
+    let outcome = think_stage(&deps, history, prompt, &speak_tx, &events, turn_id, &token).await;
+    drop(speak_tx);
+    match outcome {
+        TurnOutcome::Done => {
+            let _ = speak.await;
+        }
+        TurnOutcome::Failed | TurnOutcome::Cancelled => {
+            speak.abort();
+        }
+    }
+}
+
+/// The thinking leg: the sequential tool loop. Streams each round's deltas as
+/// raw `Delta` events (the partial-reply text), detects the turn's leading
+/// emoji, strips emoji out of the text handed to the speak leg, and runs tools
+/// between rounds with the Thinking/Neutral emotion markers around them.
+async fn think_stage(
+    deps: &TurnDeps,
+    history: Vec<ChatItem>,
+    prompt: SystemPrompt,
+    speak_tx: &mpsc::Sender<String>,
+    events: &mpsc::Sender<(u64, ReplyEvent)>,
+    turn_id: u64,
+    cancel: &CancellationToken,
+) -> TurnOutcome {
     let mut working = history;
     let mut new_items: Vec<ChatItem> = Vec::new();
     let mut reply = String::new();
+    let mut stripper = emotion::Stripper::new();
+    let mut emotion_pending = true;
+    let mut speak_started = false;
 
     loop {
         if cancel.is_cancelled() {
-            return;
+            return TurnOutcome::Cancelled;
         }
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut text = String::new();
         let mut messages = Vec::with_capacity(working.len() + 1);
-        if let Some(system) = system_prompt.chat_item() {
+        if let Some(system) = prompt.chat_item() {
             messages.push(system);
         }
         messages.extend(working.iter().cloned());
-        let mut events = llm.chat(messages, tools.specs(), cancel.clone());
-        while let Some(result) = events.next().await {
+        let mut chat = deps.llm.chat(messages, deps.tools.specs(), cancel.clone());
+        loop {
+            let result = tokio::select! {
+                item = chat.next() => match item {
+                    Some(result) => result,
+                    None => break,
+                },
+                _ = cancel.cancelled() => return TurnOutcome::Cancelled,
+            };
             match result {
                 Ok(LlmEvent::Delta { text: delta }) => {
                     if delta.is_empty() {
                         continue;
                     }
                     text.push_str(&delta);
-                    if llm_tx
-                        .send(LlmMessage::Delta {
-                            generation,
-                            text: delta,
-                        })
+                    trace!(session_id = %deps.session_id, text = %delta, "llm delta");
+                    if emit(
+                        events,
+                        turn_id,
+                        ReplyEvent::Delta {
+                            text: delta.clone(),
+                        },
+                        cancel,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return TurnOutcome::Cancelled;
+                    }
+                    if emotion_pending && let Some(found) = emotion::detect(&delta) {
+                        emotion_pending = false;
+                        if emit(
+                            events,
+                            turn_id,
+                            ReplyEvent::Emotion { emotion: found },
+                            cancel,
+                        )
                         .await
                         .is_err()
+                        {
+                            return TurnOutcome::Cancelled;
+                        }
+                    }
+                    let spoken = stripper.push(&delta);
+                    if speak_chunk(
+                        spoken,
+                        &mut speak_started,
+                        speak_tx,
+                        events,
+                        turn_id,
+                        cancel,
+                    )
+                    .await
+                    .is_err()
                     {
-                        debug!(session_id, "llm output closed");
-                        return;
+                        return TurnOutcome::Cancelled;
                     }
                 }
                 Ok(LlmEvent::ToolCall(call)) => calls.push(call),
                 Ok(LlmEvent::Done) => break,
                 Err(err) => {
-                    let _ = llm_tx
-                        .send(LlmMessage::Error {
-                            generation,
+                    let _ = emit(
+                        events,
+                        turn_id,
+                        ReplyEvent::Failed {
                             message: err.to_string(),
-                        })
-                        .await;
-                    return;
+                        },
+                        cancel,
+                    )
+                    .await;
+                    return TurnOutcome::Failed;
                 }
             }
         }
@@ -852,26 +849,42 @@ async fn run_llm(
                 reply.push_str(&text);
                 new_items.push(ChatItem::assistant(text));
             }
-            let _ = llm_tx
-                .send(LlmMessage::Done {
-                    generation,
+            let tail = stripper.finish();
+            if speak_chunk(tail, &mut speak_started, speak_tx, events, turn_id, cancel)
+                .await
+                .is_err()
+            {
+                return TurnOutcome::Cancelled;
+            }
+            if emit(
+                events,
+                turn_id,
+                ReplyEvent::ReplyDone {
                     reply,
-                    history: new_items,
-                })
-                .await;
-            return;
-        }
-
-        if llm_tx
-            .send(LlmMessage::Emotion {
-                generation,
-                emotion: emotion::Emotion::Thinking,
-            })
+                    items: new_items,
+                },
+                cancel,
+            )
             .await
             .is_err()
+            {
+                return TurnOutcome::Cancelled;
+            }
+            return TurnOutcome::Done;
+        }
+
+        if emit(
+            events,
+            turn_id,
+            ReplyEvent::Emotion {
+                emotion: emotion::Emotion::Thinking,
+            },
+            cancel,
+        )
+        .await
+        .is_err()
         {
-            debug!(session_id, "llm output closed");
-            return;
+            return TurnOutcome::Cancelled;
         }
         let spoke = !text.is_empty();
         let round = if text.is_empty() {
@@ -884,15 +897,13 @@ async fn run_llm(
         working.push(round);
         let mut needs_reply = false;
         for call in calls {
-            let outcome = execute_tool(&tools, &call, &session_id).await;
+            let outcome = execute_tool(&deps.tools, &call, &deps.session_id).await;
             if let Some(output) = outcome.output
-                && llm_tx
-                    .send(LlmMessage::Output { generation, output })
+                && emit(events, turn_id, ReplyEvent::Output { output }, cancel)
                     .await
                     .is_err()
             {
-                debug!(session_id, "llm output closed");
-                return;
+                return TurnOutcome::Cancelled;
             }
             if outcome.needs_reply {
                 needs_reply = true;
@@ -900,28 +911,127 @@ async fn run_llm(
             new_items.push(ChatItem::tool(call.id.clone(), outcome.content.clone()));
             working.push(ChatItem::tool(call.id, outcome.content));
         }
-        if llm_tx
-            .send(LlmMessage::Emotion {
-                generation,
+        if emit(
+            events,
+            turn_id,
+            ReplyEvent::Emotion {
                 emotion: emotion::Emotion::Neutral,
-            })
-            .await
-            .is_err()
+            },
+            cancel,
+        )
+        .await
+        .is_err()
         {
-            debug!(session_id, "llm output closed");
-            return;
+            return TurnOutcome::Cancelled;
         }
         if spoke && !needs_reply {
             // The round's spoken text already answered and every tool was
             // silent plumbing; asking the model again would only produce a
             // second confirmation of what it just said.
-            let _ = llm_tx
-                .send(LlmMessage::Done {
-                    generation,
+            let tail = stripper.finish();
+            if speak_chunk(tail, &mut speak_started, speak_tx, events, turn_id, cancel)
+                .await
+                .is_err()
+            {
+                return TurnOutcome::Cancelled;
+            }
+            if emit(
+                events,
+                turn_id,
+                ReplyEvent::ReplyDone {
                     reply,
-                    history: new_items,
-                })
-                .await;
+                    items: new_items,
+                },
+                cancel,
+            )
+            .await
+            .is_err()
+            {
+                return TurnOutcome::Cancelled;
+            }
+            return TurnOutcome::Done;
+        }
+    }
+}
+
+async fn speak_chunk(
+    chunk: String,
+    speak_started: &mut bool,
+    speak_tx: &mpsc::Sender<String>,
+    events: &mpsc::Sender<(u64, ReplyEvent)>,
+    turn_id: u64,
+    cancel: &CancellationToken,
+) -> Result<(), ()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+    if !*speak_started {
+        *speak_started = true;
+        emit(events, turn_id, ReplyEvent::TtsStart, cancel).await?;
+    }
+    if speak_tx.send(chunk).await.is_err() {
+        debug!("tts input closed, dropping delta");
+    }
+    Ok(())
+}
+
+async fn emit(
+    events: &mpsc::Sender<(u64, ReplyEvent)>,
+    turn_id: u64,
+    event: ReplyEvent,
+    cancel: &CancellationToken,
+) -> Result<(), ()> {
+    tokio::select! {
+        result = events.send((turn_id, event)) => result.map_err(|_| ()),
+        _ = cancel.cancelled() => Err(()),
+    }
+}
+
+/// The speaking leg: maps one `tts.synthesize` call's events into the turn
+/// event stream. A cancelled token exits silently (no TtsStop); a natural
+/// `Done` emits `TtsStop`, an error emits `SpeakError`.
+async fn speak_stage(
+    tts: Arc<dyn Tts>,
+    text_rx: mpsc::Receiver<String>,
+    events: mpsc::Sender<(u64, ReplyEvent)>,
+    turn_id: u64,
+    cancel: CancellationToken,
+    session_id: String,
+) {
+    let text: TextStream = Box::pin(futures_util::stream::unfold(text_rx, |mut rx| async move {
+        rx.recv().await.map(|chunk| (chunk, rx))
+    }));
+    let mut synth = tts.synthesize(text, cancel.clone());
+    loop {
+        let item = tokio::select! {
+            item = synth.next() => match item {
+                Some(item) => item,
+                None => return,
+            },
+            _ = cancel.cancelled() => return,
+        };
+        let event = match item {
+            Ok(TtsEvent::SentenceStart { text }) => ReplyEvent::SentenceStart { text },
+            Ok(TtsEvent::Subtitle(subtitle)) => ReplyEvent::Subtitle { subtitle },
+            Ok(TtsEvent::Audio(samples)) => ReplyEvent::Audio { samples },
+            Ok(TtsEvent::Done) => {
+                let _ = events.send((turn_id, ReplyEvent::TtsStop)).await;
+                return;
+            }
+            Err(err) => {
+                let _ = events
+                    .send((
+                        turn_id,
+                        ReplyEvent::SpeakError {
+                            message: err.to_string(),
+                        },
+                    ))
+                    .await;
+                return;
+            }
+        };
+        if events.send((turn_id, event)).await.is_err() {
+            debug!(session_id, "reply output closed");
             return;
         }
     }
@@ -977,103 +1087,43 @@ async fn execute_tool(tools: &ToolRegistry, call: &ToolCall, session_id: &str) -
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn feed_tts(
-    text: String,
-    synthesis: &mut Option<Synthesis>,
-    speaking: &mut bool,
-    tts: &Arc<dyn Tts>,
-    tts_tx: &mpsc::Sender<TtsMessage>,
-    out_tx: &mpsc::Sender<AgentOutput>,
-    session_id: &str,
-    generation: u64,
-) -> bool {
-    if text.is_empty() {
-        return true;
-    }
-    match synthesis.as_mut() {
-        Some(current) => {
-            if current.tx.send(text).await.is_err() {
-                debug!(session_id, "tts input closed, dropping delta");
-            }
-        }
-        None => {
-            if out_tx.send(AgentOutput::TtsStart).await.is_err() {
-                return false;
-            }
-            let current = spawn_tts(tts, tts_tx, session_id.to_string(), generation);
-            if current.tx.send(text).await.is_err() {
-                debug!(session_id, "tts input closed, dropping delta");
-            }
-            *synthesis = Some(current);
-            *speaking = true;
-        }
-    }
-    true
-}
-
-fn spawn_tts(
-    tts: &Arc<dyn Tts>,
-    tts_tx: &mpsc::Sender<TtsMessage>,
-    session_id: String,
-    generation: u64,
-) -> Synthesis {
-    let (tx, rx) = mpsc::channel::<String>(TTS_TEXT_CHANNEL_CAPACITY);
-    let text: TextStream = Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|chunk| (chunk, rx))
-    }));
-    let tts = tts.clone();
-    let tts_tx = tts_tx.clone();
-    let cancel = CancellationToken::new();
-    let task_cancel = cancel.clone();
-    let handle = tokio::spawn(async move {
-        run_tts(tts, text, tts_tx, session_id, generation, task_cancel).await;
-    });
-    Synthesis {
-        tx,
-        handle: Some(handle),
-        cancel,
-    }
-}
-
-async fn run_tts(
-    tts: Arc<dyn Tts>,
-    text: TextStream,
-    tts_tx: mpsc::Sender<TtsMessage>,
-    session_id: String,
-    generation: u64,
-    cancel: CancellationToken,
+/// Ends the reply audio capture at a cut (barge-in, provider error): when
+/// the turn completed the audio attaches to the stored reply row, otherwise
+/// the partially streamed text is stored as a truncated assistant row and
+/// the partial audio attaches to it — both through the memory's hooks. A
+/// reply that never produced text (and no turn row) just discards the
+/// capture. A session teardown drops the handles, which discards it too.
+fn settle_reply(
+    memory: &Arc<dyn Memory>,
+    session: &AgentSession,
+    capture: &mut Option<ReplyCapture>,
+    turn_logged: &mut bool,
+    streamed: &mut String,
 ) {
-    let mut events = tts.synthesize(text, cancel);
-    while let Some(result) = events.next().await {
-        let message = match result {
-            Ok(TtsEvent::SentenceStart { text }) => TtsMessage::SentenceStart { generation, text },
-            Ok(TtsEvent::Subtitle(subtitle)) => TtsMessage::Subtitle {
-                generation,
-                subtitle,
-            },
-            Ok(TtsEvent::Audio(samples)) => TtsMessage::Audio {
-                generation,
-                samples,
-            },
-            Ok(TtsEvent::Done) => {
-                let _ = tts_tx.send(TtsMessage::Done { generation }).await;
-                return;
+    if let Some(recording) = capture.take() {
+        if *turn_logged {
+            recording.finish();
+        } else {
+            let text = std::mem::take(streamed);
+            if text.is_empty() {
+                drop(recording);
+            } else {
+                memory.store_partial_reply(session, &text);
+                recording.finish();
             }
-            Err(err) => {
-                let _ = tts_tx
-                    .send(TtsMessage::Error {
-                        generation,
-                        message: err.to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
-        if tts_tx.send(message).await.is_err() {
-            debug!(session_id, "tts output closed");
-            return;
         }
+    }
+    *turn_logged = false;
+    streamed.clear();
+}
+
+async fn stop_task(handle: &mut JoinHandle<()>) {
+    if tokio::time::timeout(CANCEL_TIMEOUT, &mut *handle)
+        .await
+        .is_err()
+    {
+        warn!("provider did not cancel in time, aborting");
+        handle.abort();
     }
 }
 
