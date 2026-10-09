@@ -19,11 +19,12 @@ use dashachun::agent::{
     AgentFactory, AgentSession, AgentStore, MemoryHook, MemoryOwner, ToolRegistry,
 };
 use dashachun::auth::state::AuthState;
-use dashachun::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
+use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
 use dashachun::provider::asr::StubAsr;
 use dashachun::provider::llm::StubLlm;
 use dashachun::provider::tts::StubTts;
+use dashachun::settings::OtaSettings;
 use dashachun::state::ServerState;
 use dashachun::vad::{SileroVadFactory, VadConfig};
 
@@ -53,7 +54,7 @@ pub fn test_state(pool: PgPool, websocket_url: Option<String>) -> ServerState {
                 playback_prebuffer_ms: 180,
                 shutdown_grace_ms: 5000,
             },
-            ota: OtaConfig {
+            ota: OtaSettings {
                 websocket_url,
                 timezone_offset: 480,
             },

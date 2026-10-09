@@ -50,14 +50,20 @@ async fn main() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("tts_out.wav"));
 
-    let tts = match VolcTts::from_env(DOWNLINK) {
-        Ok(Some(tts)) => tts,
-        Ok(None) => {
-            eprintln!(
-                "set VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL and VOLC_TTS_SPEAKER (optional VOLC_TTS_RESOURCE_ID)"
-            );
-            std::process::exit(1);
-        }
+    let api_key = std::env::var("VOLC_TTS_API_KEY");
+    let base_url = std::env::var("VOLC_TTS_BASE_URL");
+    let speaker = std::env::var("VOLC_TTS_SPEAKER");
+    let resource_id = std::env::var("VOLC_TTS_RESOURCE_ID");
+    let (Ok(api_key), Ok(base_url), Ok(speaker), Ok(resource_id)) =
+        (api_key, base_url, speaker, resource_id)
+    else {
+        eprintln!(
+            "set VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL, VOLC_TTS_SPEAKER and VOLC_TTS_RESOURCE_ID"
+        );
+        std::process::exit(1);
+    };
+    let tts = match VolcTts::new(base_url, api_key, resource_id, speaker, DOWNLINK) {
+        Ok(tts) => tts,
         Err(err) => {
             eprintln!("{err}");
             std::process::exit(1);

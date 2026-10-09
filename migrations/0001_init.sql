@@ -100,3 +100,15 @@ CREATE TABLE memory_entries (
     deleted_at TIMESTAMPTZ,
     UNIQUE (user_id, agent_id, mem_no)
 );
+
+-- Runtime settings: one row per section (`llm`/`asr`/`tts`/`ota`/`security`),
+-- `value` is the typed JSON of the matching struct in `src/settings.rs`. This
+-- table is the single source for these sections — no env fallback (boot-level
+-- items like DATABASE_URL/BIND_ADDR stay in env); the `security` row is
+-- written back on every boot (generated on first run), so the values the web
+-- wizard will manage live here.
+CREATE TABLE settings (
+    key        TEXT PRIMARY KEY,
+    value      JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

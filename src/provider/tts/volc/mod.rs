@@ -17,8 +17,6 @@ use crate::audio::DownlinkAudio;
 use pool::{ConnPool, ConnSpec, PoolTiming};
 use protocol::Message as TtsMessage;
 
-pub const DEFAULT_RESOURCE_ID: &str = "seed-tts-2.0";
-
 /// Sample rates the Volcengine bidirectional streaming TTS accepts.
 const SUPPORTED_SAMPLE_RATES: &[u32] = &[8000, 16000, 22050, 24000, 32000, 44100, 48000];
 const DEFAULT_FORMAT: &str = "pcm";
@@ -124,7 +122,7 @@ impl VolcTts {
         Self::build(
             endpoint,
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             crate::audio::DOWNLINK,
             PoolTiming {
@@ -134,27 +132,6 @@ impl VolcTts {
             },
         )
         .unwrap()
-    }
-
-    pub fn from_env(downlink: DownlinkAudio) -> Result<Option<Self>, TtsError> {
-        let Some(api_key) = std::env::var("VOLC_TTS_API_KEY").ok() else {
-            return Ok(None);
-        };
-        let Some(endpoint) = std::env::var("VOLC_TTS_BASE_URL").ok() else {
-            return Ok(None);
-        };
-        let Some(speaker) = std::env::var("VOLC_TTS_SPEAKER").ok() else {
-            return Ok(None);
-        };
-        let resource_id = std::env::var("VOLC_TTS_RESOURCE_ID")
-            .unwrap_or_else(|_| DEFAULT_RESOURCE_ID.to_string());
-        Ok(Some(Self::new(
-            endpoint,
-            api_key,
-            resource_id,
-            speaker,
-            downlink,
-        )?))
     }
 }
 
@@ -558,13 +535,8 @@ mod tests {
             sample_rate: 12000,
             ..DOWNLINK
         };
-        let Err(err) = VolcTts::new(
-            "ws://localhost",
-            "key",
-            DEFAULT_RESOURCE_ID,
-            "speaker",
-            downlink,
-        ) else {
+        let Err(err) = VolcTts::new("ws://localhost", "key", "seed-tts-2.0", "speaker", downlink)
+        else {
             panic!("unsupported downlink sample rate must be rejected");
         };
         assert!(err.to_string().contains("sample rate"), "{err}");
@@ -576,13 +548,8 @@ mod tests {
             channels: 2,
             ..DOWNLINK
         };
-        let Err(err) = VolcTts::new(
-            "ws://localhost",
-            "key",
-            DEFAULT_RESOURCE_ID,
-            "speaker",
-            downlink,
-        ) else {
+        let Err(err) = VolcTts::new("ws://localhost", "key", "seed-tts-2.0", "speaker", downlink)
+        else {
             panic!("unsupported downlink channel count must be rejected");
         };
         assert!(err.to_string().contains("channel"), "{err}");
@@ -721,7 +688,7 @@ mod tests {
         let tts = VolcTts::new(
             format!("ws://{addr}"),
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )
@@ -759,7 +726,7 @@ mod tests {
         let tts = VolcTts::new(
             format!("ws://{addr}"),
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )
@@ -788,7 +755,7 @@ mod tests {
         let tts = VolcTts::new(
             format!("ws://{addr}"),
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )
@@ -817,7 +784,7 @@ mod tests {
         let tts = VolcTts::new(
             format!("ws://{addr}"),
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )
@@ -974,7 +941,7 @@ mod tests {
         let tts = VolcTts::new(
             format!("ws://{addr}"),
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )
@@ -1011,7 +978,7 @@ mod tests {
         let tts = VolcTts::new(
             format!("ws://{addr}"),
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )
@@ -1045,7 +1012,7 @@ mod tests {
         let tts = VolcTts::new(
             "ws://127.0.0.1:1",
             "key",
-            DEFAULT_RESOURCE_ID,
+            "seed-tts-2.0",
             "speaker",
             DOWNLINK,
         )

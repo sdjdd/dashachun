@@ -44,28 +44,6 @@ pub struct OpenAiConfig {
     pub reasoning_effort: Option<String>,
 }
 
-impl OpenAiConfig {
-    pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var("LLM_BASE_URL").ok()?;
-        let api_key = std::env::var("LLM_API_KEY").ok()?;
-        let model = std::env::var("LLM_MODEL").ok()?;
-        let max_tokens = std::env::var("LLM_MAX_TOKENS")
-            .or_else(|_| std::env::var("LLM_MAX_OUTPUT_TOKENS"))
-            .ok()
-            .and_then(|value| value.parse().ok());
-        let reasoning_effort = std::env::var("LLM_REASONING_EFFORT")
-            .ok()
-            .filter(|value| !value.is_empty());
-        Some(Self {
-            base_url,
-            api_key,
-            model,
-            max_tokens,
-            reasoning_effort,
-        })
-    }
-}
-
 pub struct OpenAiLlm {
     client: Client<OpenAIConfig>,
     config: OpenAiConfig,

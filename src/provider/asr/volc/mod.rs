@@ -12,8 +12,6 @@ mod protocol;
 use crate::agent::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
 use protocol::Response;
 
-pub const DEFAULT_RESOURCE_ID: &str = "volc.seedasr.sauc.duration";
-
 const SAMPLE_RATE: usize = 16_000;
 const BYTES_PER_SAMPLE: usize = 2;
 const SEGMENT_MS: usize = 200;
@@ -38,14 +36,6 @@ impl VolcAsr {
             api_key: api_key.into(),
             resource_id: resource_id.into(),
         }
-    }
-
-    pub fn from_env() -> Option<Self> {
-        let api_key = std::env::var("VOLC_ASR_API_KEY").ok()?;
-        let endpoint = std::env::var("VOLC_ASR_BASE_URL").ok()?;
-        let resource_id = std::env::var("VOLC_ASR_RESOURCE_ID")
-            .unwrap_or_else(|_| DEFAULT_RESOURCE_ID.to_string());
-        Some(Self::new(endpoint, api_key, resource_id))
     }
 
     fn build_request(
@@ -341,7 +331,7 @@ mod tests {
             saw_last
         });
 
-        let asr = VolcAsr::new(format!("ws://{addr}"), "key", DEFAULT_RESOURCE_ID);
+        let asr = VolcAsr::new(format!("ws://{addr}"), "key", "volc.seedasr.sauc.duration");
         let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<f32>>(4);
         let audio: AudioStream = Box::pin(futures_util::stream::poll_fn(move |cx| {
             audio_rx.poll_recv(cx)

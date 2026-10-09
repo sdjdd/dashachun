@@ -1,3 +1,4 @@
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,11 +6,12 @@ use dashachun::agent::tool::{GetDateTime, GetWeather};
 use dashachun::agent::{AgentFactory, AgentStore, Asr, Llm, ToolRegistry, Tts};
 use dashachun::audio::DOWNLINK;
 use dashachun::auth::state::AuthState;
-use dashachun::config::{AppConfig, AuthConfig};
+use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
 use dashachun::provider::asr::VolcAsr;
 use dashachun::provider::llm::{OpenAiConfig, OpenAiLlm};
 use dashachun::provider::tts::VolcTts;
+use dashachun::settings::Settings;
 use dashachun::state::ServerState;
 use dashachun::vad::SileroVadFactory;
 
@@ -21,58 +23,104 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
-    let config = AppConfig::from_env();
-    let bind_addr = config.server.bind_addr.clone();
-    let grace = Duration::from_millis(config.server.shutdown_grace_ms);
-    let asr: Arc<dyn Asr> = match VolcAsr::from_env() {
-        Some(volc) => {
+    let server = ServerConfig::from_env();
+    let bind_addr = server.bind_addr.clone();
+    let grace = Duration::from_millis(server.shutdown_grace_ms);
+    let device = DeviceConfig::from_env();
+
+    let database_url = match env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            tracing::error!("DATABASE_URL is required");
+            std::process::exit(1);
+        }
+    };
+    let pool = build_pool(&database_url).await;
+    let mut settings = match Settings::load(&pool).await {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::error!(%err, "invalid settings");
+            std::process::exit(1);
+        }
+    };
+    let session_secret = match settings.ensure_session_secret(&pool).await {
+        Ok(secret) => secret,
+        Err(err) => {
+            tracing::error!(%err, "invalid session secret");
+            std::process::exit(1);
+        }
+    };
+    let ota = settings.ota.unwrap_or_default();
+
+    let asr: Arc<dyn Asr> = match settings.asr {
+        Some(config) => {
             tracing::info!("using volc asr provider");
-            Arc::new(volc)
+            Arc::new(VolcAsr::new(
+                config.base_url,
+                config.api_key,
+                config.resource_id,
+            ))
         }
         None => {
-            tracing::error!("VOLC_ASR_API_KEY and VOLC_ASR_BASE_URL are required");
+            tracing::error!(
+                "ASR is not configured: insert the \"asr\" settings row (base_url, api_key, resource_id)"
+            );
             std::process::exit(1);
         }
     };
     let vad = Arc::new(SileroVadFactory::from_env());
-    let llm: Arc<dyn Llm> = match OpenAiConfig::from_env() {
+    let llm: Arc<dyn Llm> = match settings.llm {
         Some(config) => {
             tracing::info!(model = %config.model, "using openai llm provider");
-            Arc::new(OpenAiLlm::new(config))
+            Arc::new(OpenAiLlm::new(OpenAiConfig {
+                base_url: config.base_url,
+                api_key: config.api_key,
+                model: config.model,
+                max_tokens: config.max_tokens,
+                reasoning_effort: config.reasoning_effort,
+            }))
         }
         None => {
-            tracing::error!("LLM_BASE_URL, LLM_API_KEY and LLM_MODEL are required");
-            std::process::exit(1);
-        }
-    };
-    let tts: Arc<dyn Tts> = match VolcTts::from_env(DOWNLINK) {
-        Ok(Some(volc)) => {
-            tracing::info!("using volc tts provider");
-            Arc::new(volc)
-        }
-        Ok(None) => {
             tracing::error!(
-                "VOLC_TTS_API_KEY, VOLC_TTS_BASE_URL and VOLC_TTS_SPEAKER are required"
+                "LLM is not configured: insert the \"llm\" settings row (base_url, api_key, model)"
             );
             std::process::exit(1);
         }
-        Err(err) => {
-            tracing::error!(%err, "invalid volc tts configuration");
+    };
+    let tts: Arc<dyn Tts> = match settings.tts {
+        Some(config) => match VolcTts::new(
+            config.base_url,
+            config.api_key,
+            config.resource_id,
+            config.speaker,
+            DOWNLINK,
+        ) {
+            Ok(volc) => {
+                tracing::info!("using volc tts provider");
+                Arc::new(volc)
+            }
+            Err(err) => {
+                tracing::error!(%err, "invalid volc tts configuration");
+                std::process::exit(1);
+            }
+        },
+        None => {
+            tracing::error!(
+                "TTS is not configured: insert the \"tts\" settings row (base_url, api_key, speaker, resource_id)"
+            );
             std::process::exit(1);
         }
     };
     let tools = Arc::new(ToolRegistry::new(vec![
         Arc::new(GetWeather::new()),
-        Arc::new(GetDateTime::new(config.ota.timezone_offset)),
+        Arc::new(GetDateTime::new(ota.timezone_offset)),
     ]));
-    let auth_config = match AuthConfig::from_env() {
-        Ok(config) => config,
-        Err(err) => {
-            tracing::error!(%err, "invalid auth config");
-            std::process::exit(1);
-        }
+    let config = AppConfig {
+        server,
+        ota,
+        device,
     };
-    let pool = build_pool(&auth_config).await;
+    let auth_config = AuthConfig::from_env(database_url, session_secret);
     let auth = build_auth_state(auth_config, pool.clone());
     let agent_factory = Arc::new(AgentFactory::new(
         asr,
@@ -105,8 +153,8 @@ async fn main() {
     tracing::info!("server stopped");
 }
 
-async fn build_pool(config: &AuthConfig) -> sqlx::PgPool {
-    let pool = match sqlx::PgPool::connect(&config.database_url).await {
+async fn build_pool(database_url: &str) -> sqlx::PgPool {
+    let pool = match sqlx::PgPool::connect(database_url).await {
         Ok(pool) => pool,
         Err(err) => {
             tracing::error!(%err, "failed to connect to database");

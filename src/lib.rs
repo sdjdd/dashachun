@@ -20,6 +20,7 @@ pub mod extract;
 pub mod gateway;
 pub mod provider;
 pub mod routes;
+pub mod settings;
 pub mod state;
 pub mod vad;
 

@@ -187,11 +187,12 @@ mod tests {
         Agent, AgentFactory, AgentInputStream, AgentOutputStream, AgentSession, AgentStore,
         ToolRegistry,
     };
-    use crate::config::{AppConfig, DeviceConfig, OtaConfig, ServerConfig};
+    use crate::config::{AppConfig, DeviceConfig, ServerConfig};
     use crate::device::DeviceStore;
     use crate::provider::asr::StubAsr;
     use crate::provider::llm::StubLlm;
     use crate::provider::tts::StubTts;
+    use crate::settings::OtaSettings;
     use crate::state::ServerState;
     use crate::vad::{SileroVadFactory, VadConfig};
 
@@ -217,7 +218,7 @@ mod tests {
                     playback_prebuffer_ms: 180,
                     shutdown_grace_ms: 5000,
                 },
-                ota: OtaConfig {
+                ota: OtaSettings {
                     websocket_url: None,
                     timezone_offset: 480,
                 },

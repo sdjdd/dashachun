@@ -79,10 +79,14 @@ async fn main() {
         samples.len() as f32 / 16000.0
     );
 
-    let Some(asr) = VolcAsr::from_env() else {
-        eprintln!("set VOLC_ASR_API_KEY and VOLC_ASR_BASE_URL");
+    let api_key = std::env::var("VOLC_ASR_API_KEY");
+    let base_url = std::env::var("VOLC_ASR_BASE_URL");
+    let resource_id = std::env::var("VOLC_ASR_RESOURCE_ID");
+    let (Ok(api_key), Ok(base_url), Ok(resource_id)) = (api_key, base_url, resource_id) else {
+        eprintln!("set VOLC_ASR_API_KEY, VOLC_ASR_BASE_URL and VOLC_ASR_RESOURCE_ID");
         std::process::exit(1);
     };
+    let asr = VolcAsr::new(base_url, api_key, resource_id);
 
     let start = Instant::now();
     let mut events = asr.transcribe(audio_stream(samples), CancellationToken::new());
