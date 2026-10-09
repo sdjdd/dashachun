@@ -36,11 +36,11 @@ pub struct VadConfig {
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            speech_threshold: 0.6,
+            speech_threshold: 0.5,
             silence_threshold: 0.4,
             min_speech_ms: 200,
             min_silence_ms: 500,
-            pre_padding_ms: 200,
+            pre_padding_ms: 400,
         }
     }
 }
