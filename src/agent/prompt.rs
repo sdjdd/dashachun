@@ -3,7 +3,8 @@ use crate::agent::memory::{MAX_ENTRIES, MemoryEntry, entry_id};
 
 /// Fixed prefix prepended to every system message, before the configurable
 /// persona prompt. Carries the TTS plain-text output rules and the
-/// leading-yellow-face-emoji rule the emotion pipeline keys on.
+/// leading-yellow-face-emoji rule (with counter-examples) the emotion
+/// pipeline keys on.
 pub const SYSTEM_PROMPT_PREFIX: &str = "\
 You are a voice assistant speaking through a device that reads your replies \
 aloud with text-to-speech. Reply in the user's language and keep every reply \
@@ -13,7 +14,9 @@ short and conversational.
 
 To express emotion, you may begin the reply with a single emoji. When you \
 do, it must be the very first character and a yellow face of any emotion \
-(e.g. 😊 😄 😢 😠 🤔 😎). Good: \"😊 今天天气真好！\"
+(e.g. 😊 😄 😢 😠 🤔 😎). Good: \"😊 今天天气真好！\" Bad: \"👍 好的！\" — \
+any non-yellow-face emoji (thumbs, hearts, animals, objects, sparkles) \
+does nothing on the device, so never use one.
 
 ## TTS output rules
 
@@ -120,6 +123,14 @@ mod tests {
         let prompt = SystemPrompt::new("");
         assert_eq!(prompt.as_str(), SYSTEM_PROMPT_PREFIX);
         assert!(!prompt.as_str().contains("<persona>"));
+    }
+
+    #[test]
+    fn prefix_bans_non_yellow_faces() {
+        let prompt = SystemPrompt::new("Be helpful.");
+        let content = prompt.as_str();
+        assert!(content.contains("Bad: \"👍 好的！\""));
+        assert!(content.contains("never use one"));
     }
 
     #[test]
