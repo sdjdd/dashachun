@@ -1,16 +1,20 @@
 //! Audio storage: a byproduct feature that attaches captured audio to the
-//! message rows the memory commits. The driver drives the session lifecycle
-//! (speech and tts boundaries) through the [`Capture`] handles; the memory's
-//! [`MemoryHook`]s deliver the message ids, so audio code never writes a
-//! message row and never sees one being planned.
+//! message rows the memory commits. Captured FLAC goes to an object store
+//! through the [`AudioStorage`] port and the `message_audios` row records its
+//! object key. The driver drives the session lifecycle (speech and tts
+//! boundaries) through the [`Capture`] handles; the memory's [`MemoryHook`]s
+//! deliver the message ids, so audio code never writes a message row and
+//! never sees one being planned.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::agent::AgentSession;
 use crate::agent::memory::MemoryHook;
@@ -18,21 +22,41 @@ use crate::audio::DOWNLINK;
 
 const BITS_PER_SAMPLE: usize = 16;
 
+/// The storage port of the audio feature: where finished FLAC captures go.
+/// One put per capture under a fresh object key; a failed put discards that
+/// audio while the message row stays the primary record. `put` returns the
+/// bucket the object landed in — the inserted row records bucket and key,
+/// so a later bucket switch can never orphan a reference.
+#[async_trait::async_trait]
+pub trait AudioStorage: Send + Sync {
+    async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<String, String>;
+}
+
 /// The audio-storage feature: captures the device's uplink and the
 /// synthesized reply, and stores them as `message_audios` rows linked by
 /// `message_id` to the rows the memory commits. One instance lives per
 /// connection; register it as a hook on the memory so captures learn their
 /// message ids, and hand it to the driver as the [`Capture`] implementation.
+/// A `None` storage disables storage entirely: captures still flow but
+/// store no rows and no objects.
 pub struct AudioCapture {
     pool: PgPool,
+    client_id: Uuid,
+    audio_storage: Option<Arc<dyn AudioStorage>>,
     open_utterance: Mutex<Option<oneshot::Sender<i64>>>,
     open_reply: Mutex<Option<oneshot::Sender<i64>>>,
 }
 
 impl AudioCapture {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(
+        pool: PgPool,
+        client_id: Uuid,
+        audio_storage: Option<Arc<dyn AudioStorage>>,
+    ) -> Self {
         Self {
             pool,
+            client_id,
+            audio_storage,
             open_utterance: Mutex::new(None),
             open_reply: Mutex::new(None),
         }
@@ -59,6 +83,8 @@ impl Capture for AudioCapture {
         let (tx_id, rx_id) = oneshot::channel();
         *self.open_utterance.lock().unwrap() = Some(tx_id);
         let pool = self.pool.clone();
+        let client_id = self.client_id;
+        let audio_storage = self.audio_storage.clone();
         let session_id = session.id.clone();
         let sample_rate = session.sample_rate;
         let channels = session.channels;
@@ -70,7 +96,17 @@ impl Capture for AudioCapture {
                 debug!(session_id, "utterance audio discarded: no message row");
                 return;
             };
-            match store_audio(&pool, message_id, sample_rate, channels, &chunks).await {
+            match store_audio(
+                &pool,
+                audio_storage.as_ref(),
+                client_id,
+                message_id,
+                sample_rate,
+                channels,
+                &chunks,
+            )
+            .await
+            {
                 Ok(()) => debug!(session_id, message_id, "utterance audio stored"),
                 Err(err) => {
                     warn!(session_id, message_id, %err, "failed to store utterance audio")
@@ -85,6 +121,8 @@ impl Capture for AudioCapture {
         let (tx_id, rx_id) = oneshot::channel();
         *self.open_reply.lock().unwrap() = Some(tx_id);
         let pool = self.pool.clone();
+        let client_id = self.client_id;
+        let audio_storage = self.audio_storage.clone();
         let session_id = session.id.clone();
         tokio::spawn(async move {
             let Some(chunks) = collect(&mut rx).await else {
@@ -96,6 +134,8 @@ impl Capture for AudioCapture {
             };
             match store_audio(
                 &pool,
+                audio_storage.as_ref(),
+                client_id,
                 message_id,
                 DOWNLINK.sample_rate,
                 DOWNLINK.channels,
@@ -213,38 +253,73 @@ pub async fn collect(rx: &mut mpsc::UnboundedReceiver<Frame>) -> Option<Vec<Vec<
     None
 }
 
-/// Stores the captured audio against the committed message row. No audio
-/// chunks (a reply the user never heard) store nothing.
+/// Stores the captured audio against the committed message row: the FLAC
+/// bytes go to the storage under a fresh object key, the row records the
+/// bucket and key. No storage (unconfigured), no audio chunks (a reply the
+/// user never heard), or a failed put store no row at all — the message
+/// row is the primary record and the audio is best-effort.
 async fn store_audio(
     pool: &PgPool,
+    audio_storage: Option<&Arc<dyn AudioStorage>>,
+    client_id: Uuid,
     message_id: i64,
     sample_rate: u32,
     channels: u16,
     chunks: &[Vec<f32>],
 ) -> Result<(), String> {
+    let Some(audio_storage) = audio_storage else {
+        return Ok(());
+    };
     let total_samples: usize = chunks.iter().map(|chunk| chunk.len()).sum();
     if total_samples == 0 {
         return Ok(());
     }
     let duration_ms = (total_samples as i64 / i64::from(channels)) * 1000 / i64::from(sample_rate);
     let audio = encode_flac(channels, sample_rate, chunks)?;
-    insert_audio(pool, message_id, sample_rate, channels, duration_ms, &audio).await
+    let key = object_key(client_id);
+    let bucket = audio_storage.put(&key, audio).await?;
+    insert_audio(
+        pool,
+        message_id,
+        &bucket,
+        &key,
+        sample_rate,
+        channels,
+        duration_ms,
+    )
+    .await
+}
+
+/// The object key of one capture: `audios/{YYYYMMDD}/{client_id}/{uuid}.flac`
+/// — a per-day prefix, the owning device's client id, and a fresh uuid, so
+/// keys never collide and never leak message ids into the storage layout.
+fn object_key(client_id: Uuid) -> String {
+    let now = OffsetDateTime::now_utc();
+    format!(
+        "audios/{:04}{:02}{:02}/{client_id}/{}.flac",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+        Uuid::new_v4().simple()
+    )
 }
 
 async fn insert_audio(
     pool: &PgPool,
     message_id: i64,
+    bucket: &str,
+    object_key: &str,
     sample_rate: u32,
     channels: u16,
     duration_ms: i64,
-    audio: &[u8],
 ) -> Result<(), String> {
     sqlx::query(
-        "INSERT INTO message_audios (message_id, audio, sample_rate, channels, duration_ms) \
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO message_audios (message_id, bucket, object_key, sample_rate, channels, duration_ms) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(message_id)
-    .bind(audio)
+    .bind(bucket)
+    .bind(object_key)
     .bind(i32::try_from(sample_rate).unwrap_or_default())
     .bind(i32::from(channels))
     .bind(i32::try_from(duration_ms).unwrap_or_default())

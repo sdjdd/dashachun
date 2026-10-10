@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -17,7 +18,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 use dashachun::agent::{
-    AgentFactory, AgentSession, AgentStore, MemoryHook, MemoryOwner, ToolRegistry,
+    AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner, ToolRegistry,
 };
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
@@ -128,6 +129,7 @@ fn test_state_with_registry_inner(
         Arc::new(registry),
         vad,
         tools,
+        None,
         Arc::new(ArcSwapOption::from_pointee(factory)),
         devices,
     )
@@ -220,10 +222,14 @@ pub fn session(id: &str) -> AgentSession {
 }
 
 pub fn owner(user_id: i64, agent_id: i64) -> MemoryOwner {
+    owner_with_client(user_id, agent_id, uuid::Uuid::new_v4())
+}
+
+pub fn owner_with_client(user_id: i64, agent_id: i64, client_id: uuid::Uuid) -> MemoryOwner {
     MemoryOwner {
         user_id,
         agent_id,
-        client_id: uuid::Uuid::new_v4(),
+        client_id,
         device_id: Some("aa:bb:cc:dd:ee:ff".into()),
     }
 }
@@ -252,6 +258,47 @@ impl RecordingHook {
 
     pub fn turn_ids(&self) -> Vec<i64> {
         self.turns.lock().unwrap().clone()
+    }
+}
+
+/// An in-memory [`AudioStorage`] recording every put — the test double for the
+/// OSS, so capture suites assert keys and bytes without a storage service.
+#[derive(Default)]
+pub struct MemoryStorage {
+    bucket: String,
+    objects: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl AudioStorage for MemoryStorage {
+    async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<String, String> {
+        self.objects.lock().unwrap().insert(key.to_owned(), bytes);
+        Ok(self.bucket.clone())
+    }
+}
+
+impl MemoryStorage {
+    pub fn new(bucket: &str) -> Self {
+        Self {
+            bucket: bucket.to_owned(),
+            objects: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    pub fn keys(&self) -> Vec<String> {
+        self.objects.lock().unwrap().keys().cloned().collect()
+    }
+
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        self.objects.lock().unwrap().get(key).cloned()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.lock().unwrap().is_empty()
     }
 }
 

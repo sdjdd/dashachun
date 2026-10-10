@@ -9,6 +9,56 @@ pub struct AppConfig {
     pub device: DeviceConfig,
 }
 
+#[derive(Clone)]
+pub struct OssConfig {
+    pub endpoint: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub force_path_style: bool,
+}
+
+impl OssConfig {
+    /// `S3_ENDPOINT` presence means the OSS is configured; `capture_enabled`
+    /// is the settings-backed audio-capture switch. Storage without the
+    /// switch initializes nothing, a switch without storage is a boot error.
+    /// The bucket is not env config — it lives in the `audio_capture`
+    /// settings section.
+    pub fn from_env(capture_enabled: bool) -> Result<Option<Self>, String> {
+        let configured = env::var("S3_ENDPOINT")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        match (capture_enabled, configured) {
+            (true, None) => Err(
+                "audio capture is enabled but S3_ENDPOINT is not set: captured audio has nowhere to go"
+                    .into(),
+            ),
+            (false, _) => Ok(None),
+            (true, Some(endpoint)) => Ok(Some(Self {
+                endpoint,
+                region: env_or("S3_REGION", "us-east-1"),
+                access_key_id: env_required("S3_ACCESS_KEY_ID")?,
+                secret_access_key: env_required("S3_SECRET_ACCESS_KEY")?,
+                force_path_style: env_or("S3_FORCE_PATH_STYLE", "true")
+                    .parse()
+                    .unwrap_or(true),
+            })),
+        }
+    }
+}
+
+impl std::fmt::Debug for OssConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OssConfig")
+            .field("endpoint", &self.endpoint)
+            .field("region", &self.region)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("force_path_style", &self.force_path_style)
+            .finish()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub bind_addr: String,
@@ -83,4 +133,11 @@ impl std::fmt::Debug for AuthConfig {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_required(key: &str) -> Result<String, String> {
+    env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{key} is required when S3_ENDPOINT is set"))
 }

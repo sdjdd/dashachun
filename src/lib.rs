@@ -19,6 +19,7 @@ pub mod dto;
 pub mod error;
 pub mod extract;
 pub mod gateway;
+pub mod oss;
 pub mod provider;
 pub mod ratelimit;
 pub mod routes;
@@ -35,6 +36,11 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         auth: auth.clone(),
         devices: server.devices.clone(),
     });
+    let audio_capture =
+        routes::audio_capture::routes().with_state(routes::audio_capture::AudioCaptureState {
+            auth: auth.clone(),
+            server: server.clone(),
+        });
     let router = Router::new()
         .route("/", get(async || "Hello, world!"))
         .nest("/gateway", routes::gateway::routes())
@@ -46,7 +52,8 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
             "/api/agents",
             routes::agents::routes().with_state(auth.clone()),
         )
-        .nest("/api/devices", devices);
+        .nest("/api/devices", devices)
+        .nest("/api/settings/audio-capture", audio_capture);
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
 }

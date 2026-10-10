@@ -54,7 +54,7 @@ async fn handle_device_connect(
         );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let agent = match factory.build(&record).await {
+    let agent = match factory.build(&record, state.audio_storage()).await {
         Ok(agent) => agent,
         Err(err) => {
             warn!(client_id, %err, "gateway rejected: agent unavailable");

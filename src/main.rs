@@ -5,15 +5,16 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 
 use dashachun::agent::tool::{GetDateTime, GetWeather};
-use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry};
+use dashachun::agent::{AgentFactory, AgentStore, AudioStorage, ToolRegistry};
 use dashachun::auth::state::AuthState;
-use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, ServerConfig};
+use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, OssConfig, ServerConfig};
 use dashachun::device::DeviceStore;
 use dashachun::error::AppError;
+use dashachun::oss::Oss;
 use dashachun::provider::store::ProviderStore;
 use dashachun::provider::{ProviderRegistry, ProviderSpec};
 use dashachun::ratelimit::RedisLimiter;
-use dashachun::settings::Settings;
+use dashachun::settings::{AudioCaptureSettings, Settings};
 use dashachun::state::ServerState;
 use dashachun::vad::SileroVadFactory;
 
@@ -77,6 +78,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let audio_capture = settings.audio_capture.clone().unwrap_or_default();
+    let audio_storage = build_audio_storage(&audio_capture).await;
     let specs = match resolve_specs(&ProviderStore::new(pool.clone()), &settings).await {
         Ok(specs) => specs,
         Err(err) => {
@@ -131,6 +134,7 @@ async fn main() {
         registry,
         vad,
         tools,
+        audio_storage,
         agent_factory.clone(),
         DeviceStore::new(pool, redis, "act"),
     );
@@ -155,6 +159,50 @@ async fn main() {
         factory.shutdown().await;
     }
     tracing::info!("server stopped");
+}
+
+/// Builds the boot-time audio storage. Storage problems never block the
+/// service — the audio is a byproduct, so any misconfiguration or
+/// unreachability degrades to captures-off with a warning; the settings
+/// API applies and validates storage eagerly when operators change it,
+/// and a later apply (or restart) picks the storage back up.
+async fn build_audio_storage(capture: &AudioCaptureSettings) -> Option<Arc<dyn AudioStorage>> {
+    if !capture.enabled {
+        return None;
+    }
+    if capture.bucket.trim().is_empty() {
+        tracing::warn!(
+            "audio capture is enabled but audio_capture.bucket is not set; captures are not stored"
+        );
+        return None;
+    }
+    let config = match OssConfig::from_env(true) {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            tracing::warn!(
+                "audio capture is enabled but S3_ENDPOINT is not configured; captures are not stored"
+            );
+            return None;
+        }
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "audio capture is enabled but its storage is misconfigured; captures are not stored"
+            );
+            return None;
+        }
+    };
+    let oss = Oss::new(&config, &capture.bucket);
+    if let Err(err) = oss.ensure_bucket().await {
+        tracing::warn!(
+            bucket = %capture.bucket,
+            %err,
+            "audio storage is unreachable at boot; captures are not stored until it is re-applied via /api/settings/audio-capture"
+        );
+        return None;
+    }
+    tracing::info!(bucket = %capture.bucket, "audio capture storage ready");
+    Some(Arc::new(oss))
 }
 
 async fn build_pool(database_url: &str) -> sqlx::PgPool {

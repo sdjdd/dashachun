@@ -67,13 +67,19 @@ CREATE TABLE messages (
 CREATE INDEX messages_user_id_idx ON messages (user_id, created_at);
 CREATE INDEX messages_session_id_idx ON messages (session_id, created_at);
 
--- FLAC capture (16-bit PCM, metadata blocks + frames) attached to its
--- message (the user message for uplink, the turn's last message for
--- downlink); playback and voice-cloning pipelines read it with any decoder.
+-- FLAC capture (16-bit PCM, metadata blocks + frames) stored as one S3
+-- object per row, referenced by its `bucket` + `object_key`
+-- (`audios/{YYYYMMDD}/{client_id}/{uuid}.flac` under that bucket); attached
+-- to its message (the user message for uplink, the turn's last message for
+-- downlink). The bucket is recorded per row because the capture settings
+-- can switch it at runtime — old rows keep reading from their own bucket.
+-- Rows exist only when audio storage is configured — the message row is
+-- the primary record, the object is best-effort.
 CREATE TABLE message_audios (
     id          BIGSERIAL PRIMARY KEY,
     message_id  BIGINT NOT NULL,
-    audio       BYTEA NOT NULL,
+    bucket      TEXT NOT NULL,
+    object_key  TEXT NOT NULL,
     sample_rate INT NOT NULL,
     channels    INT NOT NULL,
     duration_ms INT NOT NULL,

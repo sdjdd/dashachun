@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use sqlx::PgPool;
 
-use super::capture::AudioCapture;
+use super::capture::{AudioCapture, AudioStorage};
 use super::memory::{DbEntryMemory, DbMemory, EntryMemory, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
 use super::tool::{MemoryAdd, MemoryDelete, MemoryUpdate};
@@ -77,7 +77,11 @@ impl AgentFactory {
         Ok(Self::new(asr, llm, tts, vad, tools, agents, pool))
     }
 
-    pub async fn build(&self, record: &DeviceRecord) -> Result<Arc<dyn Agent>, AppError> {
+    pub async fn build(
+        &self,
+        record: &DeviceRecord,
+        audio_storage: Option<Arc<dyn AudioStorage>>,
+    ) -> Result<Arc<dyn Agent>, AppError> {
         let agent_id = record
             .agent_id
             .ok_or_else(|| AppError::Internal("device has no assigned agent".into()))?;
@@ -97,8 +101,14 @@ impl AgentFactory {
         };
         // The audio feature plugs in here: it implements both the driver's
         // Capture surface and the memory's MemoryHook, so committed rows
-        // hand their ids straight to the open captures.
-        let audio = Arc::new(AudioCapture::new(self.pool.clone()));
+        // hand their ids straight to the open captures. The storage is the
+        // caller's slot snapshot, taken per connection — a settings swap
+        // applies to every new session without touching the generation.
+        let audio = Arc::new(AudioCapture::new(
+            self.pool.clone(),
+            record.client_id,
+            audio_storage,
+        ));
         let memory = DbMemory::load(
             self.pool.clone(),
             owner,

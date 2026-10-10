@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arc_swap::ArcSwapOption;
 use tokio::sync::{Mutex, watch};
 
-use crate::agent::{AgentFactory, ToolRegistry};
+use crate::agent::{AgentFactory, AudioStorage, ToolRegistry};
 use crate::config::AppConfig;
 use crate::device::DeviceStore;
 use crate::provider::ProviderRegistry;
@@ -15,6 +15,7 @@ pub struct ServerState {
     pub registry: Arc<ProviderRegistry>,
     pub vad: Arc<dyn VadFactory>,
     pub tools: Arc<ToolRegistry>,
+    audio_storage: Arc<RwLock<Option<Arc<dyn AudioStorage>>>>,
     factories: Arc<ArcSwapOption<AgentFactory>>,
     pub swap_lock: Arc<Mutex<()>>,
     pub devices: DeviceStore,
@@ -29,6 +30,7 @@ impl ServerState {
         registry: Arc<ProviderRegistry>,
         vad: Arc<dyn VadFactory>,
         tools: Arc<ToolRegistry>,
+        audio_storage: Option<Arc<dyn AudioStorage>>,
         factories: Arc<ArcSwapOption<AgentFactory>>,
         devices: DeviceStore,
     ) -> Self {
@@ -38,12 +40,26 @@ impl ServerState {
             registry,
             vad,
             tools,
+            audio_storage: Arc::new(RwLock::new(audio_storage)),
             factories,
             swap_lock: Arc::new(Mutex::new(())),
             devices,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+
+    /// A snapshot of the current audio storage — `None` while the feature
+    /// is disabled. Factories assemble with it; in-flight sessions keep
+    /// their clone across a swap, exactly like provider generations.
+    pub fn audio_storage(&self) -> Option<Arc<dyn AudioStorage>> {
+        self.audio_storage.read().unwrap().clone()
+    }
+
+    /// Replaces the audio storage slot — the `/api/settings/audio-capture` apply
+    /// path. The previous storage drains with the sessions that hold it.
+    pub fn set_audio_storage(&self, next: Option<Arc<dyn AudioStorage>>) {
+        *self.audio_storage.write().unwrap() = next;
     }
 
     /// A snapshot of the current agent generation — `None` until a provider
@@ -138,6 +154,7 @@ mod tests {
             registry,
             vad,
             tools,
+            None,
             factories,
             DeviceStore::new(
                 pool,

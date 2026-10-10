@@ -12,7 +12,9 @@ pub mod tool;
 mod tts;
 
 pub use asr::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
-pub use capture::{AudioCapture, Capture, Frame, ReplyCapture, UtteranceCapture, collect};
+pub use capture::{
+    AudioCapture, AudioStorage, Capture, Frame, ReplyCapture, UtteranceCapture, collect,
+};
 pub use composite::CompositeAgent;
 pub use factory::AgentFactory;
 pub use llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};

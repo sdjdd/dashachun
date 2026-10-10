@@ -10,6 +10,7 @@ const LLM_PROVIDER_ID_KEY: &str = "llm_provider_id";
 const TTS_PROVIDER_ID_KEY: &str = "tts_provider_id";
 const OTA_KEY: &str = "ota";
 const SECURITY_KEY: &str = "security";
+const AUDIO_CAPTURE_KEY: &str = "audio_capture";
 
 const SESSION_SECRET_BYTES: usize = 64;
 const MIN_SESSION_SECRET_LEN: usize = 64;
@@ -68,12 +69,30 @@ impl fmt::Debug for SecuritySettings {
     }
 }
 
+/// The audio-capture switch plus its object bucket. The storage endpoint
+/// and credentials (`S3_*`) stay boot-level env; this section holds what
+/// operators change at runtime — whether captures are stored and where.
+/// Changes apply hot through `/api/settings/audio-capture` (restart also applies,
+/// boot reads this row).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AudioCaptureSettings {
+    pub enabled: bool,
+    pub bucket: String,
+}
+
+impl AudioCaptureSettings {
+    pub fn usable(&self) -> bool {
+        self.enabled && !self.bucket.trim().is_empty()
+    }
+}
+
 #[derive(Default)]
 pub struct Settings {
     pub asr: Option<i64>,
     pub llm: Option<i64>,
     pub tts: Option<i64>,
     pub ota: Option<OtaSettings>,
+    pub audio_capture: Option<AudioCaptureSettings>,
     session_secret: Option<String>,
 }
 
@@ -84,6 +103,7 @@ impl fmt::Debug for Settings {
             .field("llm", &self.llm)
             .field("tts", &self.tts)
             .field("ota", &self.ota)
+            .field("audio_capture", &self.audio_capture)
             .field(
                 "session_secret",
                 &self.session_secret.as_ref().map(|_| "<redacted>"),
@@ -112,6 +132,9 @@ impl Settings {
                     settings.tts = Some(parse_row::<i64>(TTS_PROVIDER_ID_KEY, value)?)
                 }
                 OTA_KEY => settings.ota = Some(parse_row(OTA_KEY, value)?),
+                AUDIO_CAPTURE_KEY => {
+                    settings.audio_capture = Some(parse_row(AUDIO_CAPTURE_KEY, value)?)
+                }
                 SECURITY_KEY => {
                     settings.session_secret =
                         Some(parse_row::<SecuritySettings>(SECURITY_KEY, value)?.session_secret)
@@ -166,6 +189,42 @@ pub async fn set_provider_selection(pool: &PgPool, r#type: &str, id: i64) -> Res
     .await
     .map_err(|err| format!("failed to store the {type} provider selection: {err}"))?;
     Ok(())
+}
+
+/// Stores the audio-capture section — the `/api/settings/audio-capture` write path
+/// (and boot's fallback writer, should one be needed). The row is the
+/// single source; callers apply the new value to the live state themselves.
+pub async fn set_audio_capture(
+    pool: &PgPool,
+    capture: &AudioCaptureSettings,
+) -> Result<(), String> {
+    let value = serde_json::to_value(capture)
+        .map_err(|err| format!("failed to encode audio capture settings: {err}"))?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()",
+    )
+    .bind(AUDIO_CAPTURE_KEY)
+    .bind(value)
+    .execute(pool)
+    .await
+    .map_err(|err| format!("failed to store audio capture settings: {err}"))?;
+    Ok(())
+}
+
+/// Reads just the audio-capture section — the `/api/settings/audio-capture` GET
+/// path. An absent row is the default (disabled, empty bucket).
+pub async fn load_audio_capture(pool: &PgPool) -> Result<AudioCaptureSettings, String> {
+    let row: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = $1")
+            .bind(AUDIO_CAPTURE_KEY)
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| format!("failed to load audio capture settings: {err}"))?;
+    match row {
+        Some(value) => parse_row(AUDIO_CAPTURE_KEY, value),
+        None => Ok(AudioCaptureSettings::default()),
+    }
 }
 
 fn provider_key(r#type: &str) -> Option<&'static str> {
@@ -223,6 +282,23 @@ mod tests {
         let ota: OtaSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(ota.websocket_url, None);
         assert_eq!(ota.timezone_offset, 480);
+    }
+
+    #[test]
+    fn audio_capture_json_requires_an_explicit_switch_and_bucket() {
+        assert!(serde_json::from_value::<AudioCaptureSettings>(serde_json::json!({})).is_err());
+        assert!(
+            serde_json::from_value::<AudioCaptureSettings>(serde_json::json!({"enabled": true}))
+                .is_err()
+        );
+        let audio_capture: AudioCaptureSettings =
+            serde_json::from_value(serde_json::json!({"enabled": true, "bucket": "dsc-audio"}))
+                .unwrap();
+        assert!(audio_capture.enabled);
+        assert_eq!(audio_capture.bucket, "dsc-audio");
+        assert!(!AudioCaptureSettings::default().enabled);
+        assert!(!AudioCaptureSettings::default().usable());
+        assert!(audio_capture.usable());
     }
 
     #[test]

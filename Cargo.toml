@@ -8,6 +8,7 @@ arc-swap = "1"
 argon2 = "0.5"
 async-openai = { version = "0.42", default-features = false, features = ["rustls", "chat-completion"] }
 async-trait = "0.1"
+aws-sdk-s3 = { version = "1.152", default-features = false, features = ["rt-tokio", "http-1x", "default-https-client"] }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie", "cookie-signed"] }
 dotenvy = "0.15.7"

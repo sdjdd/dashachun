@@ -242,6 +242,7 @@ mod tests {
             Arc::new(ProviderRegistry::with_stubs()),
             vad,
             tools,
+            None,
             Arc::new(ArcSwapOption::from_pointee(factory)),
             DeviceStore::new(
                 pool,
