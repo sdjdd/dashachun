@@ -1,4 +1,4 @@
-use axum::extract::{Path, State};
+use axum::extract::{FromRef, Path, State};
 use axum::http::StatusCode;
 use axum::{Json, Router, routing::delete, routing::get, routing::post};
 use uuid::Uuid;
@@ -11,7 +11,22 @@ use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
 use crate::error::AppError;
 use crate::extract::Validated;
 
-pub fn routes() -> Router<AuthState> {
+/// The device REST routes need both halves: session auth and the device
+/// store (whose Redis handle the shared `ServerState` copy also carries,
+/// so the two never diverge).
+#[derive(Clone)]
+pub struct DevicesState {
+    pub auth: AuthState,
+    pub devices: DeviceStore,
+}
+
+impl FromRef<DevicesState> for AuthState {
+    fn from_ref(state: &DevicesState) -> Self {
+        state.auth.clone()
+    }
+}
+
+pub fn routes() -> Router<DevicesState> {
     Router::new()
         .route("/", get(list_devices))
         .route("/activate", post(activate_device))
@@ -19,12 +34,12 @@ pub fn routes() -> Router<AuthState> {
 }
 
 async fn activate_device(
-    State(state): State<AuthState>,
+    State(state): State<DevicesState>,
     user: AuthUser,
     Validated(args): Validated<ActivateDeviceArgs>,
 ) -> Result<Json<DeviceResponse>, AppError> {
-    let devices = DeviceStore::new(state.pool.clone());
-    match devices
+    match state
+        .devices
         .bind_by_code(user.id, &args.code, args.agent_id)
         .await?
     {
@@ -36,24 +51,22 @@ async fn activate_device(
 }
 
 async fn list_devices(
-    State(state): State<AuthState>,
+    State(state): State<DevicesState>,
     user: AuthUser,
 ) -> Result<Json<Vec<DeviceResponse>>, AppError> {
-    let devices = DeviceStore::new(state.pool.clone());
-    let records = devices.list_for_user(user.id).await?;
+    let records = state.devices.list_for_user(user.id).await?;
     Ok(Json(
         records.into_iter().map(DeviceResponse::from).collect(),
     ))
 }
 
 async fn unbind_device(
-    State(state): State<AuthState>,
+    State(state): State<DevicesState>,
     user: AuthUser,
     Path(client_id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     let client_id = Uuid::parse_str(&client_id).map_err(|_| AppError::NotFound)?;
-    let devices = DeviceStore::new(state.pool.clone());
-    if devices.unbind(user.id, client_id).await? {
+    if state.devices.unbind(user.id, client_id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)

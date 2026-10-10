@@ -5,8 +5,6 @@ use axum::http::{HeaderValue, Request, StatusCode};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
-use dashachun::device::DeviceStore;
-
 const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
 fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
@@ -269,7 +267,7 @@ async fn hello_with_unsupported_audio_format_is_rejected(pool: PgPool) {
 }
 
 async fn bound_device_token(pool: &PgPool) -> String {
-    let devices = DeviceStore::new(pool.clone());
+    let devices = common::test_device_store(pool.clone()).0;
     let uuid = uuid::Uuid::parse_str(CLIENT_ID).unwrap();
     devices
         .upsert(uuid, "aa:bb:cc:dd:ee:ff", "test-board")

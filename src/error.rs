@@ -38,6 +38,12 @@ impl From<sqlx::Error> for AppError {
     }
 }
 
+impl From<redis::RedisError> for AppError {
+    fn from(err: redis::RedisError) -> Self {
+        AppError::Internal(format!("redis error: {err}"))
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         if let AppError::TooManyRequests(retry_after) = &self {

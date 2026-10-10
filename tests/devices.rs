@@ -6,7 +6,6 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 use common::{body_json, post_json, register};
-use dashachun::device::DeviceStore;
 
 const CLIENT_ID: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -220,25 +219,34 @@ async fn connect_gateway(
 #[sqlx::test]
 #[ignore]
 async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
-    let app = common::app(pool.clone());
+    let (devices, prefix) = common::test_device_store(pool.clone());
+    let app = dashachun::app(
+        common::test_state_with_devices(pool.clone(), None, devices),
+        common::auth_state(pool.clone()),
+    );
     let old_code = {
         let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
     let client_id = uuid::Uuid::parse_str(CLIENT_ID).unwrap();
-    DeviceStore::new(pool.clone())
-        .upsert(client_id, "aa:bb:cc:dd:ee:ff", "test-board")
+    // simulate expiry: both keys of the issued code are gone
+    let url = std::env::var("REDIS_URL").unwrap();
+    let mut conn = redis::Client::open(url)
+        .unwrap()
+        .get_multiplexed_async_connection()
         .await
         .unwrap();
-    sqlx::query(
-        "UPDATE devices SET activation_code_expires_at = now() - interval '1 minute' \
-         WHERE client_id = $1",
-    )
-    .bind(client_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    for key in [
+        format!("{prefix}:device:{client_id}"),
+        format!("{prefix}:code:{old_code}"),
+    ] {
+        redis::cmd("DEL")
+            .arg(key)
+            .query_async::<()>(&mut conn)
+            .await
+            .unwrap();
+    }
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent_id = create_agent(&pool, user_id).await;

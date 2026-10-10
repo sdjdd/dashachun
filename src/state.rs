@@ -139,7 +139,11 @@ mod tests {
             vad,
             tools,
             factories,
-            DeviceStore::new(pool),
+            DeviceStore::new(
+                pool,
+                redis::Client::open("redis://127.0.0.1:6379").unwrap(),
+                "state-test",
+            ),
         )
     }
 

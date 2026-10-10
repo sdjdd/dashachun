@@ -31,6 +31,10 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         auth: auth.clone(),
         server: server.clone(),
     });
+    let devices = routes::devices::routes().with_state(routes::devices::DevicesState {
+        auth: auth.clone(),
+        devices: server.devices.clone(),
+    });
     let router = Router::new()
         .route("/", get(async || "Hello, world!"))
         .nest("/gateway", routes::gateway::routes())
@@ -42,7 +46,7 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
             "/api/agents",
             routes::agents::routes().with_state(auth.clone()),
         )
-        .nest("/api/devices", routes::devices::routes().with_state(auth));
+        .nest("/api/devices", devices);
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
 }

@@ -38,8 +38,6 @@ CREATE TABLE devices (
     user_id                     BIGINT,
     agent_id                    BIGINT,
     token_hash                  TEXT,
-    activation_code             TEXT UNIQUE,
-    activation_code_expires_at  TIMESTAMPTZ,
     activated_at                TIMESTAMPTZ,
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at                TIMESTAMPTZ NOT NULL DEFAULT now()

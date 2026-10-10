@@ -56,6 +56,13 @@ async fn main() {
         tracing::error!(%err, "failed to connect to redis");
         std::process::exit(1);
     }
+    let redis = match redis::Client::open(redis_url.as_str()) {
+        Ok(client) => client,
+        Err(err) => {
+            tracing::error!(%err, "invalid REDIS_URL");
+            std::process::exit(1);
+        }
+    };
     let mut settings = match Settings::load(&pool).await {
         Ok(settings) => settings,
         Err(err) => {
@@ -125,7 +132,7 @@ async fn main() {
         vad,
         tools,
         agent_factory.clone(),
-        DeviceStore::new(pool),
+        DeviceStore::new(pool, redis, "act"),
     );
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();

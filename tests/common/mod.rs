@@ -56,14 +56,46 @@ pub fn auth_state(pool: PgPool) -> AuthState {
     }
 }
 
+/// A device store backed by the test Redis with a per-call unique key
+/// prefix, so concurrently running tests never share activation codes.
+/// Returns the prefix, so a test can manipulate the keys directly.
+pub fn test_device_store(pool: PgPool) -> (DeviceStore, String) {
+    let url = std::env::var("REDIS_URL")
+        .expect("REDIS_URL must be set for the DB-backed suites (redis:7 on 6379)");
+    let prefix = format!("act-test-{}", uuid::Uuid::new_v4().simple());
+    (
+        DeviceStore::new(pool, redis::Client::open(url).unwrap(), &prefix),
+        prefix,
+    )
+}
+
 pub fn test_state(pool: PgPool, websocket_url: Option<String>) -> ServerState {
-    test_state_with_registry(pool, websocket_url, ProviderRegistry::with_stubs())
+    let (devices, _) = test_device_store(pool.clone());
+    test_state_with_devices(pool, websocket_url, devices)
+}
+
+pub fn test_state_with_devices(
+    pool: PgPool,
+    websocket_url: Option<String>,
+    devices: DeviceStore,
+) -> ServerState {
+    test_state_with_registry_inner(pool, websocket_url, ProviderRegistry::with_stubs(), devices)
 }
 
 pub fn test_state_with_registry(
     pool: PgPool,
     websocket_url: Option<String>,
     registry: ProviderRegistry,
+) -> ServerState {
+    let (devices, _) = test_device_store(pool.clone());
+    test_state_with_registry_inner(pool, websocket_url, registry, devices)
+}
+
+fn test_state_with_registry_inner(
+    pool: PgPool,
+    websocket_url: Option<String>,
+    registry: ProviderRegistry,
+    devices: DeviceStore,
 ) -> ServerState {
     let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
     let tools = Arc::new(ToolRegistry::new(Vec::new()));
@@ -97,7 +129,7 @@ pub fn test_state_with_registry(
         vad,
         tools,
         Arc::new(ArcSwapOption::from_pointee(factory)),
-        DeviceStore::new(pool),
+        devices,
     )
 }
 

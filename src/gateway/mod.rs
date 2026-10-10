@@ -243,7 +243,11 @@ mod tests {
             vad,
             tools,
             Arc::new(ArcSwapOption::from_pointee(factory)),
-            DeviceStore::new(pool),
+            DeviceStore::new(
+                pool,
+                redis::Client::open("redis://127.0.0.1:6379").unwrap(),
+                "gateway-test",
+            ),
         );
         (state, Arc::new(NullAgent))
     }
