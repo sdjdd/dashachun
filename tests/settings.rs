@@ -13,14 +13,8 @@ async fn insert(pool: &PgPool, key: &str, value: serde_json::Value) {
 
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
-async fn load_reads_stored_sections(pool: PgPool) {
-    let llm = serde_json::json!({
-        "base_url": "http://localhost/v1",
-        "api_key": "k",
-        "model": "m",
-        "max_tokens": 512
-    });
-    insert(&pool, "llm", llm.clone()).await;
+async fn load_reads_stored_selections(pool: PgPool) {
+    insert(&pool, "llm_provider_id", serde_json::json!(7)).await;
     insert(
         &pool,
         "ota",
@@ -29,7 +23,7 @@ async fn load_reads_stored_sections(pool: PgPool) {
     .await;
 
     let settings = Settings::load(&pool).await.unwrap();
-    assert_eq!(settings.llm, Some(llm));
+    assert_eq!(settings.llm, Some(7));
     let ota = settings.ota.unwrap();
     assert_eq!(
         ota.websocket_url.as_deref(),
@@ -40,12 +34,11 @@ async fn load_reads_stored_sections(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires a running postgres; run with cargo test -- --ignored"]
-async fn load_keeps_a_config_invalid_row_raw(pool: PgPool) {
-    let llm = serde_json::json!({"base_url": "http://localhost/v1"});
-    insert(&pool, "llm", llm.clone()).await;
+async fn load_rejects_a_malformed_selection_row(pool: PgPool) {
+    insert(&pool, "asr_provider_id", serde_json::json!("not-an-id")).await;
 
-    let settings = Settings::load(&pool).await.unwrap();
-    assert_eq!(settings.llm, Some(llm));
+    let err = Settings::load(&pool).await.unwrap_err();
+    assert!(err.contains("asr_provider_id"), "unexpected error: {err}");
 }
 
 #[sqlx::test]

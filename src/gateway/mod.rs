@@ -194,7 +194,7 @@ mod tests {
     use crate::settings::OtaSettings;
     use crate::state::ServerState;
     use crate::vad::{SileroVadFactory, VadConfig};
-    use arc_swap::ArcSwap;
+    use arc_swap::ArcSwapOption;
 
     const HELLO: &str = r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":false,"aec":false}}"#;
 
@@ -211,6 +211,19 @@ mod tests {
         // free of Postgres.
         let pool =
             sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").expect("lazy pool");
+        let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
+        let tools = Arc::new(ToolRegistry::new(Vec::new()));
+        let factory = AgentFactory::assemble(
+            &ProviderRegistry::with_stubs(),
+            &ProviderSpec::stub(),
+            &ProviderSpec::stub(),
+            &ProviderSpec::stub(),
+            vad.clone(),
+            tools.clone(),
+            AgentStore::new(pool.clone()),
+            pool.clone(),
+        )
+        .unwrap();
         let state = ServerState::new(
             AppConfig {
                 server: ServerConfig {
@@ -226,19 +239,10 @@ mod tests {
                     activation_ttl_secs: 600,
                 },
             },
-            Arc::new(ArcSwap::from_pointee(
-                AgentFactory::assemble(
-                    &ProviderRegistry::with_stubs(),
-                    &ProviderSpec::stub(),
-                    &ProviderSpec::stub(),
-                    &ProviderSpec::stub(),
-                    Arc::new(SileroVadFactory::new(VadConfig::default())),
-                    Arc::new(ToolRegistry::new(Vec::new())),
-                    AgentStore::new(pool.clone()),
-                    pool.clone(),
-                )
-                .unwrap(),
-            )),
+            Arc::new(ProviderRegistry::with_stubs()),
+            vad,
+            tools,
+            Arc::new(ArcSwapOption::from_pointee(factory)),
             DeviceStore::new(pool),
         );
         (state, Arc::new(NullAgent))

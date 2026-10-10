@@ -2,16 +2,15 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 
 use dashachun::agent::tool::{GetDateTime, GetWeather};
 use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry};
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
-use dashachun::provider::asr::volc::KIND as VOLC_ASR;
-use dashachun::provider::llm::openai::KIND as OPENAI_LLM;
-use dashachun::provider::tts::volc::KIND as VOLC_TTS;
+use dashachun::error::AppError;
+use dashachun::provider::store::ProviderStore;
 use dashachun::provider::{ProviderRegistry, ProviderSpec};
 use dashachun::settings::Settings;
 use dashachun::state::ServerState;
@@ -52,46 +51,46 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let specs = match resolve_specs(&ProviderStore::new(pool.clone()), &settings).await {
+        Ok(specs) => specs,
+        Err(err) => {
+            tracing::error!(%err, "failed to load provider selections");
+            std::process::exit(1);
+        }
+    };
     let ota = settings.ota.unwrap_or_default();
 
-    let registry = ProviderRegistry::with_builtins();
-    let asr = provider_spec(
-        settings.asr.take(),
-        "asr",
-        VOLC_ASR,
-        "(base_url, api_key, resource_id)",
-    );
-    let llm = provider_spec(
-        settings.llm.take(),
-        "llm",
-        OPENAI_LLM,
-        "(base_url, api_key, model)",
-    );
-    let tts = provider_spec(
-        settings.tts.take(),
-        "tts",
-        VOLC_TTS,
-        "(base_url, api_key, speaker, resource_id)",
-    );
+    let registry = Arc::new(ProviderRegistry::with_builtins());
     let vad = Arc::new(SileroVadFactory::from_env());
     let tools = Arc::new(ToolRegistry::new(vec![
         Arc::new(GetWeather::new()),
         Arc::new(GetDateTime::new(ota.timezone_offset)),
     ]));
-    let agent_factory = match AgentFactory::assemble(
-        &registry,
-        &asr,
-        &llm,
-        &tts,
-        vad,
-        tools,
-        AgentStore::new(pool.clone()),
-        pool.clone(),
-    ) {
-        Ok(factory) => Arc::new(ArcSwap::from_pointee(factory)),
-        Err(err) => {
-            tracing::error!(%err, "invalid provider configuration");
-            std::process::exit(1);
+    let agent_factory = match specs {
+        Some((asr, llm, tts)) => match AgentFactory::assemble(
+            &registry,
+            &asr,
+            &llm,
+            &tts,
+            vad.clone(),
+            tools.clone(),
+            AgentStore::new(pool.clone()),
+            pool.clone(),
+        ) {
+            Ok(factory) => Arc::new(ArcSwapOption::from_pointee(factory)),
+            Err(err) => {
+                tracing::error!(
+                    %err,
+                    "provider configuration failed to build; starting without agents (fix via /api/providers)"
+                );
+                Arc::new(ArcSwapOption::empty())
+            }
+        },
+        None => {
+            tracing::warn!(
+                "no provider selected for every type yet; the gateway stays unavailable until /api/providers is configured"
+            );
+            Arc::new(ArcSwapOption::empty())
         }
     };
     let config = AppConfig {
@@ -101,7 +100,14 @@ async fn main() {
     };
     let auth_config = AuthConfig::from_env(database_url, session_secret);
     let auth = build_auth_state(auth_config, pool.clone());
-    let state = ServerState::new(config, agent_factory.clone(), DeviceStore::new(pool));
+    let state = ServerState::new(
+        config,
+        registry,
+        vad,
+        tools,
+        agent_factory.clone(),
+        DeviceStore::new(pool),
+    );
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = dashachun::app(state, auth);
@@ -119,7 +125,9 @@ async fn main() {
     });
 
     dashachun::serve(listener, app, shutdown_rx, grace).await;
-    agent_factory.load_full().shutdown().await;
+    if let Some(factory) = agent_factory.load_full() {
+        factory.shutdown().await;
+    }
     tracing::info!("server stopped");
 }
 
@@ -150,24 +158,39 @@ fn build_auth_state(config: AuthConfig, pool: sqlx::PgPool) -> AuthState {
     }
 }
 
-fn provider_spec(
-    row: Option<serde_json::Value>,
-    stage: &str,
-    kind: &str,
-    fields: &str,
-) -> ProviderSpec {
-    ProviderSpec::new(
-        kind,
-        match row {
-            Some(config) => config,
-            None => missing_provider(stage, fields),
-        },
-    )
+/// Resolves the three type selections into provider specs; `None` means
+/// some type has no selection (or its row vanished) — the server starts
+/// without a generation and the setup completes via /api/providers.
+async fn resolve_specs(
+    store: &ProviderStore,
+    settings: &Settings,
+) -> Result<Option<(ProviderSpec, ProviderSpec, ProviderSpec)>, AppError> {
+    let Some(asr) = type_spec(store, settings.asr).await? else {
+        return Ok(None);
+    };
+    let Some(llm) = type_spec(store, settings.llm).await? else {
+        return Ok(None);
+    };
+    let Some(tts) = type_spec(store, settings.tts).await? else {
+        return Ok(None);
+    };
+    Ok(Some((asr, llm, tts)))
 }
 
-fn missing_provider(stage: &str, fields: &str) -> ! {
-    tracing::error!("{stage} is not configured: insert the \"{stage}\" settings row {fields}");
-    std::process::exit(1);
+async fn type_spec(
+    store: &ProviderStore,
+    provider: Option<i64>,
+) -> Result<Option<ProviderSpec>, AppError> {
+    let Some(id) = provider else {
+        return Ok(None);
+    };
+    match store.find(id).await? {
+        Some(record) => Ok(Some(ProviderSpec::new(record.kind, record.config))),
+        None => {
+            tracing::error!(id, "selected provider row is missing");
+            Ok(None)
+        }
+    }
 }
 
 async fn shutdown_on_signal() {

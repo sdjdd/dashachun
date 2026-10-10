@@ -5,14 +5,35 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-const LLM_KEY: &str = "llm";
-const ASR_KEY: &str = "asr";
-const TTS_KEY: &str = "tts";
+const ASR_PROVIDER_ID_KEY: &str = "asr_provider_id";
+const LLM_PROVIDER_ID_KEY: &str = "llm_provider_id";
+const TTS_PROVIDER_ID_KEY: &str = "tts_provider_id";
 const OTA_KEY: &str = "ota";
 const SECURITY_KEY: &str = "security";
 
 const SESSION_SECRET_BYTES: usize = 64;
 const MIN_SESSION_SECRET_LEN: usize = 64;
+
+/// The `providers` catalog row a stage uses, referenced by its `id` (stable
+/// across renames; unique per row). The `{asr,llm,tts}_provider_id` settings
+/// rows hold this id; activating a provider rewrites its type's row.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProviderSelections {
+    pub asr: Option<i64>,
+    pub llm: Option<i64>,
+    pub tts: Option<i64>,
+}
+
+impl ProviderSelections {
+    pub fn selected(&self, r#type: &str) -> Option<i64> {
+        match r#type {
+            "asr" => self.asr,
+            "llm" => self.llm,
+            "tts" => self.tts,
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OtaSettings {
@@ -49,9 +70,9 @@ impl fmt::Debug for SecuritySettings {
 
 #[derive(Default)]
 pub struct Settings {
-    pub llm: Option<serde_json::Value>,
-    pub asr: Option<serde_json::Value>,
-    pub tts: Option<serde_json::Value>,
+    pub asr: Option<i64>,
+    pub llm: Option<i64>,
+    pub tts: Option<i64>,
     pub ota: Option<OtaSettings>,
     session_secret: Option<String>,
 }
@@ -59,9 +80,9 @@ pub struct Settings {
 impl fmt::Debug for Settings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Settings")
-            .field("llm", &self.llm.as_ref().map(|_| "<config>"))
-            .field("asr", &self.asr.as_ref().map(|_| "<config>"))
-            .field("tts", &self.tts.as_ref().map(|_| "<config>"))
+            .field("asr", &self.asr)
+            .field("llm", &self.llm)
+            .field("tts", &self.tts)
             .field("ota", &self.ota)
             .field(
                 "session_secret",
@@ -81,9 +102,15 @@ impl Settings {
         let mut settings = Self::default();
         for (key, value) in rows {
             match key.as_str() {
-                LLM_KEY => settings.llm = Some(value),
-                ASR_KEY => settings.asr = Some(value),
-                TTS_KEY => settings.tts = Some(value),
+                ASR_PROVIDER_ID_KEY => {
+                    settings.asr = Some(parse_row::<i64>(ASR_PROVIDER_ID_KEY, value)?)
+                }
+                LLM_PROVIDER_ID_KEY => {
+                    settings.llm = Some(parse_row::<i64>(LLM_PROVIDER_ID_KEY, value)?)
+                }
+                TTS_PROVIDER_ID_KEY => {
+                    settings.tts = Some(parse_row::<i64>(TTS_PROVIDER_ID_KEY, value)?)
+                }
                 OTA_KEY => settings.ota = Some(parse_row(OTA_KEY, value)?),
                 SECURITY_KEY => {
                     settings.session_secret =
@@ -122,6 +149,54 @@ impl Settings {
         self.session_secret = Some(secret.clone());
         Ok(secret)
     }
+}
+
+/// Stores a type's provider selection — the `activate` path of the
+/// provider admin API. The value is the selected provider's id (a JSONB
+/// number, stable across renames).
+pub async fn set_provider_selection(pool: &PgPool, r#type: &str, id: i64) -> Result<(), String> {
+    let key = provider_key(r#type).ok_or_else(|| format!("unknown provider type \"{type}\""))?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, to_jsonb($2::bigint), now()) \
+         ON CONFLICT (key) DO UPDATE SET value = to_jsonb($2::bigint), updated_at = now()",
+    )
+    .bind(key)
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(|err| format!("failed to store the {type} provider selection: {err}"))?;
+    Ok(())
+}
+
+fn provider_key(r#type: &str) -> Option<&'static str> {
+    match r#type {
+        "asr" => Some(ASR_PROVIDER_ID_KEY),
+        "llm" => Some(LLM_PROVIDER_ID_KEY),
+        "tts" => Some(TTS_PROVIDER_ID_KEY),
+        _ => None,
+    }
+}
+
+/// Reads just the three type selections (as provider ids), for resolving
+/// the generation to assemble.
+pub async fn load_provider_selections(pool: &PgPool) -> Result<ProviderSelections, String> {
+    let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+        "SELECT key, value FROM settings WHERE key IN ('asr_provider_id', 'llm_provider_id', 'tts_provider_id')",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|err| format!("failed to load provider selections: {err}"))?;
+    let mut selections = ProviderSelections::default();
+    for (key, value) in rows {
+        let id = parse_row::<i64>(&key, value)?;
+        match key.as_str() {
+            ASR_PROVIDER_ID_KEY => selections.asr = Some(id),
+            LLM_PROVIDER_ID_KEY => selections.llm = Some(id),
+            TTS_PROVIDER_ID_KEY => selections.tts = Some(id),
+            _ => {}
+        }
+    }
+    Ok(selections)
 }
 
 fn parse_row<T: serde::de::DeserializeOwned>(

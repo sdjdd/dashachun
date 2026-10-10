@@ -47,7 +47,13 @@ async fn handle_device_connect(
         }
     };
 
-    let factory = state.agent_factory();
+    let Some(factory) = state.agent_factory() else {
+        warn!(
+            client_id,
+            "gateway rejected: no provider generation configured"
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let agent = match factory.build(&record).await {
         Ok(agent) => agent,
         Err(err) => {

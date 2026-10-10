@@ -87,7 +87,7 @@ impl VolcAsr {
     }
 }
 
-pub const KIND: &str = "volc";
+pub const KIND: &str = "volcengine";
 
 #[derive(Clone, Deserialize)]
 pub struct VolcAsrConfig {

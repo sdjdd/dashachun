@@ -101,14 +101,37 @@ CREATE TABLE memory_entries (
     UNIQUE (user_id, agent_id, mem_no)
 );
 
--- Runtime settings: one row per section (`llm`/`asr`/`tts`/`ota`/`security`),
--- `value` is the typed JSON of the matching struct in `src/settings.rs`. This
--- table is the single source for these sections — no env fallback (boot-level
--- items like DATABASE_URL/BIND_ADDR stay in env); the `security` row is
--- written back on every boot (generated on first run), so the values the web
--- wizard will manage live here.
+-- Runtime settings: one row per section
+-- (`{asr,llm,tts}_provider_id`/`ota`/`security`), `value` is the typed JSON
+-- of the matching struct in `src/settings.rs`. This table is the single
+-- source for these sections — no env fallback (boot-level items like
+-- DATABASE_URL/BIND_ADDR stay in env); the `security` row is written back
+-- on every boot (generated on first run), so the values the web wizard will
+-- manage live here. The `{type}_provider_id` rows do not carry provider
+-- configs; they select which `providers` row each type uses (the row id as
+-- a JSONB number) — activating a provider rewrites its type's row.
 CREATE TABLE settings (
     key        TEXT PRIMARY KEY,
     value      JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Provider catalog: one row per configured provider instance, identified
+-- by UNIQUE (type, name) — e.g. type=tts, name=volcengine. `type` is what
+-- the pipeline stage consumes (asr/llm/tts) and `kind` selects the
+-- implementation through the provider registry; `config` is the raw JSON
+-- the matching builder parses (api keys included). Both are validated in
+-- the app layer on write (the type must be one of asr/llm/tts and the
+-- kind must be registered for it). Which provider each type uses is NOT
+-- recorded here — the `{type}_provider_id` settings rows hold that
+-- selection. Integrity is enforced in the app layer; no foreign keys.
+CREATE TABLE providers (
+    id         BIGSERIAL PRIMARY KEY,
+    type       TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    config     JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (type, name)
 );

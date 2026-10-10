@@ -1,45 +1,66 @@
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
-use tokio::sync::watch;
+use arc_swap::ArcSwapOption;
+use tokio::sync::{Mutex, watch};
 
-use crate::agent::AgentFactory;
+use crate::agent::{AgentFactory, ToolRegistry};
 use crate::config::AppConfig;
 use crate::device::DeviceStore;
+use crate::provider::ProviderRegistry;
+use crate::vad::VadFactory;
 
 #[derive(Clone)]
 pub struct ServerState {
     pub config: AppConfig,
-    factories: Arc<ArcSwap<AgentFactory>>,
+    pub registry: Arc<ProviderRegistry>,
+    pub vad: Arc<dyn VadFactory>,
+    pub tools: Arc<ToolRegistry>,
+    factories: Arc<ArcSwapOption<AgentFactory>>,
+    pub swap_lock: Arc<Mutex<()>>,
     pub devices: DeviceStore,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
 
 impl ServerState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AppConfig,
-        factories: Arc<ArcSwap<AgentFactory>>,
+        registry: Arc<ProviderRegistry>,
+        vad: Arc<dyn VadFactory>,
+        tools: Arc<ToolRegistry>,
+        factories: Arc<ArcSwapOption<AgentFactory>>,
         devices: DeviceStore,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             config,
+            registry,
+            vad,
+            tools,
             factories,
+            swap_lock: Arc::new(Mutex::new(())),
             devices,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
     }
 
-    pub fn agent_factory(&self) -> Arc<AgentFactory> {
+    /// A snapshot of the current agent generation — `None` until a provider
+    /// is selected for every type; the gateway rejects devices with 503
+    /// while it is.
+    pub fn agent_factory(&self) -> Option<Arc<AgentFactory>> {
         self.factories.load_full()
     }
 
+    /// Publishes a new generation. Callers hold `swap_lock` across the
+    /// write-then-swap sequence so activations serialize.
     pub fn swap_agent_factory(&self, next: Arc<AgentFactory>) {
-        let previous = self.factories.swap(next);
+        let previous = self.factories.swap(Some(next));
         tracing::info!("agent factory swapped");
-        previous.drain_when_orphaned();
+        if let Some(previous) = previous {
+            previous.drain_when_orphaned();
+        }
     }
 
     pub fn shutdown_sender(&self) -> Arc<watch::Sender<bool>> {
@@ -54,54 +75,91 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{AgentStore, ToolRegistry};
+    use crate::agent::AgentStore;
     use crate::config::{DeviceConfig, ServerConfig};
-    use crate::provider::{ProviderRegistry, ProviderSpec};
+    use crate::provider::ProviderSpec;
     use crate::settings::OtaSettings;
     use crate::vad::{SileroVadFactory, VadConfig};
 
-    fn stub_factory() -> AgentFactory {
-        let pool = sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").unwrap();
-        AgentFactory::assemble(
-            &ProviderRegistry::with_stubs(),
-            &ProviderSpec::stub(),
-            &ProviderSpec::stub(),
-            &ProviderSpec::stub(),
+    fn test_config() -> AppConfig {
+        AppConfig {
+            server: ServerConfig {
+                bind_addr: "127.0.0.1:0".into(),
+                playback_prebuffer_ms: 180,
+                shutdown_grace_ms: 5000,
+            },
+            ota: OtaSettings {
+                websocket_url: None,
+                timezone_offset: 480,
+            },
+            device: DeviceConfig {
+                activation_ttl_secs: 600,
+            },
+        }
+    }
+
+    fn stub_parts() -> (
+        Arc<ProviderRegistry>,
+        Arc<dyn VadFactory>,
+        Arc<ToolRegistry>,
+    ) {
+        (
+            Arc::new(ProviderRegistry::with_stubs()),
             Arc::new(SileroVadFactory::new(VadConfig::default())),
             Arc::new(ToolRegistry::new(Vec::new())),
+        )
+    }
+
+    fn stub_factory() -> AgentFactory {
+        let pool = sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").unwrap();
+        let (registry, vad, tools) = stub_parts();
+        AgentFactory::assemble(
+            &registry,
+            &ProviderSpec::stub(),
+            &ProviderSpec::stub(),
+            &ProviderSpec::stub(),
+            vad,
+            tools,
             AgentStore::new(pool.clone()),
-            pool.clone(),
+            pool,
         )
         .unwrap()
     }
 
-    fn test_state() -> ServerState {
+    fn test_state(generation: Option<AgentFactory>) -> ServerState {
         let pool = sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").unwrap();
+        let (registry, vad, tools) = stub_parts();
+        let factories = match generation {
+            Some(factory) => Arc::new(ArcSwapOption::from_pointee(factory)),
+            None => Arc::new(ArcSwapOption::empty()),
+        };
         ServerState::new(
-            AppConfig {
-                server: ServerConfig {
-                    bind_addr: "127.0.0.1:0".into(),
-                    playback_prebuffer_ms: 180,
-                    shutdown_grace_ms: 5000,
-                },
-                ota: OtaSettings {
-                    websocket_url: None,
-                    timezone_offset: 480,
-                },
-                device: DeviceConfig {
-                    activation_ttl_secs: 600,
-                },
-            },
-            Arc::new(ArcSwap::from_pointee(stub_factory())),
+            test_config(),
+            registry,
+            vad,
+            tools,
+            factories,
             DeviceStore::new(pool),
         )
     }
 
     #[tokio::test]
     async fn swap_publishes_the_new_generation() {
-        let state = test_state();
+        let state = test_state(Some(stub_factory()));
+        let before = state.agent_factory().unwrap();
         let next = Arc::new(stub_factory());
         state.swap_agent_factory(next.clone());
-        assert!(Arc::ptr_eq(&state.agent_factory(), &next));
+        let after = state.agent_factory().unwrap();
+        assert!(Arc::ptr_eq(&after, &next));
+        assert!(!Arc::ptr_eq(&after, &before));
+    }
+
+    #[tokio::test]
+    async fn empty_state_publishes_none_until_swapped() {
+        let state = test_state(None);
+        assert!(state.agent_factory().is_none());
+        let next = Arc::new(stub_factory());
+        state.swap_agent_factory(next.clone());
+        assert!(Arc::ptr_eq(&state.agent_factory().unwrap(), &next));
     }
 }

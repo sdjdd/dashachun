@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
 use axum_extra::extract::cookie::Key;
@@ -46,6 +46,27 @@ pub fn auth_state(pool: PgPool) -> AuthState {
 }
 
 pub fn test_state(pool: PgPool, websocket_url: Option<String>) -> ServerState {
+    test_state_with_registry(pool, websocket_url, ProviderRegistry::with_stubs())
+}
+
+pub fn test_state_with_registry(
+    pool: PgPool,
+    websocket_url: Option<String>,
+    registry: ProviderRegistry,
+) -> ServerState {
+    let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
+    let tools = Arc::new(ToolRegistry::new(Vec::new()));
+    let factory = AgentFactory::assemble(
+        &registry,
+        &ProviderSpec::stub(),
+        &ProviderSpec::stub(),
+        &ProviderSpec::stub(),
+        vad.clone(),
+        tools.clone(),
+        AgentStore::new(pool.clone()),
+        pool.clone(),
+    )
+    .unwrap();
     ServerState::new(
         AppConfig {
             server: ServerConfig {
@@ -61,27 +82,42 @@ pub fn test_state(pool: PgPool, websocket_url: Option<String>) -> ServerState {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(ArcSwap::from_pointee(
-            AgentFactory::assemble(
-                &ProviderRegistry::with_stubs(),
-                &ProviderSpec::stub(),
-                &ProviderSpec::stub(),
-                &ProviderSpec::stub(),
-                Arc::new(SileroVadFactory::new(VadConfig::default())),
-                Arc::new(ToolRegistry::new(Vec::new())),
-                AgentStore::new(pool.clone()),
-                pool.clone(),
-            )
-            .unwrap(),
-        )),
+        Arc::new(registry),
+        vad,
+        tools,
+        Arc::new(ArcSwapOption::from_pointee(factory)),
         DeviceStore::new(pool),
     )
 }
 
+/// The full app with a Host-derived gateway URL, plus the state handle for
+/// assertions on the published agent generation.
+pub fn app_with_state(
+    pool: PgPool,
+) -> (
+    tower_http::normalize_path::NormalizePath<axum::Router>,
+    ServerState,
+) {
+    app_with_registry(pool, ProviderRegistry::with_stubs())
+}
+
+/// Like [`app_with_state`], but with a caller-supplied provider registry
+/// (e.g. builtins plus stubs) for tests that exercise real provider kinds.
+pub fn app_with_registry(
+    pool: PgPool,
+    registry: ProviderRegistry,
+) -> (
+    tower_http::normalize_path::NormalizePath<axum::Router>,
+    ServerState,
+) {
+    let state = test_state_with_registry(pool.clone(), None, registry);
+    let auth = auth_state(pool);
+    (dashachun::app(state.clone(), auth), state)
+}
+
 /// The full app with a Host-derived gateway URL.
 pub fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
-    let auth = auth_state(pool.clone());
-    dashachun::app(test_state(pool, None), auth)
+    app_with_state(pool).0
 }
 
 pub fn post_json(path: &str, body: &str, cookie: Option<String>) -> Request<Body> {

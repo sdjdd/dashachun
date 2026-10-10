@@ -1,6 +1,6 @@
-pub mod volc;
+pub mod volcengine;
 
-pub use volc::VolcTts;
+pub use volcengine::VolcTts;
 
 use std::sync::Arc;
 

@@ -25,11 +25,16 @@ pub mod state;
 pub mod vad;
 
 pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
+    let providers = routes::providers::routes().with_state(routes::providers::ProvidersState {
+        auth: auth.clone(),
+        server: server.clone(),
+    });
     let router = Router::new()
         .route("/", get(async || "Hello, world!"))
         .nest("/gateway", routes::gateway::routes())
         .nest("/api/ota", routes::ota::routes())
         .with_state(server)
+        .nest("/api/providers", providers)
         .nest("/api/auth", routes::auth::routes().with_state(auth.clone()))
         .nest(
             "/api/agents",

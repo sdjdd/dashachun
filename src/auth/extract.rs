@@ -1,4 +1,4 @@
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::SignedCookieJar;
 use uuid::Uuid;
@@ -13,13 +13,15 @@ pub struct AuthUser {
     pub session_id: Uuid,
 }
 
-impl FromRequestParts<AuthState> for AuthUser {
+impl<S> FromRequestParts<S> for AuthUser
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
     type Rejection = AppError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AuthState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let state = AuthState::from_ref(state);
         let jar = SignedCookieJar::from_headers(&parts.headers, state.key.clone());
         let session_id = jar
             .get(&state.cookie_name)
