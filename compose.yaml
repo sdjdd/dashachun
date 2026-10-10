@@ -1,0 +1,55 @@
+name: dsc
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: dsc-pg
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: dsc
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dsc"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  valkey:
+    image: valkey/valkey:8
+    container_name: dsc-valkey
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey-data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  rustfs:
+    image: rustfs/rustfs:1.0.1
+    container_name: dsc-rustfs
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health && curl -fsS http://127.0.0.1:9001/rustfs/console/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  pg-data:
+  valkey-data:
+  rustfs-data:
