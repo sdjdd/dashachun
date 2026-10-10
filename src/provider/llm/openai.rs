@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_openai::Client;
@@ -11,11 +13,14 @@ use async_openai::types::chat::{
     ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
 };
 use futures_util::StreamExt;
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
+use crate::provider::ProviderRegistry;
 
 fn parse_reasoning_effort(
     value: &str,
@@ -35,13 +40,43 @@ fn parse_reasoning_effort(
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Deserialize)]
 pub struct OpenAiConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default)]
     pub reasoning_effort: Option<String>,
+}
+
+impl fmt::Debug for OpenAiConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenAiConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .finish()
+    }
+}
+
+pub const KIND: &str = "openai";
+
+pub fn register(registry: &mut ProviderRegistry) {
+    registry.register_llm(KIND, build);
+}
+
+fn build(config: &Value) -> Result<Arc<dyn Llm>, String> {
+    let config: OpenAiConfig = serde_json::from_value(config.clone())
+        .map_err(|err| format!("invalid openai llm config: {err}"))?;
+    if let Some(effort) = &config.reasoning_effort {
+        parse_reasoning_effort(effort)
+            .map_err(|err| format!("invalid openai llm config: {err}"))?;
+    }
+    Ok(Arc::new(OpenAiLlm::new(config)))
 }
 
 pub struct OpenAiLlm {

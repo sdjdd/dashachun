@@ -1,6 +1,23 @@
-mod openai;
+pub mod openai;
 
 pub use openai::{OpenAiConfig, OpenAiLlm};
+
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use crate::provider::ProviderRegistry;
+
+pub const STUB_KIND: &str = "stub";
+
+pub fn register_stub(registry: &mut ProviderRegistry) {
+    registry.register_llm(STUB_KIND, build_stub);
+}
+
+fn build_stub(config: &Value) -> Result<Arc<dyn Llm>, String> {
+    let reply = config.get("reply").and_then(Value::as_str).unwrap_or("");
+    Ok(Arc::new(StubLlm::new(reply)))
+}
 
 use tokio_util::sync::CancellationToken;
 

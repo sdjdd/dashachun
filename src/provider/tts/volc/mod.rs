@@ -1,9 +1,12 @@
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -13,7 +16,8 @@ mod pool;
 mod protocol;
 
 use crate::agent::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
-use crate::audio::DownlinkAudio;
+use crate::audio::{DOWNLINK, DownlinkAudio};
+use crate::provider::ProviderRegistry;
 use pool::{ConnPool, ConnSpec, PoolTiming};
 use protocol::Message as TtsMessage;
 
@@ -133,6 +137,45 @@ impl VolcTts {
         )
         .unwrap()
     }
+}
+
+pub const KIND: &str = "volc";
+
+#[derive(Clone, Deserialize)]
+pub struct VolcTtsConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub resource_id: String,
+    pub speaker: String,
+}
+
+impl fmt::Debug for VolcTtsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VolcTtsConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("resource_id", &self.resource_id)
+            .field("speaker", &self.speaker)
+            .finish()
+    }
+}
+
+pub fn register(registry: &mut ProviderRegistry) {
+    registry.register_tts(KIND, build);
+}
+
+fn build(config: &Value) -> Result<Arc<dyn Tts>, String> {
+    let config: VolcTtsConfig = serde_json::from_value(config.clone())
+        .map_err(|err| format!("invalid volc tts config: {err}"))?;
+    let tts = VolcTts::new(
+        config.base_url,
+        config.api_key,
+        config.resource_id,
+        config.speaker,
+        DOWNLINK,
+    )
+    .map_err(|err| format!("invalid volc tts config: {err}"))?;
+    Ok(Arc::new(tts))
 }
 
 #[async_trait]

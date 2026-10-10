@@ -1,6 +1,23 @@
-mod volc;
+pub mod volc;
 
 pub use volc::VolcAsr;
+
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use crate::provider::ProviderRegistry;
+
+pub const STUB_KIND: &str = "stub";
+
+pub fn register_stub(registry: &mut ProviderRegistry) {
+    registry.register_asr(STUB_KIND, build_stub);
+}
+
+fn build_stub(config: &Value) -> Result<Arc<dyn Asr>, String> {
+    let text = config.get("text").and_then(Value::as_str).unwrap_or("你好");
+    Ok(Arc::new(StubAsr::new(text)))
+}
 
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;

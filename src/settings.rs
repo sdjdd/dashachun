@@ -14,65 +14,6 @@ const SECURITY_KEY: &str = "security";
 const SESSION_SECRET_BYTES: usize = 64;
 const MIN_SESSION_SECRET_LEN: usize = 64;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct LlmSettings {
-    pub base_url: String,
-    pub api_key: String,
-    pub model: String,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
-}
-
-impl fmt::Debug for LlmSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LlmSettings")
-            .field("base_url", &self.base_url)
-            .field("api_key", &"<redacted>")
-            .field("model", &self.model)
-            .field("max_tokens", &self.max_tokens)
-            .field("reasoning_effort", &self.reasoning_effort)
-            .finish()
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AsrSettings {
-    pub base_url: String,
-    pub api_key: String,
-    pub resource_id: String,
-}
-
-impl fmt::Debug for AsrSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AsrSettings")
-            .field("base_url", &self.base_url)
-            .field("api_key", &"<redacted>")
-            .field("resource_id", &self.resource_id)
-            .finish()
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct TtsSettings {
-    pub base_url: String,
-    pub api_key: String,
-    pub speaker: String,
-    pub resource_id: String,
-}
-
-impl fmt::Debug for TtsSettings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TtsSettings")
-            .field("base_url", &self.base_url)
-            .field("api_key", &"<redacted>")
-            .field("speaker", &self.speaker)
-            .field("resource_id", &self.resource_id)
-            .finish()
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OtaSettings {
     pub websocket_url: Option<String>,
@@ -108,9 +49,9 @@ impl fmt::Debug for SecuritySettings {
 
 #[derive(Default)]
 pub struct Settings {
-    pub llm: Option<LlmSettings>,
-    pub asr: Option<AsrSettings>,
-    pub tts: Option<TtsSettings>,
+    pub llm: Option<serde_json::Value>,
+    pub asr: Option<serde_json::Value>,
+    pub tts: Option<serde_json::Value>,
     pub ota: Option<OtaSettings>,
     session_secret: Option<String>,
 }
@@ -118,9 +59,9 @@ pub struct Settings {
 impl fmt::Debug for Settings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Settings")
-            .field("llm", &self.llm)
-            .field("asr", &self.asr)
-            .field("tts", &self.tts)
+            .field("llm", &self.llm.as_ref().map(|_| "<config>"))
+            .field("asr", &self.asr.as_ref().map(|_| "<config>"))
+            .field("tts", &self.tts.as_ref().map(|_| "<config>"))
             .field("ota", &self.ota)
             .field(
                 "session_secret",
@@ -140,9 +81,9 @@ impl Settings {
         let mut settings = Self::default();
         for (key, value) in rows {
             match key.as_str() {
-                LLM_KEY => settings.llm = Some(parse_row(LLM_KEY, value)?),
-                ASR_KEY => settings.asr = Some(parse_row(ASR_KEY, value)?),
-                TTS_KEY => settings.tts = Some(parse_row(TTS_KEY, value)?),
+                LLM_KEY => settings.llm = Some(value),
+                ASR_KEY => settings.asr = Some(value),
+                TTS_KEY => settings.tts = Some(value),
                 OTA_KEY => settings.ota = Some(parse_row(OTA_KEY, value)?),
                 SECURITY_KEY => {
                     settings.session_secret =
@@ -203,49 +144,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn llm_json_defaults_optional_fields() {
-        let llm: LlmSettings = serde_json::from_value(
-            serde_json::json!({"base_url": "b", "api_key": "k", "model": "m"}),
-        )
-        .unwrap();
-        assert_eq!(llm.base_url, "b");
-        assert_eq!(llm.max_tokens, None);
-        assert_eq!(llm.reasoning_effort, None);
-    }
-
-    #[test]
-    fn tts_json_requires_the_resource_id() {
-        let err = serde_json::from_value::<TtsSettings>(serde_json::json!({
-            "base_url": "wss://tts",
-            "api_key": "k",
-            "speaker": "s"
-        }))
-        .unwrap_err();
-        assert!(err.to_string().contains("resource_id"), "{err}");
-    }
-
-    #[test]
-    fn asr_json_requires_the_resource_id() {
-        let err = serde_json::from_value::<AsrSettings>(serde_json::json!({
-            "base_url": "wss://asr",
-            "api_key": "k"
-        }))
-        .unwrap_err();
-        assert!(err.to_string().contains("resource_id"), "{err}");
-    }
-
-    #[test]
     fn ota_json_defaults_timezone_offset() {
         let ota: OtaSettings = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(ota.websocket_url, None);
         assert_eq!(ota.timezone_offset, 480);
-    }
-
-    #[test]
-    fn llm_json_requires_required_fields() {
-        let err = serde_json::from_value::<LlmSettings>(serde_json::json!({"base_url": "b"}))
-            .unwrap_err();
-        assert!(err.to_string().contains("api_key"), "{err}");
     }
 
     #[test]

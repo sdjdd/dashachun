@@ -1,6 +1,10 @@
+use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -10,6 +14,7 @@ use tracing::{debug, warn};
 mod protocol;
 
 use crate::agent::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
+use crate::provider::ProviderRegistry;
 use protocol::Response;
 
 const SAMPLE_RATE: usize = 16_000;
@@ -80,6 +85,39 @@ impl VolcAsr {
         debug!("asr websocket connected");
         Ok(socket)
     }
+}
+
+pub const KIND: &str = "volc";
+
+#[derive(Clone, Deserialize)]
+pub struct VolcAsrConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub resource_id: String,
+}
+
+impl fmt::Debug for VolcAsrConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VolcAsrConfig")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("resource_id", &self.resource_id)
+            .finish()
+    }
+}
+
+pub fn register(registry: &mut ProviderRegistry) {
+    registry.register_asr(KIND, build);
+}
+
+fn build(config: &Value) -> Result<Arc<dyn Asr>, String> {
+    let config: VolcAsrConfig = serde_json::from_value(config.clone())
+        .map_err(|err| format!("invalid volc asr config: {err}"))?;
+    Ok(Arc::new(VolcAsr::new(
+        config.base_url,
+        config.api_key,
+        config.resource_id,
+    )))
 }
 
 type Connection =

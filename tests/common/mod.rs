@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use axum::body::{Body, to_bytes};
 use axum::http::Request;
 use axum_extra::extract::cookie::Key;
@@ -21,9 +22,7 @@ use dashachun::agent::{
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
-use dashachun::provider::asr::StubAsr;
-use dashachun::provider::llm::StubLlm;
-use dashachun::provider::tts::StubTts;
+use dashachun::provider::{ProviderRegistry, ProviderSpec};
 use dashachun::settings::OtaSettings;
 use dashachun::state::ServerState;
 use dashachun::vad::{SileroVadFactory, VadConfig};
@@ -62,14 +61,18 @@ pub fn test_state(pool: PgPool, websocket_url: Option<String>) -> ServerState {
                 activation_ttl_secs: 600,
             },
         },
-        Arc::new(AgentFactory::new(
-            Arc::new(StubAsr::default()),
-            Arc::new(StubLlm::default()),
-            Arc::new(StubTts),
-            Arc::new(SileroVadFactory::new(VadConfig::default())),
-            Arc::new(ToolRegistry::new(Vec::new())),
-            AgentStore::new(pool.clone()),
-            pool.clone(),
+        Arc::new(ArcSwap::from_pointee(
+            AgentFactory::assemble(
+                &ProviderRegistry::with_stubs(),
+                &ProviderSpec::stub(),
+                &ProviderSpec::stub(),
+                &ProviderSpec::stub(),
+                Arc::new(SileroVadFactory::new(VadConfig::default())),
+                Arc::new(ToolRegistry::new(Vec::new())),
+                AgentStore::new(pool.clone()),
+                pool.clone(),
+            )
+            .unwrap(),
         )),
         DeviceStore::new(pool),
     )

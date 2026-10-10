@@ -189,12 +189,12 @@ mod tests {
     };
     use crate::config::{AppConfig, DeviceConfig, ServerConfig};
     use crate::device::DeviceStore;
-    use crate::provider::asr::StubAsr;
-    use crate::provider::llm::StubLlm;
-    use crate::provider::tts::StubTts;
+    use crate::provider::{ProviderRegistry, ProviderSpec};
+
     use crate::settings::OtaSettings;
     use crate::state::ServerState;
     use crate::vad::{SileroVadFactory, VadConfig};
+    use arc_swap::ArcSwap;
 
     const HELLO: &str = r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":false,"aec":false}}"#;
 
@@ -226,14 +226,18 @@ mod tests {
                     activation_ttl_secs: 600,
                 },
             },
-            Arc::new(AgentFactory::new(
-                Arc::new(StubAsr::default()),
-                Arc::new(StubLlm::default()),
-                Arc::new(StubTts),
-                Arc::new(SileroVadFactory::new(VadConfig::default())),
-                Arc::new(ToolRegistry::new(Vec::new())),
-                AgentStore::new(pool.clone()),
-                pool.clone(),
+            Arc::new(ArcSwap::from_pointee(
+                AgentFactory::assemble(
+                    &ProviderRegistry::with_stubs(),
+                    &ProviderSpec::stub(),
+                    &ProviderSpec::stub(),
+                    &ProviderSpec::stub(),
+                    Arc::new(SileroVadFactory::new(VadConfig::default())),
+                    Arc::new(ToolRegistry::new(Vec::new())),
+                    AgentStore::new(pool.clone()),
+                    pool.clone(),
+                )
+                .unwrap(),
             )),
             DeviceStore::new(pool),
         );

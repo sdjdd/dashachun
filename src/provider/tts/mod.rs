@@ -1,6 +1,22 @@
-mod volc;
+pub mod volc;
 
 pub use volc::VolcTts;
+
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use crate::provider::ProviderRegistry;
+
+pub const STUB_KIND: &str = "stub";
+
+pub fn register_stub(registry: &mut ProviderRegistry) {
+    registry.register_tts(STUB_KIND, build_stub);
+}
+
+fn build_stub(_config: &Value) -> Result<Arc<dyn Tts>, String> {
+    Ok(Arc::new(StubTts))
+}
 
 use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;

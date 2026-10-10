@@ -3,4 +3,7 @@
 
 pub mod asr;
 pub mod llm;
+pub mod registry;
 pub mod tts;
+
+pub use registry::{ProviderRegistry, ProviderSpec};

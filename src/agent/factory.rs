@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use sqlx::PgPool;
 
@@ -9,13 +10,16 @@ use super::tool::{MemoryAdd, MemoryDelete, MemoryUpdate};
 use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolRegistry, Tts};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
+use crate::provider::{ProviderRegistry, ProviderSpec};
 use crate::vad::VadFactory;
 
-/// Shared, expensive provider bundle plus the per-device configuration source.
-/// One factory lives for the process lifetime; it builds a fresh, cheap
-/// [`CompositeAgent`] per connection with the device's persona prompt, a
-/// transcript sink attributed to the device, and the conversation memory
-/// preloaded from the same device's transcript rows.
+/// One generation of the shared provider bundle plus the per-device
+/// configuration source. Built through the [`ProviderRegistry`] from three
+/// [`ProviderSpec`]s via [`AgentFactory::assemble`]; [`crate::state::ServerState`]
+/// publishes the current generation behind an `ArcSwap`, so a config change
+/// assembles a whole new generation and swaps it in — in-flight sessions keep
+/// their provider clones, and an orphaned generation drains its TTS pool
+/// through [`AgentFactory::drain_when_orphaned`].
 pub struct AgentFactory {
     asr: Arc<dyn Asr>,
     llm: Arc<dyn Llm>,
@@ -46,6 +50,31 @@ impl AgentFactory {
             agents,
             pool,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble(
+        registry: &ProviderRegistry,
+        asr: &ProviderSpec,
+        llm: &ProviderSpec,
+        tts: &ProviderSpec,
+        vad: Arc<dyn VadFactory>,
+        tools: Arc<ToolRegistry>,
+        agents: AgentStore,
+        pool: PgPool,
+    ) -> Result<Self, String> {
+        tracing::info!(stage = "asr", kind = %asr.kind, "constructing provider");
+        let asr = registry.build_asr(&asr.kind, &asr.config)?;
+        tracing::info!(
+            stage = "llm",
+            kind = %llm.kind,
+            model = json_str(&llm.config, "model"),
+            "constructing provider"
+        );
+        let llm = registry.build_llm(&llm.kind, &llm.config)?;
+        tracing::info!(stage = "tts", kind = %tts.kind, "constructing provider");
+        let tts = registry.build_tts(&tts.kind, &tts.config)?;
+        Ok(Self::new(asr, llm, tts, vad, tools, agents, pool))
     }
 
     pub async fn build(&self, record: &DeviceRecord) -> Result<Arc<dyn Agent>, AppError> {
@@ -97,4 +126,29 @@ impl AgentFactory {
             capture: Some(audio as Arc<dyn Capture>),
         }))
     }
+
+    pub async fn shutdown(&self) {
+        self.tts.shutdown().await;
+    }
+
+    /// Drains this generation's TTS pool once no session or factory snapshot
+    /// still holds its providers — the removal path for a swapped-out
+    /// generation.
+    pub fn drain_when_orphaned(self: Arc<Self>) {
+        let tts = self.tts.clone();
+        drop(self);
+        tokio::spawn(async move {
+            while Arc::strong_count(&tts) > 1 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            tts.shutdown().await;
+        });
+    }
+}
+
+fn json_str<'a>(config: &'a serde_json::Value, field: &str) -> &'a str {
+    config
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?")
 }

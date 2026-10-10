@@ -2,15 +2,17 @@ use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
+
 use dashachun::agent::tool::{GetDateTime, GetWeather};
-use dashachun::agent::{AgentFactory, AgentStore, Asr, Llm, ToolRegistry, Tts};
-use dashachun::audio::DOWNLINK;
+use dashachun::agent::{AgentFactory, AgentStore, ToolRegistry};
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
-use dashachun::provider::asr::VolcAsr;
-use dashachun::provider::llm::{OpenAiConfig, OpenAiLlm};
-use dashachun::provider::tts::VolcTts;
+use dashachun::provider::asr::volc::KIND as VOLC_ASR;
+use dashachun::provider::llm::openai::KIND as OPENAI_LLM;
+use dashachun::provider::tts::volc::KIND as VOLC_TTS;
+use dashachun::provider::{ProviderRegistry, ProviderSpec};
 use dashachun::settings::Settings;
 use dashachun::state::ServerState;
 use dashachun::vad::SileroVadFactory;
@@ -52,69 +54,46 @@ async fn main() {
     };
     let ota = settings.ota.unwrap_or_default();
 
-    let asr: Arc<dyn Asr> = match settings.asr {
-        Some(config) => {
-            tracing::info!("using volc asr provider");
-            Arc::new(VolcAsr::new(
-                config.base_url,
-                config.api_key,
-                config.resource_id,
-            ))
-        }
-        None => {
-            tracing::error!(
-                "ASR is not configured: insert the \"asr\" settings row (base_url, api_key, resource_id)"
-            );
-            std::process::exit(1);
-        }
-    };
+    let registry = ProviderRegistry::with_builtins();
+    let asr = provider_spec(
+        settings.asr.take(),
+        "asr",
+        VOLC_ASR,
+        "(base_url, api_key, resource_id)",
+    );
+    let llm = provider_spec(
+        settings.llm.take(),
+        "llm",
+        OPENAI_LLM,
+        "(base_url, api_key, model)",
+    );
+    let tts = provider_spec(
+        settings.tts.take(),
+        "tts",
+        VOLC_TTS,
+        "(base_url, api_key, speaker, resource_id)",
+    );
     let vad = Arc::new(SileroVadFactory::from_env());
-    let llm: Arc<dyn Llm> = match settings.llm {
-        Some(config) => {
-            tracing::info!(model = %config.model, "using openai llm provider");
-            Arc::new(OpenAiLlm::new(OpenAiConfig {
-                base_url: config.base_url,
-                api_key: config.api_key,
-                model: config.model,
-                max_tokens: config.max_tokens,
-                reasoning_effort: config.reasoning_effort,
-            }))
-        }
-        None => {
-            tracing::error!(
-                "LLM is not configured: insert the \"llm\" settings row (base_url, api_key, model)"
-            );
-            std::process::exit(1);
-        }
-    };
-    let tts: Arc<dyn Tts> = match settings.tts {
-        Some(config) => match VolcTts::new(
-            config.base_url,
-            config.api_key,
-            config.resource_id,
-            config.speaker,
-            DOWNLINK,
-        ) {
-            Ok(volc) => {
-                tracing::info!("using volc tts provider");
-                Arc::new(volc)
-            }
-            Err(err) => {
-                tracing::error!(%err, "invalid volc tts configuration");
-                std::process::exit(1);
-            }
-        },
-        None => {
-            tracing::error!(
-                "TTS is not configured: insert the \"tts\" settings row (base_url, api_key, speaker, resource_id)"
-            );
-            std::process::exit(1);
-        }
-    };
     let tools = Arc::new(ToolRegistry::new(vec![
         Arc::new(GetWeather::new()),
         Arc::new(GetDateTime::new(ota.timezone_offset)),
     ]));
+    let agent_factory = match AgentFactory::assemble(
+        &registry,
+        &asr,
+        &llm,
+        &tts,
+        vad,
+        tools,
+        AgentStore::new(pool.clone()),
+        pool.clone(),
+    ) {
+        Ok(factory) => Arc::new(ArcSwap::from_pointee(factory)),
+        Err(err) => {
+            tracing::error!(%err, "invalid provider configuration");
+            std::process::exit(1);
+        }
+    };
     let config = AppConfig {
         server,
         ota,
@@ -122,16 +101,7 @@ async fn main() {
     };
     let auth_config = AuthConfig::from_env(database_url, session_secret);
     let auth = build_auth_state(auth_config, pool.clone());
-    let agent_factory = Arc::new(AgentFactory::new(
-        asr,
-        llm,
-        tts.clone(),
-        vad,
-        tools,
-        AgentStore::new(pool.clone()),
-        pool.clone(),
-    ));
-    let state = ServerState::new(config, agent_factory, DeviceStore::new(pool));
+    let state = ServerState::new(config, agent_factory.clone(), DeviceStore::new(pool));
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
     let app = dashachun::app(state, auth);
@@ -149,7 +119,7 @@ async fn main() {
     });
 
     dashachun::serve(listener, app, shutdown_rx, grace).await;
-    tts.shutdown().await;
+    agent_factory.load_full().shutdown().await;
     tracing::info!("server stopped");
 }
 
@@ -178,6 +148,26 @@ fn build_auth_state(config: AuthConfig, pool: sqlx::PgPool) -> AuthState {
         cookie_name: config.cookie_name,
         cookie_secure: config.cookie_secure,
     }
+}
+
+fn provider_spec(
+    row: Option<serde_json::Value>,
+    stage: &str,
+    kind: &str,
+    fields: &str,
+) -> ProviderSpec {
+    ProviderSpec::new(
+        kind,
+        match row {
+            Some(config) => config,
+            None => missing_provider(stage, fields),
+        },
+    )
+}
+
+fn missing_provider(stage: &str, fields: &str) -> ! {
+    tracing::error!("{stage} is not configured: insert the \"{stage}\" settings row {fields}");
+    std::process::exit(1);
 }
 
 async fn shutdown_on_signal() {

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arc-swap = "1"
 argon2 = "0.5"
 async-openai = { version = "0.42", default-features = false, features = ["rustls", "chat-completion"] }
 async-trait = "0.1"

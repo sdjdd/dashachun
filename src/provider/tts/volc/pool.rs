@@ -99,7 +99,7 @@ impl ConnPool {
             closing: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
         });
-        spawn_idle_sweeper(pool.clone(), timing.idle_timeout, timing.sweep_interval);
+        spawn_idle_sweeper(&pool, timing.idle_timeout, timing.sweep_interval);
         pool
     }
 
@@ -246,11 +246,16 @@ impl Drop for Lease {
     }
 }
 
-fn spawn_idle_sweeper(pool: Arc<ConnPool>, idle_timeout: Duration, sweep_interval: Duration) {
+fn spawn_idle_sweeper(pool: &Arc<ConnPool>, idle_timeout: Duration, sweep_interval: Duration) {
+    let pool = Arc::downgrade(pool);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(sweep_interval);
         loop {
             tick.tick().await;
+            let Some(pool) = pool.upgrade() else {
+                debug!("tts pool dropped, idle sweeper exiting");
+                break;
+            };
             for conn in pool.expire(idle_timeout) {
                 debug!(
                     connect_id = %conn.connect_id,
