@@ -2,10 +2,13 @@ mod common;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
 
 use common::app;
+use dashachun::auth::state::AuthState;
+use dashachun::routes::auth::LOGIN_LIMIT;
 
 fn post(path: &str, body: &str) -> Request<Body> {
     Request::builder()
@@ -16,12 +19,22 @@ fn post(path: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
+fn post_from(path: &str, body: &str, ip: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", ip)
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
 fn get(path: &str) -> Request<Body> {
     Request::builder().uri(path).body(Body::empty()).unwrap()
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn register_login_me_change_logout(pool: PgPool) {
     let app = app(pool);
     let username = common::test_name();
@@ -102,7 +115,7 @@ async fn register_login_me_change_logout(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn duplicate_username_conflicts(pool: PgPool) {
     let app = app(pool);
     let username = common::test_name();
@@ -121,7 +134,7 @@ async fn duplicate_username_conflicts(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn login_wrong_password_is_unauthorized(pool: PgPool) {
     let app = app(pool);
     let username = common::test_name();
@@ -144,7 +157,7 @@ async fn login_wrong_password_is_unauthorized(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn invalid_register_is_bad_request(pool: PgPool) {
     let app = app(pool);
     let res = app
@@ -158,9 +171,70 @@ async fn invalid_register_is_bad_request(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn me_without_cookie_is_unauthorized(pool: PgPool) {
     let app = app(pool);
     let res = app.oneshot(get("/api/auth/me")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn repeated_logins_hit_the_rate_limit(pool: PgPool) {
+    let app = app(pool);
+    let body = r#"{"username":"ghost","password":"supersecret1"}"#;
+    for _ in 0..LOGIN_LIMIT {
+        let res = app
+            .clone()
+            .oneshot(post("/api/auth/login", body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app.oneshot(post("/api/auth/login", body)).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = res
+        .headers()
+        .get("retry-after")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(retry_after >= 1);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn the_rate_limit_is_per_client_ip(pool: PgPool) {
+    let auth = AuthState {
+        pool: pool.clone(),
+        key: Key::from(&[7u8; 64]),
+        ttl_secs: 3600,
+        cookie_name: "xz_session".into(),
+        cookie_secure: false,
+        limiter: common::test_limiter(),
+        trust_proxy: true,
+    };
+    let app = dashachun::app(common::test_state(pool, None), auth);
+    let body = r#"{"username":"ghost","password":"supersecret1"}"#;
+    for _ in 0..LOGIN_LIMIT {
+        let res = app
+            .clone()
+            .oneshot(post_from("/api/auth/login", body, "203.0.113.7"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+    let res = app
+        .clone()
+        .oneshot(post_from("/api/auth/login", body, "203.0.113.7"))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let res = app
+        .oneshot(post_from("/api/auth/login", body, "203.0.113.8"))
+        .await
+        .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 }

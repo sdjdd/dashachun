@@ -32,7 +32,7 @@ fn ota_request(uri: &str) -> Request<Body> {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn root_returns_ok(pool: PgPool) {
     let res = app(pool)
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -42,7 +42,7 @@ async fn root_returns_ok(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_uses_configured_websocket_url(pool: PgPool) {
     let res = app(pool).oneshot(ota_request("/api/ota")).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
@@ -57,7 +57,7 @@ async fn ota_uses_configured_websocket_url(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_derives_websocket_url_from_host(pool: PgPool) {
     let auth = common::auth_state(pool.clone());
     let state = common::test_state(pool, None);
@@ -73,7 +73,7 @@ async fn ota_derives_websocket_url_from_host(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
     let auth = common::auth_state(pool.clone());
     let state = common::test_state(pool, None);
@@ -89,7 +89,7 @@ async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_forwarded_proto_http_keeps_ws(pool: PgPool) {
     let auth = common::auth_state(pool.clone());
     let state = common::test_state(pool, None);
@@ -105,14 +105,14 @@ async fn ota_forwarded_proto_http_keeps_ws(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_trailing_slash_is_normalized(pool: PgPool) {
     let res = app(pool).oneshot(ota_request("/api/ota/")).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_missing_headers_is_bad_request(pool: PgPool) {
     let req = Request::builder()
         .method("POST")
@@ -125,7 +125,7 @@ async fn ota_missing_headers_is_bad_request(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn unknown_route_is_not_found(pool: PgPool) {
     let res = app(pool)
         .oneshot(
@@ -140,7 +140,7 @@ async fn unknown_route_is_not_found(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn shutdown_closes_websocket_and_serve_returns(pool: PgPool) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -203,7 +203,7 @@ async fn shutdown_closes_websocket_and_serve_returns(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn hello_with_unsupported_audio_format_is_rejected(pool: PgPool) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;

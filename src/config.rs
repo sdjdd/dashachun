@@ -28,6 +28,7 @@ pub struct AuthConfig {
     pub session_ttl_secs: i64,
     pub cookie_secure: bool,
     pub cookie_name: String,
+    pub trust_proxy: bool,
 }
 
 impl ServerConfig {
@@ -62,6 +63,7 @@ impl AuthConfig {
                 .unwrap_or(2592000),
             cookie_secure: env_or("COOKIE_SECURE", "true").parse().unwrap_or(true),
             cookie_name: env_or("SESSION_COOKIE_NAME", "xz_session"),
+            trust_proxy: env_or("TRUST_PROXY", "false").parse().unwrap_or(false),
         }
     }
 }
@@ -74,6 +76,7 @@ impl std::fmt::Debug for AuthConfig {
             .field("session_ttl_secs", &self.session_ttl_secs)
             .field("cookie_secure", &self.cookie_secure)
             .field("cookie_name", &self.cookie_name)
+            .field("trust_proxy", &self.trust_proxy)
             .finish()
     }
 }

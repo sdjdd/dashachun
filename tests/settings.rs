@@ -12,7 +12,7 @@ async fn insert(pool: &PgPool, key: &str, value: serde_json::Value) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn load_reads_stored_selections(pool: PgPool) {
     insert(&pool, "llm_provider_id", serde_json::json!(7)).await;
     insert(
@@ -33,7 +33,7 @@ async fn load_reads_stored_selections(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn load_rejects_a_malformed_selection_row(pool: PgPool) {
     insert(&pool, "asr_provider_id", serde_json::json!("not-an-id")).await;
 
@@ -42,7 +42,7 @@ async fn load_rejects_a_malformed_selection_row(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn load_skips_unknown_keys(pool: PgPool) {
     insert(&pool, "wizard", serde_json::json!({"step": 1})).await;
 
@@ -52,7 +52,7 @@ async fn load_skips_unknown_keys(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ensure_session_secret_generates_stores_and_reuses(pool: PgPool) {
     let mut settings = Settings::default();
     let secret = settings.ensure_session_secret(&pool).await.unwrap();

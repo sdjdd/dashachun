@@ -23,6 +23,7 @@ use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
 use dashachun::provider::{ProviderRegistry, ProviderSpec};
+use dashachun::ratelimit::RedisLimiter;
 use dashachun::settings::OtaSettings;
 use dashachun::state::ServerState;
 use dashachun::vad::{SileroVadFactory, VadConfig};
@@ -35,6 +36,14 @@ pub fn test_name() -> String {
     format!("u{}", &id[..16])
 }
 
+/// A limiter with a per-call unique key prefix, so concurrently running
+/// tests never share rate-limit buckets over the shared Redis.
+pub fn test_limiter() -> RedisLimiter {
+    let url = std::env::var("REDIS_URL")
+        .expect("REDIS_URL must be set for the DB-backed suites (redis:7 on 6379)");
+    RedisLimiter::new(&url, &format!("rl-test-{}", uuid::Uuid::new_v4().simple())).unwrap()
+}
+
 pub fn auth_state(pool: PgPool) -> AuthState {
     AuthState {
         pool,
@@ -42,6 +51,8 @@ pub fn auth_state(pool: PgPool) -> AuthState {
         ttl_secs: 3600,
         cookie_name: "xz_session".into(),
         cookie_secure: false,
+        limiter: test_limiter(),
+        trust_proxy: false,
     }
 }
 

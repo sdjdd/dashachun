@@ -7,7 +7,7 @@ use tower::ServiceExt;
 use common::{body_json, post_json, register};
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_agent_returns_created_agent(pool: PgPool) {
     let app = common::app(pool.clone());
     let (cookie, _) = register(&app, &pool).await;
@@ -29,7 +29,7 @@ async fn create_agent_returns_created_agent(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_agent_defaults_persona_prompt_to_empty(pool: PgPool) {
     let app = common::app(pool.clone());
     let (cookie, _) = register(&app, &pool).await;
@@ -48,7 +48,7 @@ async fn create_agent_defaults_persona_prompt_to_empty(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn duplicate_agent_name_conflicts_within_user_but_not_across_users(pool: PgPool) {
     let app = common::app(pool.clone());
     let (cookie, _) = register(&app, &pool).await;
@@ -86,7 +86,7 @@ async fn duplicate_agent_name_conflicts_within_user_but_not_across_users(pool: P
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_agent_rejects_blank_name(pool: PgPool) {
     let app = common::app(pool.clone());
     let (cookie, _) = register(&app, &pool).await;
@@ -99,7 +99,7 @@ async fn create_agent_rejects_blank_name(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_agent_requires_session(pool: PgPool) {
     let app = common::app(pool.clone());
     let res = app

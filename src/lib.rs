@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Router;
@@ -19,6 +20,7 @@ pub mod error;
 pub mod extract;
 pub mod gateway;
 pub mod provider;
+pub mod ratelimit;
 pub mod routes;
 pub mod settings;
 pub mod state;
@@ -57,7 +59,8 @@ pub async fn serve(
     };
     if let Err(err) = axum::serve(
         listener,
-        axum::ServiceExt::<axum::http::Request<axum::body::Body>>::into_make_service(app),
+        app.into_inner()
+            .into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(signal)
     .await

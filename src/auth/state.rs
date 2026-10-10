@@ -2,6 +2,8 @@ use axum_extra::extract::cookie::{Cookie, Key, SameSite};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::ratelimit::RedisLimiter;
+
 #[derive(Clone)]
 pub struct AuthState {
     pub pool: PgPool,
@@ -9,6 +11,8 @@ pub struct AuthState {
     pub ttl_secs: i64,
     pub cookie_name: String,
     pub cookie_secure: bool,
+    pub limiter: RedisLimiter,
+    pub trust_proxy: bool,
 }
 
 impl AuthState {

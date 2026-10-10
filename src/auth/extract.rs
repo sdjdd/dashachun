@@ -1,4 +1,7 @@
-use axum::extract::{FromRef, FromRequestParts};
+use core::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::SignedCookieJar;
 use uuid::Uuid;
@@ -36,5 +39,36 @@ where
             id: user_id,
             session_id,
         })
+    }
+}
+
+/// The client IP for rate limiting: with `TRUST_PROXY` the rightmost
+/// `X-Forwarded-For` entry (the one the trusted edge appended), otherwise
+/// the socket peer. Falls back to `0.0.0.0` when neither is present (e.g.
+/// the `oneshot` test path, which has no connect info) — never fails.
+pub struct ClientIp(pub IpAddr);
+
+impl<S> FromRequestParts<S> for ClientIp
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let state = AuthState::from_ref(state);
+        if state.trust_proxy
+            && let Some(forwarded) = parts.headers.get("x-forwarded-for")
+            && let Ok(raw) = forwarded.to_str()
+            && let Some(ip) = raw.rsplit(',').next().and_then(|s| s.trim().parse().ok())
+        {
+            return Ok(ClientIp(ip));
+        }
+        let ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        Ok(ClientIp(ip))
     }
 }

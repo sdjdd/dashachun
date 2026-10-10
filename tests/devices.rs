@@ -61,7 +61,7 @@ async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn ota_creates_device_and_returns_code(pool: PgPool) {
     let app = common::app(pool);
     let res = app.clone().oneshot(ota_request()).await.unwrap();
@@ -86,7 +86,7 @@ async fn ota_creates_device_and_returns_code(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     let app = common::app(pool.clone());
     let code = {
@@ -218,7 +218,7 @@ async fn connect_gateway(
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
     let app = common::app(pool.clone());
     let old_code = {
@@ -259,7 +259,7 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn binding_taken_code_is_not_found(pool: PgPool) {
     let app = common::app(pool.clone());
     let code = {
@@ -295,7 +295,7 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgPool) {
     let app = common::app(pool.clone());
     let code = {

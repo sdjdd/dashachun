@@ -64,7 +64,7 @@ async fn create(
 const STUB_LLM: &str = r#"{"type":"llm","name":"chat","kind":"stub","config":{"reply":"hi"}}"#;
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_without_kind_resolves_the_sole_registered_kind(pool: PgPool) {
     let (app, _) = app_with_state(pool.clone());
     let (cookie, _) = register(&app, &pool).await;
@@ -82,7 +82,7 @@ async fn create_without_kind_resolves_the_sole_registered_kind(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_without_kind_is_ambiguous_when_a_type_has_several(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -108,7 +108,7 @@ async fn create_without_kind_is_ambiguous_when_a_type_has_several(pool: PgPool) 
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_requires_session(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let res = create(&app, "", STUB_LLM).await;
@@ -116,7 +116,7 @@ async fn create_requires_session(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_list_and_get_roundtrip_the_row(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -159,7 +159,7 @@ async fn create_list_and_get_roundtrip_the_row(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_rejects_unknown_type_and_kind(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -191,7 +191,7 @@ async fn create_rejects_unknown_type_and_kind(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn create_rejects_an_unbuildable_config(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -220,7 +220,7 @@ async fn create_rejects_an_unbuildable_config(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn duplicate_name_conflicts_within_stage_but_not_across(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -239,7 +239,7 @@ async fn duplicate_name_conflicts_within_stage_but_not_across(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn update_patches_the_provided_fields(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -280,7 +280,7 @@ async fn update_patches_the_provided_fields(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn update_rejects_an_unbuildable_config_and_keeps_the_row(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -322,7 +322,7 @@ async fn update_rejects_an_unbuildable_config_and_keeps_the_row(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn update_missing_provider_is_404(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -340,7 +340,7 @@ async fn update_missing_provider_is_404(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn activate_applies_only_when_every_stage_is_selected(pool: PgPool) {
     let (app, state) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -408,7 +408,7 @@ async fn activate_applies_only_when_every_stage_is_selected(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn activate_missing_provider_is_404(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -426,7 +426,7 @@ async fn activate_missing_provider_is_404(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn activate_with_a_broken_selection_keeps_the_generation(pool: PgPool) {
     let (app, state) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -486,7 +486,7 @@ async fn activate_with_a_broken_selection_keeps_the_generation(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn updating_the_selected_provider_hot_applies(pool: PgPool) {
     let (app, state) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;
@@ -547,7 +547,7 @@ async fn updating_the_selected_provider_hot_applies(pool: PgPool) {
 }
 
 #[sqlx::test]
-#[ignore = "requires a running postgres; run with cargo test -- --ignored"]
+#[ignore]
 async fn delete_blocks_the_selected_provider(pool: PgPool) {
     let (app, _) = app_with_registry(pool.clone(), combined_registry());
     let (cookie, _) = register(&app, &pool).await;

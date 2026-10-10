@@ -7,6 +7,7 @@ pub enum AppError {
     InvalidHeader(&'static str),
     BadRequest(String),
     Unauthorized,
+    TooManyRequests(u64),
     Conflict(String),
     NotFound,
     Internal(String),
@@ -19,6 +20,9 @@ impl std::fmt::Display for AppError {
             AppError::InvalidHeader(name) => write!(f, "Invalid {name} header"),
             AppError::BadRequest(msg) => write!(f, "Bad request: {msg}"),
             AppError::Unauthorized => write!(f, "Unauthorized"),
+            AppError::TooManyRequests(retry_after) => {
+                write!(f, "Too many requests, retry after {retry_after} seconds")
+            }
             AppError::Conflict(msg) => write!(f, "Conflict: {msg}"),
             AppError::NotFound => write!(f, "Not found"),
             AppError::Internal(msg) => write!(f, "Internal error: {msg}"),
@@ -36,6 +40,14 @@ impl From<sqlx::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::TooManyRequests(retry_after) = &self {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", retry_after.to_string())],
+                self.to_string(),
+            )
+                .into_response();
+        }
         let status = match self {
             AppError::MissingHeader(_) | AppError::InvalidHeader(_) | AppError::BadRequest(_) => {
                 StatusCode::BAD_REQUEST
@@ -44,6 +56,7 @@ impl IntoResponse for AppError {
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::TooManyRequests(_) => unreachable!(),
         };
         (status, self.to_string()).into_response()
     }

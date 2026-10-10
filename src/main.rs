@@ -12,6 +12,7 @@ use dashachun::device::DeviceStore;
 use dashachun::error::AppError;
 use dashachun::provider::store::ProviderStore;
 use dashachun::provider::{ProviderRegistry, ProviderSpec};
+use dashachun::ratelimit::RedisLimiter;
 use dashachun::settings::Settings;
 use dashachun::state::ServerState;
 use dashachun::vad::SileroVadFactory;
@@ -37,6 +38,24 @@ async fn main() {
         }
     };
     let pool = build_pool(&database_url).await;
+    let redis_url = match env::var("REDIS_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            tracing::error!("REDIS_URL is required");
+            std::process::exit(1);
+        }
+    };
+    let limiter = match RedisLimiter::new(&redis_url, "rl") {
+        Ok(limiter) => limiter,
+        Err(err) => {
+            tracing::error!(%err, "invalid REDIS_URL");
+            std::process::exit(1);
+        }
+    };
+    if let Err(err) = limiter.ping().await {
+        tracing::error!(%err, "failed to connect to redis");
+        std::process::exit(1);
+    }
     let mut settings = match Settings::load(&pool).await {
         Ok(settings) => settings,
         Err(err) => {
@@ -99,7 +118,7 @@ async fn main() {
         device,
     };
     let auth_config = AuthConfig::from_env(database_url, session_secret);
-    let auth = build_auth_state(auth_config, pool.clone());
+    let auth = build_auth_state(auth_config, pool.clone(), limiter);
     let state = ServerState::new(
         config,
         registry,
@@ -146,7 +165,7 @@ async fn build_pool(database_url: &str) -> sqlx::PgPool {
     pool
 }
 
-fn build_auth_state(config: AuthConfig, pool: sqlx::PgPool) -> AuthState {
+fn build_auth_state(config: AuthConfig, pool: sqlx::PgPool, limiter: RedisLimiter) -> AuthState {
     let key = axum_extra::extract::cookie::Key::from(config.session_secret.as_bytes());
     tracing::info!("auth routes enabled");
     AuthState {
@@ -155,6 +174,8 @@ fn build_auth_state(config: AuthConfig, pool: sqlx::PgPool) -> AuthState {
         ttl_secs: config.session_ttl_secs,
         cookie_name: config.cookie_name,
         cookie_secure: config.cookie_secure,
+        limiter,
+        trust_proxy: config.trust_proxy,
     }
 }
 
