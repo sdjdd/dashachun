@@ -10,8 +10,8 @@ use tracing::{Instrument, debug, info, trace, warn};
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
     AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, Memory, ReplyCapture, StreamEvent,
-    Subtitle, SystemPrompt, TextStream, ToolContext, ToolRegistry, Tts, TtsEvent, UtteranceCapture,
-    emotion, stream_text,
+    StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolContext, ToolRegistry, Tts, TtsEvent,
+    UtteranceCapture, emotion, stream_text,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -755,11 +755,11 @@ async fn think_stage(
     messages.extend(history);
     let ctx = ToolContext::default();
     let mut stream = stream_text(
-        deps.llm.as_ref(),
-        messages,
-        &deps.tools,
-        &ctx,
-        cancel.clone(),
+        StreamTextParams::builder(deps.llm.as_ref(), &ctx)
+            .messages(messages)
+            .tools(&deps.tools)
+            .cancel(cancel.clone())
+            .build(),
     );
     let mut stripper = emotion::Stripper::new();
     let mut emotion_pending = true;
