@@ -4,9 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::agent::ToolSpec;
-
-use super::{ToolHandler, ToolOutcome, params_schema};
+use super::Tool;
 
 const GEOCODE_URL: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_URL: &str = "https://api.open-meteo.com/v1/forecast";
@@ -14,7 +12,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct GetWeatherArgs {
+pub struct GetWeatherArgs {
     /// City name, e.g. Beijing.
     city: String,
 }
@@ -73,30 +71,25 @@ impl Default for GetWeather {
 }
 
 #[async_trait::async_trait]
-impl ToolHandler for GetWeather {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "get_weather".to_string(),
-            description: "Look up the current weather for a city. Use it when the user asks \
-                about the weather."
-                .to_string(),
-            parameters: params_schema::<GetWeatherArgs>(),
-        }
+impl Tool for GetWeather {
+    const NAME: &'static str = "get_weather";
+    type Args = GetWeatherArgs;
+    type Output = String;
+    type Error = String;
+
+    fn description(&self) -> String {
+        "Look up the current weather for a city. Use it when the user asks \
+         about the weather."
+            .to_string()
     }
 
-    async fn call(&self, args: &Value) -> Result<ToolOutcome, String> {
-        let args: GetWeatherArgs =
-            serde_json::from_value(args.clone()).map_err(|err| err.to_string())?;
+    async fn call(&self, args: GetWeatherArgs) -> Result<String, String> {
         let city = args.city.trim();
         if city.is_empty() {
             return Err("city must not be empty".to_string());
         }
         let location = self.geocode(city).await?;
-        let content = self.forecast(&location).await?;
-        Ok(ToolOutcome {
-            content,
-            needs_reply: true,
-        })
+        self.forecast(&location).await
     }
 }
 
@@ -157,6 +150,7 @@ fn weather_text(code: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::tool::ToolEntry;
     use serde_json::json;
 
     #[test]
@@ -204,24 +198,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_city() {
-        assert!(GetWeather::new().call(&json!({})).await.is_err());
-    }
-
-    #[tokio::test]
     async fn rejects_empty_city() {
-        assert!(
-            GetWeather::new()
-                .call(&json!({ "city": "   " }))
-                .await
-                .is_err()
-        );
+        let err = GetWeather::new()
+            .call(GetWeatherArgs {
+                city: "   ".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err, "city must not be empty");
     }
 
     #[test]
     fn spec_schema_matches_type() {
-        let spec = GetWeather::new().spec();
-        assert_eq!(spec.name, "get_weather");
+        let spec = ToolEntry::new(GetWeather::new()).spec().clone();
         assert_eq!(spec.parameters["type"], "object");
         assert_eq!(spec.parameters["properties"]["city"]["type"], "string");
         assert_eq!(spec.parameters["required"], json!(["city"]));

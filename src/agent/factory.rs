@@ -7,7 +7,7 @@ use super::capture::{AudioCapture, AudioStorage};
 use super::memory::{DbEntryMemory, DbMemory, EntryMemory, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
 use super::tool::{MemoryAdd, MemoryDelete, MemoryUpdate};
-use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolRegistry, Tts};
+use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolEntry, Tts};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
 use crate::provider::{ProviderRegistry, ProviderSpec};
@@ -25,7 +25,7 @@ pub struct AgentFactory {
     llm: Arc<dyn Llm>,
     tts: Arc<dyn Tts>,
     vad: Arc<dyn VadFactory>,
-    tools: Arc<ToolRegistry>,
+    tools: Vec<ToolEntry>,
     agents: AgentStore,
     pool: PgPool,
 }
@@ -37,7 +37,7 @@ impl AgentFactory {
         llm: Arc<dyn Llm>,
         tts: Arc<dyn Tts>,
         vad: Arc<dyn VadFactory>,
-        tools: Arc<ToolRegistry>,
+        tools: Vec<ToolEntry>,
         agents: AgentStore,
         pool: PgPool,
     ) -> Self {
@@ -59,7 +59,7 @@ impl AgentFactory {
         llm: &ProviderSpec,
         tts: &ProviderSpec,
         vad: Arc<dyn VadFactory>,
-        tools: Arc<ToolRegistry>,
+        tools: Vec<ToolEntry>,
         agents: AgentStore,
         pool: PgPool,
     ) -> Result<Self, String> {
@@ -116,14 +116,15 @@ impl AgentFactory {
         )
         .await?;
         // The entry memory is scope-bound per connection; the memory tools
-        // close over the same instance, so the prompt reads what they write.
+        // hold the same instance, so the prompt reads what they write. The
+        // base registry is generation-shared — each connection extends a
+        // clone of it with its own memory tools.
         let entries: Arc<dyn EntryMemory> =
             Arc::new(DbEntryMemory::new(self.pool.clone(), user_id, agent_id));
-        let tools = Arc::new(self.tools.extended(vec![
-            Arc::new(MemoryAdd::new(entries.clone())),
-            Arc::new(MemoryUpdate::new(entries.clone())),
-            Arc::new(MemoryDelete::new(entries.clone())),
-        ]));
+        let mut tools = self.tools.clone();
+        tools.push(ToolEntry::new(MemoryAdd::new(entries.clone())));
+        tools.push(ToolEntry::new(MemoryUpdate::new(entries.clone())));
+        tools.push(ToolEntry::new(MemoryDelete::new(entries.clone())));
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
             llm: self.llm.clone(),

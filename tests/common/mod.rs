@@ -18,7 +18,7 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 
 use dashachun::agent::{
-    AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner, ToolRegistry,
+    AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner,
 };
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
@@ -99,7 +99,7 @@ fn test_state_with_registry_inner(
     devices: DeviceStore,
 ) -> ServerState {
     let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
-    let tools = Arc::new(ToolRegistry::new(Vec::new()));
+    let tools = Vec::new();
     let factory = AgentFactory::assemble(
         &registry,
         &ProviderSpec::stub(),

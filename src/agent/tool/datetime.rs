@@ -1,15 +1,8 @@
-use schemars::JsonSchema;
-use serde::Deserialize;
-use serde_json::Value;
+use std::convert::Infallible;
+
 use time::{OffsetDateTime, UtcOffset, Weekday};
 
-use crate::agent::ToolSpec;
-
-use super::{ToolHandler, ToolOutcome, params_schema};
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct GetDateTimeArgs {}
+use super::{NoArgs, Tool};
 
 pub struct GetDateTime {
     offset: UtcOffset,
@@ -24,24 +17,22 @@ impl GetDateTime {
 }
 
 #[async_trait::async_trait]
-impl ToolHandler for GetDateTime {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec {
-            name: "get_datetime".to_string(),
-            description: "Get the current local date, time and weekday. Use it when the user asks \
-                for the current time or date, or needs to reason about today, now, or relative \
-                days."
-                .to_string(),
-            parameters: params_schema::<GetDateTimeArgs>(),
-        }
+impl Tool for GetDateTime {
+    const NAME: &'static str = "get_datetime";
+    type Args = NoArgs;
+    type Output = String;
+    type Error = Infallible;
+
+    fn description(&self) -> String {
+        "Get the current local date, time and weekday. Use it when the user asks \
+         for the current time or date, or needs to reason about today, now, or relative \
+         days."
+            .to_string()
     }
 
-    async fn call(&self, _args: &Value) -> Result<ToolOutcome, String> {
+    async fn call(&self, _args: NoArgs) -> Result<String, Infallible> {
         let now = OffsetDateTime::now_utc().to_offset(self.offset);
-        Ok(ToolOutcome {
-            content: describe(now),
-            needs_reply: true,
-        })
+        Ok(describe(now))
     }
 }
 
@@ -89,7 +80,8 @@ fn weekday_text(weekday: Weekday) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::agent::ToolCall;
+    use crate::agent::tool::{ToolEntry, execute_tool};
 
     fn at(unix_secs: i64, hours: i8, minutes: i8) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(unix_secs)
@@ -124,16 +116,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_ignores_args() {
-        let tool = GetDateTime::new(480);
-        assert!(tool.call(&json!({})).await.is_ok());
-        assert!(tool.call(&json!({ "unexpected": true })).await.is_ok());
+    async fn executes_with_empty_or_object_arguments() {
+        let tools = vec![ToolEntry::new(GetDateTime::new(480))];
+        for arguments in ["", "{}"] {
+            let outcome = execute_tool(
+                &tools,
+                &ToolCall {
+                    id: "1".into(),
+                    name: "get_datetime".into(),
+                    arguments: arguments.into(),
+                },
+            )
+            .await;
+            assert!(outcome.content.contains("UTC+08:00"));
+            assert!(outcome.ok);
+        }
     }
 
     #[test]
     fn spec_schema_matches_type() {
-        let spec = GetDateTime::new(480).spec();
-        assert_eq!(spec.name, "get_datetime");
+        let spec = ToolEntry::new(GetDateTime::new(480)).spec().clone();
         assert_eq!(spec.parameters["type"], "object");
         assert_eq!(spec.parameters["additionalProperties"], false);
     }

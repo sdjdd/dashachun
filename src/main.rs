@@ -5,7 +5,7 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 
 use dashachun::agent::tool::{GetDateTime, GetWeather};
-use dashachun::agent::{AgentFactory, AgentStore, AudioStorage, ToolRegistry};
+use dashachun::agent::{AgentFactory, AgentStore, AudioStorage, ToolEntry};
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, OssConfig, ServerConfig};
 use dashachun::device::DeviceStore;
@@ -91,10 +91,10 @@ async fn main() {
 
     let registry = Arc::new(ProviderRegistry::with_builtins());
     let vad = Arc::new(SileroVadFactory::from_env());
-    let tools = Arc::new(ToolRegistry::new(vec![
-        Arc::new(GetWeather::new()),
-        Arc::new(GetDateTime::new(ota.timezone_offset)),
-    ]));
+    let tools = vec![
+        ToolEntry::new(GetWeather::new()),
+        ToolEntry::new(GetDateTime::new(ota.timezone_offset)),
+    ];
     let agent_factory = match specs {
         Some((asr, llm, tts)) => match AgentFactory::assemble(
             &registry,

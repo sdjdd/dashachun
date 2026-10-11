@@ -10,8 +10,8 @@ use tracing::{Instrument, debug, info, trace, warn};
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
     AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, Memory, ReplyCapture, StreamEvent,
-    StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolContext, ToolRegistry, Tts, TtsEvent,
-    UtteranceCapture, emotion, stream_text,
+    StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolEntry, Tts, TtsEvent,
+    UtteranceCapture, emotion, stop_after_memory_writes, stream_text,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -30,7 +30,7 @@ pub struct CompositeAgent {
     pub vad: Arc<dyn VadFactory>,
     pub memory: Arc<dyn Memory>,
     pub entries: Arc<dyn EntryMemory>,
-    pub tools: Arc<ToolRegistry>,
+    pub tools: Vec<ToolEntry>,
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
 }
@@ -95,7 +95,7 @@ enum TurnOutcome {
 
 struct TurnDeps {
     llm: Arc<dyn Llm>,
-    tools: Arc<ToolRegistry>,
+    tools: Vec<ToolEntry>,
     tts: Arc<dyn Tts>,
     session_id: String,
 }
@@ -753,11 +753,11 @@ async fn think_stage(
         messages.push(system);
     }
     messages.extend(history);
-    let ctx = ToolContext::default();
     let mut stream = stream_text(
-        StreamTextParams::builder(deps.llm.as_ref(), &ctx)
+        StreamTextParams::builder(deps.llm.as_ref())
             .messages(messages)
             .tools(&deps.tools)
+            .stop_when(vec![stop_after_memory_writes()])
             .cancel(cancel.clone())
             .build(),
     );
@@ -1198,8 +1198,8 @@ mod tests {
         }
     }
 
-    fn empty_tools() -> Arc<ToolRegistry> {
-        Arc::new(ToolRegistry::new(Vec::new()))
+    fn empty_tools() -> Vec<ToolEntry> {
+        Vec::new()
     }
 
     const OUTPUT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1920,13 +1920,12 @@ mod tests {
     async fn memory_tool_stores_an_entry_the_next_turn_sees() {
         let entries = Arc::new(InMemEntryMemory::default());
         let calls = Arc::new(Mutex::new(Vec::new()));
+        let tools = vec![ToolEntry::new(MemoryAdd::new(entries.clone()))];
         let agent = CompositeAgent {
             llm: Arc::new(MemoryLlm {
                 calls: calls.clone(),
             }),
-            tools: Arc::new(ToolRegistry::new(vec![Arc::new(MemoryAdd::new(
-                entries.clone(),
-            ))])),
+            tools,
             entries,
             vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
             system_prompt: SystemPrompt::new("Be helpful."),

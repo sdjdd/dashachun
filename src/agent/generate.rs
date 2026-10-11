@@ -15,13 +15,12 @@
 //! through its own token.
 
 use std::pin::Pin;
-use std::sync::LazyLock;
 
 use futures_util::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall};
-use super::tool::{ToolContext, ToolRegistry, execute_tool};
+use super::tool::{ToolEntry, execute_tool};
 
 /// Cap on LLM rounds per generation. A model stuck requesting tools would
 /// otherwise loop (and bill) forever; hitting the cap fails the stream.
@@ -48,11 +47,16 @@ pub enum StreamEvent {
     Done(StreamResult),
 }
 
-/// One completed LLM round (step) — what a stop condition sees. Only the
-/// round's tool calls today; fields appear here when a condition needs them.
+/// One completed LLM round (step) — what a stop condition sees: the round's
+/// tool calls (empty for the final text-only round), whether every call in
+/// it succeeded — a degraded call (invalid arguments, unknown tool, tool
+/// failure) makes it `false` — and the round's assistant text (empty when
+/// the round only requested tools).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepResult {
     pub tool_calls: Vec<ToolCall>,
+    pub ok: bool,
+    pub text: String,
 }
 
 /// Caller-supplied early stop for the loop: `stop_when` is an array of these,
@@ -71,18 +75,17 @@ enum Phase<'a> {
 
 struct Loop<'a> {
     llm: &'a dyn Llm,
-    tools: &'a ToolRegistry,
-    ctx: &'a ToolContext,
+    tools: &'a [ToolEntry],
     cancel: CancellationToken,
     stop_when: Vec<StopCondition>,
     working: Vec<ChatItem>,
     calls: Vec<ToolCall>,
+    round_calls: Vec<ToolCall>,
     round_text: String,
     text: String,
     items: Vec<ChatItem>,
     step_results: Vec<StepResult>,
-    spoke: bool,
-    needs_reply: bool,
+    round_ok: bool,
     phase: Phase<'a>,
 }
 
@@ -96,7 +99,7 @@ struct Loop<'a> {
 /// stream the same way. An empty array never stops early; the step cap stays
 /// a hard failure guard on top.
 /// The single argument of [`stream_text`] and [`generate_text`] — one
-/// generation call's parameters. `llm` and `ctx` go positionally into
+/// generation call's parameters. `llm` goes positionally into
 /// [`StreamTextParams::builder`]; the rest is optional — `messages` (empty),
 /// `tools` (none: no tools are advertised), `stop_when` (empty: never stop
 /// early) and `cancel` (a fresh token).
@@ -104,55 +107,47 @@ struct Loop<'a> {
 pub struct StreamTextParams<'a> {
     #[builder(start_fn)]
     pub llm: &'a dyn Llm,
-    #[builder(start_fn)]
-    pub ctx: &'a ToolContext,
     #[builder(default)]
     pub messages: Vec<ChatItem>,
-    pub tools: Option<&'a ToolRegistry>,
+    pub tools: Option<&'a [ToolEntry]>,
     #[builder(default)]
     pub stop_when: Vec<StopCondition>,
     #[builder(default = CancellationToken::new())]
     pub cancel: CancellationToken,
 }
 
-/// The shared empty registry behind an omitted `tools`: no tools are
-/// advertised, and a stray model-requested call degrades to an error
-/// message like any unknown tool.
-static EMPTY_TOOLS: LazyLock<ToolRegistry> = LazyLock::new(|| ToolRegistry::new(Vec::new()));
-
 /// Runs the tool loop over `params.messages` (the caller owns the prompt,
 /// including any leading system item) and streams every round's text deltas
-/// as they arrive. When the model stops requesting tools — or a round that
-/// already spoke was followed only by silent tools — the stream ends with
-/// [`StreamEvent::Done`] carrying [`StreamResult`]. `stop_when` adds
-/// caller-supplied early stops: after each tool round every condition sees
-/// the completed steps so far, and any condition returning `true` ends the
+/// as they arrive. When the model stops requesting tools, the stream ends
+/// with [`StreamEvent::Done`] carrying [`StreamResult`]. `stop_when` owns
+/// every earlier end: after each tool round every condition sees the
+/// completed steps so far — each step's calls, whether its calls succeeded
+/// and the round's assistant text (empty when it only requested tools) — and
+/// any condition returning `true` ends the
 /// stream the same way. An empty array never stops early; the step cap stays
 /// a hard failure guard on top.
 pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
     let StreamTextParams {
         llm,
-        ctx,
         messages,
         tools,
         stop_when,
         cancel,
     } = params;
-    let tools = tools.unwrap_or(&EMPTY_TOOLS);
+    let tools: &[ToolEntry] = tools.unwrap_or(&[]);
     let state = Loop {
         llm,
         tools,
-        ctx,
         cancel,
         stop_when,
         working: messages,
         calls: Vec::new(),
+        round_calls: Vec::new(),
         round_text: String::new(),
         text: String::new(),
         items: Vec::new(),
         step_results: Vec::new(),
-        spoke: false,
-        needs_reply: false,
+        round_ok: true,
         phase: Phase::Start,
     };
     Box::pin(futures_util::stream::unfold(
@@ -173,12 +168,15 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             ));
                         }
                         state.round_text.clear();
-                        state.spoke = false;
-                        let chat = state.llm.chat(
-                            state.working.clone(),
-                            state.tools.specs(),
-                            state.cancel.clone(),
-                        );
+                        let specs = state
+                            .tools
+                            .iter()
+                            .map(|entry| entry.spec().clone())
+                            .collect();
+                        let chat =
+                            state
+                                .llm
+                                .chat(state.working.clone(), specs, state.cancel.clone());
                         state.phase = Phase::Chat(chat);
                     }
                     Phase::Chat(mut chat) => {
@@ -208,23 +206,24 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                         }
                     }
                     Phase::RoundEnd => {
-                        state.spoke = !state.round_text.is_empty();
+                        let spoke = !state.round_text.is_empty();
                         let calls = std::mem::take(&mut state.calls);
-                        state.step_results.push(StepResult {
-                            tool_calls: calls.clone(),
-                        });
                         if calls.is_empty() {
-                            if state.spoke {
-                                state.items.push(ChatItem::assistant(std::mem::take(
-                                    &mut state.round_text,
-                                )));
+                            let text = std::mem::take(&mut state.round_text);
+                            if !text.is_empty() {
+                                state.items.push(ChatItem::assistant(text.clone()));
                             }
+                            state.step_results.push(StepResult {
+                                tool_calls: Vec::new(),
+                                ok: true,
+                                text,
+                            });
                             let result = finish(&mut state);
                             return Some((Ok(StreamEvent::Done(result)), state));
                         }
-                        let round = if state.spoke {
+                        let round = if spoke {
                             ChatItem::assistant_text_tool_calls(
-                                std::mem::take(&mut state.round_text),
+                                state.round_text.clone(),
                                 calls.clone(),
                             )
                         } else {
@@ -232,7 +231,8 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                         };
                         state.items.push(round.clone());
                         state.working.push(round);
-                        state.needs_reply = false;
+                        state.round_calls = calls.clone();
+                        state.round_ok = true;
                         state.phase = Phase::Tools(calls.into_iter());
                     }
                     Phase::Tools(mut calls) => {
@@ -240,24 +240,26 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             state.phase = Phase::AfterTools;
                             continue;
                         };
-                        let outcome = execute_tool(state.tools, state.ctx, &call).await;
-                        state.needs_reply |= outcome.needs_reply;
+                        let outcome = execute_tool(state.tools, &call).await;
+                        state.round_ok &= outcome.ok;
                         let item = ChatItem::tool(call.id.clone(), outcome.content);
                         state.items.push(item.clone());
                         state.working.push(item);
                         state.phase = Phase::Tools(calls);
                     }
                     Phase::AfterTools => {
+                        // The step is complete only now — its `ok` needed
+                        // every call's outcome, its text the round's.
+                        state.step_results.push(StepResult {
+                            tool_calls: std::mem::take(&mut state.round_calls),
+                            ok: state.round_ok,
+                            text: std::mem::take(&mut state.round_text),
+                        });
                         let stop = state
                             .stop_when
                             .iter()
                             .any(|condition| condition(&state.step_results));
-                        if stop || (state.spoke && !state.needs_reply) {
-                            // Either the caller's stop condition fired, or the
-                            // round's spoken text already answered and every
-                            // tool was silent plumbing — asking the model
-                            // again would only produce a second confirmation
-                            // of what was just said.
+                        if stop {
                             let result = finish(&mut state);
                             return Some((Ok(StreamEvent::Done(result)), state));
                         }
@@ -304,7 +306,7 @@ mod tests {
     use serde::Deserialize;
 
     use crate::agent::ToolSpec;
-    use crate::agent::tool::{Tool, ToolHandler, ToolOutcome};
+    use crate::agent::tool::{Tool, ToolEntry};
 
     /// Serves one scripted round per `chat` call; a call beyond the script
     /// fails loudly, so a runaway loop can never pass a test silently.
@@ -403,26 +405,7 @@ mod tests {
             "Add x and y together".to_string()
         }
 
-        async fn call(&self, _ctx: &ToolContext, args: AddArgs) -> Result<i64, Infallible> {
-            Ok(args.x + args.y)
-        }
-    }
-
-    struct SilentAdd;
-
-    #[async_trait::async_trait]
-    impl Tool for SilentAdd {
-        const NAME: &'static str = "silent_add";
-        const NEEDS_REPLY: bool = false;
-        type Args = AddArgs;
-        type Output = i64;
-        type Error = Infallible;
-
-        fn description(&self) -> String {
-            "Add x and y together".to_string()
-        }
-
-        async fn call(&self, _ctx: &ToolContext, args: AddArgs) -> Result<i64, Infallible> {
+        async fn call(&self, args: AddArgs) -> Result<i64, Infallible> {
             Ok(args.x + args.y)
         }
     }
@@ -440,37 +423,13 @@ mod tests {
             "Always fails".to_string()
         }
 
-        async fn call(&self, _ctx: &ToolContext, _args: AddArgs) -> Result<i64, String> {
+        async fn call(&self, _args: AddArgs) -> Result<i64, String> {
             Err("boom".to_string())
         }
     }
 
-    struct LegacyEcho;
-
-    #[async_trait::async_trait]
-    impl ToolHandler for LegacyEcho {
-        fn spec(&self) -> ToolSpec {
-            ToolSpec {
-                name: "legacy_echo".to_string(),
-                description: "legacy tool".to_string(),
-                parameters: serde_json::Value::Null,
-            }
-        }
-
-        async fn call(&self, _args: &serde_json::Value) -> Result<ToolOutcome, String> {
-            Ok(ToolOutcome {
-                content: "legacy-ok".to_string(),
-                needs_reply: false,
-            })
-        }
-    }
-
-    fn typed_registry() -> ToolRegistry {
-        let mut tools = ToolRegistry::new(Vec::new());
-        tools.register_tool(Add);
-        tools.register_tool(SilentAdd);
-        tools.register_tool(Failing);
-        tools
+    fn typed_tools() -> Vec<ToolEntry> {
+        vec![ToolEntry::new(Add), ToolEntry::new(Failing)]
     }
 
     async fn drain(events: &mut StreamEvents<'_>) -> Vec<Result<StreamEvent, LlmError>> {
@@ -484,9 +443,8 @@ mod tests {
     #[tokio::test]
     async fn text_only_turn_streams_deltas_then_done() {
         let llm = ScriptedLlm::new(vec![vec![delta("你"), delta("好"), done()]]);
-        let ctx = ToolContext::default();
         let mut events = stream_text(
-            StreamTextParams::builder(&llm, &ctx)
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
                 .build(),
         );
@@ -516,9 +474,9 @@ mod tests {
             vec![delta("等于 3"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .build(),
         ))
         .await;
@@ -541,33 +499,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spoken_round_with_silent_tools_closes_without_another_round() {
+    async fn caller_condition_over_speech_and_success_closes_without_another_round() {
         let llm = ScriptedLlm::new(vec![vec![
             delta("好的"),
-            call("silent_add", r#"{"x":1,"y":2}"#),
+            call("add", r#"{"x":1,"y":2}"#),
             done(),
         ]]);
         let seen = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
+                .stop_when(vec![Box::new(|steps: &[StepResult]| {
+                    steps.last().is_some_and(|step| {
+                        !step.text.is_empty() && step.ok && !step.tool_calls.is_empty()
+                    })
+                })])
                 .build(),
         ))
         .await;
         let Some(Ok(StreamEvent::Done(result))) = seen.into_iter().last() else {
             panic!("expected a done event");
         };
+        // The condition owns the stop: the round spoke, its call succeeded —
+        // asking the model again would only re-confirm what was just said.
+        assert_eq!(result.text, "好的");
         assert_eq!(result.steps, 1);
         assert_eq!(
             result.messages,
             vec![
                 ChatItem::assistant_text_tool_calls(
                     "好的",
-                    vec![tool_call("silent_add", r#"{"x":1,"y":2}"#)]
+                    vec![tool_call("add", r#"{"x":1,"y":2}"#)]
                 ),
                 ChatItem::tool("call_1", "3"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn caller_condition_does_not_stop_on_a_failed_step() {
+        let llm = ScriptedLlm::new(vec![
+            vec![delta("好的"), call("fail", r#"{"x":1,"y":2}"#), done()],
+            vec![delta("出错了"), done()],
+        ]);
+        let result = drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("1+2?")])
+                .tools(&typed_tools())
+                .stop_when(vec![Box::new(|steps: &[StepResult]| {
+                    steps.last().is_some_and(|step| {
+                        !step.text.is_empty() && step.ok && !step.tool_calls.is_empty()
+                    })
+                })])
+                .build(),
+        ))
+        .await;
+        let Some(Ok(StreamEvent::Done(result))) = result.into_iter().last() else {
+            panic!("expected a done event");
+        };
+        // The failed call makes the step not ok, so the condition keeps the
+        // loop running for a correction round.
+        assert_eq!(result.text, "好的出错了");
+        assert_eq!(result.steps, 2);
     }
 
     #[tokio::test]
@@ -577,9 +570,9 @@ mod tests {
             vec![delta("抱歉"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .build(),
         ))
         .await;
@@ -601,9 +594,9 @@ mod tests {
             vec![delta("重来"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .build(),
         ))
         .await;
@@ -631,9 +624,9 @@ mod tests {
             vec![delta("好"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .build(),
         ))
         .await;
@@ -655,9 +648,9 @@ mod tests {
             .collect();
         let llm = ScriptedLlm::new(rounds);
         let seen = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .build(),
         ))
         .await;
@@ -675,7 +668,7 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let seen = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
                 .cancel(cancel)
                 .build(),
@@ -687,9 +680,8 @@ mod tests {
     #[tokio::test]
     async fn cancelled_mid_stream_ends_silently() {
         let cancel = CancellationToken::new();
-        let ctx = ToolContext::default();
         let mut events = stream_text(
-            StreamTextParams::builder(&HangingLlm, &ctx)
+            StreamTextParams::builder(&HangingLlm)
                 .messages(vec![ChatItem::user("hi")])
                 .cancel(cancel.clone())
                 .build(),
@@ -706,7 +698,7 @@ mod tests {
     async fn chat_error_propagates() {
         let llm = ScriptedLlm::new(vec![vec![Err(LlmError::Failed("provider down".into()))]]);
         let seen = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
                 .build(),
         ))
@@ -718,38 +710,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_handler_runs_through_the_same_loop() {
-        let llm = ScriptedLlm::new(vec![vec![delta("查"), call("legacy_echo", "{}"), done()]]);
-        let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
-                .messages(vec![ChatItem::user("hi")])
-                .tools(&ToolRegistry::new(vec![Arc::new(LegacyEcho)]))
-                .build(),
-        ))
-        .await;
-        let Some(Ok(StreamEvent::Done(result))) = result.into_iter().last() else {
-            panic!("expected a done event");
-        };
-        assert_eq!(result.steps, 1);
-        assert_eq!(
-            result.messages,
-            vec![
-                ChatItem::assistant_text_tool_calls("查", vec![tool_call("legacy_echo", "{}")]),
-                ChatItem::tool("call_1", "legacy-ok"),
-            ]
-        );
-    }
-
-    #[tokio::test]
     async fn generate_text_collects_the_stream() {
         let llm = ScriptedLlm::new(vec![
             vec![delta("算一下"), call("add", r#"{"x":1,"y":2}"#), done()],
             vec![delta("等于 3"), done()],
         ]);
         let result = generate_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .build(),
         )
         .await
@@ -766,9 +735,9 @@ mod tests {
             vec![delta("等于 3"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .stop_when(vec![Box::new(|_steps: &[StepResult]| true)])
                 .build(),
         ))
@@ -798,9 +767,9 @@ mod tests {
             vec![delta("等于 3"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .stop_when(vec![Box::new(|_steps: &[StepResult]| false)])
                 .build(),
         ))
@@ -822,9 +791,9 @@ mod tests {
             vec![delta("好"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .stop_when(vec![Box::new(move |steps: &[StepResult]| {
                     recorder
                         .lock()
@@ -854,9 +823,9 @@ mod tests {
             vec![delta("等于 3"), done()],
         ]);
         let result = drain(&mut stream_text(
-            StreamTextParams::builder(&llm, &ToolContext::default())
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("1+2?")])
-                .tools(&typed_registry())
+                .tools(&typed_tools())
                 .stop_when(vec![
                     Box::new(|_steps: &[StepResult]| false),
                     Box::new(|steps: &[StepResult]| !steps.is_empty()),
@@ -873,9 +842,8 @@ mod tests {
     #[tokio::test]
     async fn text_only_round_never_consults_conditions() {
         let llm = ScriptedLlm::new(vec![vec![delta("你"), delta("好"), done()]]);
-        let ctx = ToolContext::default();
         let mut events = stream_text(
-            StreamTextParams::builder(&llm, &ctx)
+            StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
                 .stop_when(vec![Box::new(|_steps: &[StepResult]| true)])
                 .build(),

@@ -29,7 +29,7 @@ pub use memory::{
 };
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
-pub use tool::{Tool, ToolContext, ToolHandler, ToolOutcome, ToolRegistry};
+pub use tool::{NoArgs, Tool, ToolEntry, ToolOutcome, stop_after_memory_writes};
 pub use tts::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 
 use std::pin::Pin;
