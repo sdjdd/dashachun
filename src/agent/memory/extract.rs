@@ -22,7 +22,7 @@ use crate::agent::{
     Tool, ToolChoice, generate_text,
 };
 
-use super::{EntryMemory, MemoryEntry, MemoryHook, MemoryOwner, entry_id};
+use super::{EntryMemory, MAX_ENTRIES, MemoryEntry, MemoryHook, MemoryOwner, entry_id};
 
 /// Flushes once this many of the connection's own rows are pending — about
 /// six turns of dialogue per extraction call.
@@ -31,7 +31,7 @@ const BATCH_ROWS: usize = 12;
 const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（助手）与用户的对话，对照现有记忆条目，把值得长期保留的信息整理成对条目的修改，然后通过 memory_propose 工具一次性提交：
 - 只记稳定有用的事实：身份、偏好、习惯、重要关系、长期计划等；寒暄和一次性事务不记。
 - 与现有条目重复或仅措辞不同的事实跳过；事实变化时更新（update）原条目，失效时删除（delete）。
-- 条目接近上限（20）时优先更新或删除，而不是新增。
+- 条目接近上限（{{ max_entries }}）时优先更新或删除，而不是新增。
 - 每条内容一句话，自包含，第三人称。
 - 没有值得记录的就提交空列表。
 
@@ -322,7 +322,10 @@ fn build_messages(
             }
         })
         .collect::<Value>();
-    let system = render_extract("extract_system", context! { entries });
+    let system = render_extract(
+        "extract_system",
+        context! { entries, max_entries => MAX_ENTRIES },
+    );
     let user = render_extract(
         "extract_user",
         context! {
@@ -408,6 +411,7 @@ mod tests {
         };
         assert!(content.starts_with("你是长期记忆提炼器。"));
         assert!(content.contains("memory_propose 工具一次性提交"));
+        assert!(content.contains(&format!("条目接近上限（{MAX_ENTRIES}）")));
         assert!(content.ends_with("## 现有记忆条目\n[mem_01] likes Rust\n"));
         let ChatItem::User { content } = &messages[1] else {
             panic!("expected the dialogue batch")
