@@ -2,12 +2,11 @@ mod common;
 
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::StatusCode;
+use serde_json::json;
 use sqlx::PgPool;
-use tower::ServiceExt;
 
-use common::{app_with_registry, app_with_state, body_json, register};
+use common::{app_with_registry, app_with_state, body_json, register, request, send};
 
 use dashachun::provider::ProviderRegistry;
 
@@ -19,44 +18,10 @@ fn combined_registry() -> ProviderRegistry {
     registry
 }
 
-fn request(
-    method: Method,
-    path: &str,
-    body: Option<&str>,
-    cookie: Option<String>,
-) -> Request<Body> {
-    let mut builder = Request::builder().method(method).uri(path);
-    if body.is_some() {
-        builder = builder.header("content-type", "application/json");
-    }
-    if let Some(cookie) = cookie {
-        builder = builder.header("cookie", cookie);
-    }
-    builder
-        .body(Body::from(body.unwrap_or_default().to_owned()))
-        .unwrap()
-}
-
-async fn send(
-    app: &tower_http::normalize_path::NormalizePath<axum::Router>,
-    request: Request<Body>,
-) -> axum::response::Response {
-    app.clone().oneshot(request).await.unwrap()
-}
-
-async fn create(
-    app: &tower_http::normalize_path::NormalizePath<axum::Router>,
-    cookie: &str,
-    body: &str,
-) -> axum::response::Response {
+async fn create(app: &common::TestApp, cookie: &str, body: &str) -> axum::response::Response {
     send(
         app,
-        request(
-            Method::POST,
-            "/api/providers",
-            Some(body),
-            Some(cookie.into()),
-        ),
+        request("POST", "/api/providers", Some(body), Some(cookie)),
     )
     .await
 }
@@ -134,11 +99,7 @@ async fn create_list_and_get_roundtrip_the_row(pool: PgPool) {
     assert!(body["updated_at"].is_string());
     let id = body["id"].as_i64().unwrap();
 
-    let res = send(
-        &app,
-        request(Method::GET, "/api/providers", None, Some(cookie.clone())),
-    )
-    .await;
+    let res = send(&app, request("GET", "/api/providers", None, Some(&cookie))).await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = body_json(res).await;
     assert_eq!(body.as_array().unwrap().len(), 1);
@@ -146,12 +107,7 @@ async fn create_list_and_get_roundtrip_the_row(pool: PgPool) {
 
     let res = send(
         &app,
-        request(
-            Method::GET,
-            &format!("/api/providers/{id}"),
-            None,
-            Some(cookie),
-        ),
+        request("GET", &format!("/api/providers/{id}"), None, Some(&cookie)),
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -250,10 +206,10 @@ async fn update_patches_the_provided_fields(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::PUT,
+            "PUT",
             &format!("/api/providers/{id}"),
             Some(r#"{"name":"renamed"}"#),
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -266,10 +222,10 @@ async fn update_patches_the_provided_fields(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::PUT,
+            "PUT",
             &format!("/api/providers/{id}"),
             Some(r#"{"config":{"reply":"changed"}}"#),
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -296,10 +252,10 @@ async fn update_rejects_an_unbuildable_config_and_keeps_the_row(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::PUT,
+            "PUT",
             &format!("/api/providers/{id}"),
             Some(r#"{"config":{"base_url":"wss://asr","api_key":"k"}}"#),
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -308,12 +264,7 @@ async fn update_rejects_an_unbuildable_config_and_keeps_the_row(pool: PgPool) {
     let body = body_json(
         send(
             &app,
-            request(
-                Method::GET,
-                &format!("/api/providers/{id}"),
-                None,
-                Some(cookie),
-            ),
+            request("GET", &format!("/api/providers/{id}"), None, Some(&cookie)),
         )
         .await,
     )
@@ -329,10 +280,10 @@ async fn update_missing_provider_is_404(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::PUT,
+            "PUT",
             "/api/providers/999",
             Some(r#"{"name":"y"}"#),
-            Some(cookie),
+            Some(&cookie),
         ),
     )
     .await;
@@ -347,9 +298,9 @@ async fn activate_applies_only_when_every_stage_is_selected(pool: PgPool) {
 
     let mut ids = Vec::new();
     for provider_type in ["asr", "llm", "tts"] {
-        let body = format!(
-            r#"{{"type":"{provider_type}","name":"{provider_type}","kind":"stub","config":{{}}}}"#
-        );
+        let body =
+            json!({"type": provider_type, "name": provider_type, "kind": "stub", "config": {}})
+                .to_string();
         let id = body_json(create(&app, &cookie, &body).await).await["id"]
             .as_i64()
             .unwrap();
@@ -364,10 +315,10 @@ async fn activate_applies_only_when_every_stage_is_selected(pool: PgPool) {
         let res = send(
             &app,
             request(
-                Method::POST,
+                "POST",
                 &format!("/api/providers/{id}/activate"),
                 None,
-                Some(cookie.clone()),
+                Some(&cookie),
             ),
         )
         .await;
@@ -383,10 +334,10 @@ async fn activate_applies_only_when_every_stage_is_selected(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::POST,
+            "POST",
             &format!("/api/providers/{}/activate", ids[2]),
             None,
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -414,12 +365,7 @@ async fn activate_missing_provider_is_404(pool: PgPool) {
     let (cookie, _) = register(&app, &pool).await;
     let res = send(
         &app,
-        request(
-            Method::POST,
-            "/api/providers/999/activate",
-            None,
-            Some(cookie),
-        ),
+        request("POST", "/api/providers/999/activate", None, Some(&cookie)),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -432,19 +378,19 @@ async fn activate_with_a_broken_selection_keeps_the_generation(pool: PgPool) {
     let (cookie, _) = register(&app, &pool).await;
 
     for provider_type in ["asr", "llm", "tts"] {
-        let body = format!(
-            r#"{{"type":"{provider_type}","name":"{provider_type}","kind":"stub","config":{{}}}}"#
-        );
+        let body =
+            json!({"type": provider_type, "name": provider_type, "kind": "stub", "config": {}})
+                .to_string();
         let id = body_json(create(&app, &cookie, &body).await).await["id"]
             .as_i64()
             .unwrap();
         let res = send(
             &app,
             request(
-                Method::POST,
+                "POST",
                 &format!("/api/providers/{id}/activate"),
                 None,
-                Some(cookie.clone()),
+                Some(&cookie),
             ),
         )
         .await;
@@ -465,10 +411,10 @@ async fn activate_with_a_broken_selection_keeps_the_generation(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::POST,
+            "POST",
             &format!("/api/providers/{bad_id}/activate"),
             None,
-            Some(cookie),
+            Some(&cookie),
         ),
     )
     .await;
@@ -493,9 +439,9 @@ async fn updating_the_selected_provider_hot_applies(pool: PgPool) {
 
     let mut llm_id = None;
     for provider_type in ["asr", "llm", "tts"] {
-        let body = format!(
-            r#"{{"type":"{provider_type}","name":"{provider_type}","kind":"stub","config":{{}}}}"#
-        );
+        let body =
+            json!({"type": provider_type, "name": provider_type, "kind": "stub", "config": {}})
+                .to_string();
         let id = body_json(create(&app, &cookie, &body).await).await["id"]
             .as_i64()
             .unwrap();
@@ -505,10 +451,10 @@ async fn updating_the_selected_provider_hot_applies(pool: PgPool) {
         let res = send(
             &app,
             request(
-                Method::POST,
+                "POST",
                 &format!("/api/providers/{id}/activate"),
                 None,
-                Some(cookie.clone()),
+                Some(&cookie),
             ),
         )
         .await;
@@ -520,10 +466,10 @@ async fn updating_the_selected_provider_hot_applies(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::PUT,
+            "PUT",
             &format!("/api/providers/{}", llm_id.unwrap()),
             Some(r#"{"name":"renamed"}"#),
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -534,10 +480,10 @@ async fn updating_the_selected_provider_hot_applies(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::PUT,
+            "PUT",
             &format!("/api/providers/{}", llm_id.unwrap()),
             Some(r#"{"config":{"reply":"changed"}}"#),
-            Some(cookie),
+            Some(&cookie),
         ),
     )
     .await;
@@ -554,9 +500,9 @@ async fn delete_blocks_the_selected_provider(pool: PgPool) {
 
     let mut selected = None;
     for provider_type in ["asr", "llm", "tts"] {
-        let body = format!(
-            r#"{{"type":"{provider_type}","name":"{provider_type}","kind":"stub","config":{{}}}}"#
-        );
+        let body =
+            json!({"type": provider_type, "name": provider_type, "kind": "stub", "config": {}})
+                .to_string();
         let id = body_json(create(&app, &cookie, &body).await).await["id"]
             .as_i64()
             .unwrap();
@@ -566,10 +512,10 @@ async fn delete_blocks_the_selected_provider(pool: PgPool) {
         let res = send(
             &app,
             request(
-                Method::POST,
+                "POST",
                 &format!("/api/providers/{id}/activate"),
                 None,
-                Some(cookie.clone()),
+                Some(&cookie),
             ),
         )
         .await;
@@ -582,10 +528,10 @@ async fn delete_blocks_the_selected_provider(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::DELETE,
+            "DELETE",
             &format!("/api/providers/{}", selected.unwrap()),
             None,
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -594,10 +540,10 @@ async fn delete_blocks_the_selected_provider(pool: PgPool) {
     let res = send(
         &app,
         request(
-            Method::DELETE,
+            "DELETE",
             &format!("/api/providers/{spare}"),
             None,
-            Some(cookie.clone()),
+            Some(&cookie),
         ),
     )
     .await;
@@ -605,7 +551,7 @@ async fn delete_blocks_the_selected_provider(pool: PgPool) {
 
     let res = send(
         &app,
-        request(Method::DELETE, "/api/providers/999", None, Some(cookie)),
+        request("DELETE", "/api/providers/999", None, Some(&cookie)),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);

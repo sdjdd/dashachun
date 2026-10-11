@@ -12,10 +12,12 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use axum::body::{Body, to_bytes};
-use axum::http::Request;
+use axum::http::{Request, StatusCode};
 use axum_extra::extract::cookie::Key;
 use sqlx::PgPool;
 use tower::ServiceExt;
+
+pub type TestApp = tower_http::normalize_path::NormalizePath<axum::Router>;
 
 use dashachun::agent::{
     AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner,
@@ -137,43 +139,59 @@ fn test_state_with_registry_inner(
 
 /// The full app with a Host-derived gateway URL, plus the state handle for
 /// assertions on the published agent generation.
-pub fn app_with_state(
-    pool: PgPool,
-) -> (
-    tower_http::normalize_path::NormalizePath<axum::Router>,
-    ServerState,
-) {
+pub fn app_with_state(pool: PgPool) -> (TestApp, ServerState) {
     app_with_registry(pool, ProviderRegistry::with_stubs())
 }
 
 /// Like [`app_with_state`], but with a caller-supplied provider registry
 /// (e.g. builtins plus stubs) for tests that exercise real provider kinds.
-pub fn app_with_registry(
-    pool: PgPool,
-    registry: ProviderRegistry,
-) -> (
-    tower_http::normalize_path::NormalizePath<axum::Router>,
-    ServerState,
-) {
+pub fn app_with_registry(pool: PgPool, registry: ProviderRegistry) -> (TestApp, ServerState) {
     let state = test_state_with_registry(pool.clone(), None, registry);
     let auth = auth_state(pool);
     (dashachun::app(state.clone(), auth), state)
 }
 
 /// The full app with a Host-derived gateway URL.
-pub fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
+pub fn app(pool: PgPool) -> TestApp {
     app_with_state(pool).0
 }
 
-pub fn post_json(path: &str, body: &str, cookie: Option<String>) -> Request<Body> {
-    let mut builder = Request::builder()
-        .method("POST")
-        .uri(path)
-        .header("content-type", "application/json");
+pub fn request(
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    cookie: Option<&str>,
+) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(path);
+    if body.is_some() {
+        builder = builder.header("content-type", "application/json");
+    }
     if let Some(cookie) = cookie {
         builder = builder.header("cookie", cookie);
     }
-    builder.body(Body::from(body.to_owned())).unwrap()
+    builder
+        .body(Body::from(body.unwrap_or_default().to_owned()))
+        .unwrap()
+}
+
+pub async fn send(app: &TestApp, request: Request<Body>) -> axum::response::Response {
+    app.clone().oneshot(request).await.unwrap()
+}
+
+/// Sends the request and asserts the status, returning the parsed JSON body.
+/// A mismatch panics with the body, so the server's error JSON is visible.
+/// Only for handlers that answer with a JSON body — `AppError` responses are
+/// plain text, assert their status on `send` instead.
+pub async fn expect_json(
+    app: &TestApp,
+    request: Request<Body>,
+    expected: StatusCode,
+) -> serde_json::Value {
+    let response = send(app, request).await;
+    let status = response.status();
+    let value = body_json(response).await;
+    assert_eq!(status, expected, "unexpected status, body: {value}");
+    value
 }
 
 pub fn session_cookie(res: &axum::response::Response) -> String {
@@ -186,20 +204,14 @@ pub async fn body_json(res: axum::response::Response) -> serde_json::Value {
 }
 
 /// Registers a fresh user and returns the session cookie plus the row id.
-pub async fn register(
-    app: &tower_http::normalize_path::NormalizePath<axum::Router>,
-    pool: &PgPool,
-) -> (String, i64) {
+pub async fn register(app: &TestApp, pool: &PgPool) -> (String, i64) {
     let username = test_name();
-    let res = app
-        .clone()
-        .oneshot(post_json(
-            "/api/auth/register",
-            &format!(r#"{{"username":"{username}","password":"supersecret1"}}"#),
-            None,
-        ))
-        .await
-        .unwrap();
+    let body = serde_json::json!({"username": username, "password": "supersecret1"}).to_string();
+    let res = send(
+        app,
+        request("POST", "/api/auth/register", Some(&body), None),
+    )
+    .await;
     assert_eq!(res.status(), axum::http::StatusCode::CREATED);
     let cookie = session_cookie(&res);
     let user_id = sqlx::query_scalar::<_, i64>("SELECT id FROM users WHERE username = $1")

@@ -1,13 +1,15 @@
 mod common;
 
-use axum::body::{Body, to_bytes};
-use axum::http::{HeaderValue, Request, StatusCode};
+use axum::body::Body;
+use axum::http::Request;
+use axum::http::{HeaderValue, StatusCode};
 use sqlx::PgPool;
-use tower::ServiceExt;
+
+use common::{expect_json, send};
 
 const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
-fn app(pool: PgPool) -> tower_http::normalize_path::NormalizePath<axum::Router> {
+fn app(pool: PgPool) -> common::TestApp {
     let auth = common::auth_state(pool.clone());
     dashachun::app(
         common::test_state(pool, Some("ws://configured/gateway".into())),
@@ -32,21 +34,20 @@ fn ota_request(uri: &str) -> Request<Body> {
 #[sqlx::test]
 #[ignore]
 async fn root_returns_ok(pool: PgPool) {
-    let res = app(pool)
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
+    let app = app(pool);
+    let res = send(
+        &app,
+        Request::builder().uri("/").body(Body::empty()).unwrap(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 }
 
 #[sqlx::test]
 #[ignore]
 async fn ota_uses_configured_websocket_url(pool: PgPool) {
-    let res = app(pool).oneshot(ota_request("/api/ota")).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let app = app(pool);
+    let v = expect_json(&app, ota_request("/api/ota"), StatusCode::OK).await;
     assert_eq!(v["websocket"]["url"], "ws://configured/gateway");
     assert_eq!(v["websocket"]["token"], "");
     assert_eq!(v["server_time"]["timezone_offset"], 480);
@@ -57,55 +58,47 @@ async fn ota_uses_configured_websocket_url(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn ota_derives_websocket_url_from_host(pool: PgPool) {
-    let auth = common::auth_state(pool.clone());
-    let state = common::test_state(pool, None);
-    let res = dashachun::app(state, auth)
-        .oneshot(ota_request("/api/ota"))
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let app = dashachun::app(
+        common::test_state(pool.clone(), None),
+        common::auth_state(pool),
+    );
+    let v = expect_json(&app, ota_request("/api/ota"), StatusCode::OK).await;
     assert_eq!(v["websocket"]["url"], "ws://192.168.1.50:3000/gateway");
 }
 
 #[sqlx::test]
 #[ignore]
 async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
-    let auth = common::auth_state(pool.clone());
-    let state = common::test_state(pool, None);
+    let app = dashachun::app(
+        common::test_state(pool.clone(), None),
+        common::auth_state(pool),
+    );
     let mut req = ota_request("/api/ota");
     req.headers_mut()
         .insert("x-forwarded-proto", HeaderValue::from_static("https"));
-    let res = dashachun::app(state, auth).oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let v = expect_json(&app, req, StatusCode::OK).await;
     assert_eq!(v["websocket"]["url"], "wss://192.168.1.50:3000/gateway");
 }
 
 #[sqlx::test]
 #[ignore]
 async fn ota_forwarded_proto_http_keeps_ws(pool: PgPool) {
-    let auth = common::auth_state(pool.clone());
-    let state = common::test_state(pool, None);
+    let app = dashachun::app(
+        common::test_state(pool.clone(), None),
+        common::auth_state(pool),
+    );
     let mut req = ota_request("/api/ota");
     req.headers_mut()
         .insert("x-forwarded-proto", HeaderValue::from_static("http"));
-    let res = dashachun::app(state, auth).oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let v = expect_json(&app, req, StatusCode::OK).await;
     assert_eq!(v["websocket"]["url"], "ws://192.168.1.50:3000/gateway");
 }
 
 #[sqlx::test]
 #[ignore]
 async fn ota_trailing_slash_is_normalized(pool: PgPool) {
-    let res = app(pool).oneshot(ota_request("/api/ota/")).await.unwrap();
+    let app = app(pool);
+    let res = send(&app, ota_request("/api/ota/")).await;
     assert_eq!(res.status(), StatusCode::OK);
 }
 
@@ -118,22 +111,23 @@ async fn ota_missing_headers_is_bad_request(pool: PgPool) {
         .header("content-type", "application/json")
         .body(Body::from("{}"))
         .unwrap();
-    let res = app(pool).oneshot(req).await.unwrap();
+    let app = app(pool);
+    let res = send(&app, req).await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
 #[sqlx::test]
 #[ignore]
 async fn unknown_route_is_not_found(pool: PgPool) {
-    let res = app(pool)
-        .oneshot(
-            Request::builder()
-                .uri("/does-not-exist")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let app = app(pool);
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/does-not-exist")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 

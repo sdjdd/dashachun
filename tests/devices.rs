@@ -2,10 +2,10 @@ mod common;
 
 use axum::body::Body;
 use axum::http::{HeaderValue, Request, StatusCode};
+use serde_json::json;
 use sqlx::PgPool;
-use tower::ServiceExt;
 
-use common::{body_json, post_json, register};
+use common::{body_json, register, request, send};
 
 const CLIENT_ID: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -32,23 +32,6 @@ fn activate_request() -> Request<Body> {
         .unwrap()
 }
 
-fn get_with_cookie(path: &str, cookie: String) -> Request<Body> {
-    Request::builder()
-        .uri(path)
-        .header("cookie", cookie)
-        .body(Body::empty())
-        .unwrap()
-}
-
-fn delete_with_cookie(path: &str, cookie: String) -> Request<Body> {
-    Request::builder()
-        .method("DELETE")
-        .uri(path)
-        .header("cookie", cookie)
-        .body(Body::empty())
-        .unwrap()
-}
-
 async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
     sqlx::query_scalar(
         "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, 'default', '') RETURNING id",
@@ -63,7 +46,7 @@ async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
 #[ignore]
 async fn ota_creates_device_and_returns_code(pool: PgPool) {
     let app = common::app(pool);
-    let res = app.clone().oneshot(ota_request()).await.unwrap();
+    let res = send(&app, ota_request()).await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = body_json(res).await;
     let code = body["activation"]["code"]
@@ -76,11 +59,11 @@ async fn ota_creates_device_and_returns_code(pool: PgPool) {
     assert_eq!(body["websocket"]["token"], "");
 
     // the same device re-polls OTA: the code is reused, not rotated
-    let res = app.clone().oneshot(ota_request()).await.unwrap();
+    let res = send(&app, ota_request()).await;
     let body = body_json(res).await;
     assert_eq!(body["activation"]["code"].as_str(), Some(code));
 
-    let res = app.clone().oneshot(activate_request()).await.unwrap();
+    let res = send(&app, activate_request()).await;
     assert_eq!(res.status(), StatusCode::ACCEPTED);
 }
 
@@ -89,33 +72,35 @@ async fn ota_creates_device_and_returns_code(pool: PgPool) {
 async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     let app = common::app(pool.clone());
     let code = {
-        let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+        let body = body_json(send(&app, ota_request()).await).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent_id = create_agent(&pool, user_id).await;
 
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}","agent_id":999999}}"#),
-            Some(cookie.clone()),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &code, "agent_id": 999999}).to_string()),
+            Some(&cookie),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}","agent_id":{agent_id}}}"#),
-            Some(cookie.clone()),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &code, "agent_id": agent_id}).to_string()),
+            Some(&cookie),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
     let device = body_json(res).await;
     assert_eq!(device["client_id"], CLIENT_ID);
@@ -123,25 +108,17 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     assert!(device.get("id").is_none());
     assert!(device["created_at"].as_str().unwrap().contains('T'));
 
-    let res = app
-        .clone()
-        .oneshot(get_with_cookie("/api/devices", cookie.clone()))
-        .await
-        .unwrap();
+    let res = send(&app, request("GET", "/api/devices", None, Some(&cookie))).await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
 
     assert_eq!(
-        app.clone()
-            .oneshot(activate_request())
-            .await
-            .unwrap()
-            .status(),
+        send(&app, activate_request()).await.status(),
         StatusCode::OK
     );
 
     let token = {
-        let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+        let body = body_json(send(&app, ota_request()).await).await;
         assert!(body.get("activation").is_none());
         body["websocket"]["token"].as_str().unwrap().to_owned()
     };
@@ -174,19 +151,21 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
         "a bound device whose agent is gone must be rejected"
     );
 
-    let res = app
-        .clone()
-        .oneshot(delete_with_cookie(
+    let res = send(
+        &app,
+        request(
+            "DELETE",
             &format!("/api/devices/{CLIENT_ID}"),
-            cookie,
-        ))
-        .await
-        .unwrap();
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
     assert!(connect_gateway(addr, Some(&token)).await.is_err());
 
-    let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+    let body = body_json(send(&app, ota_request()).await).await;
     assert!(body["activation"]["code"].is_string());
     assert_eq!(body["websocket"]["token"], "");
 
@@ -225,7 +204,7 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
         common::auth_state(pool.clone()),
     );
     let old_code = {
-        let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+        let body = body_json(send(&app, ota_request()).await).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
@@ -250,18 +229,19 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent_id = create_agent(&pool, user_id).await;
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{old_code}","agent_id":{agent_id}}}"#),
-            Some(cookie),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &old_code, "agent_id": agent_id}).to_string()),
+            Some(&cookie),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+    let body = body_json(send(&app, ota_request()).await).await;
     let new_code = body["activation"]["code"].as_str().unwrap();
     assert_ne!(new_code, old_code);
 }
@@ -271,34 +251,36 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
 async fn binding_taken_code_is_not_found(pool: PgPool) {
     let app = common::app(pool.clone());
     let code = {
-        let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+        let body = body_json(send(&app, ota_request()).await).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent_id = create_agent(&pool, user_id).await;
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}","agent_id":{agent_id}}}"#),
-            Some(cookie),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &code, "agent_id": agent_id}).to_string()),
+            Some(&cookie),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 
     let (other, other_id) = register(&app, &pool).await;
     let other_agent = create_agent(&pool, other_id).await;
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}","agent_id":{other_agent}}}"#),
-            Some(other),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &code, "agent_id": other_agent}).to_string()),
+            Some(&other),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
@@ -307,7 +289,7 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
 async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgPool) {
     let app = common::app(pool.clone());
     let code = {
-        let body = body_json(app.clone().oneshot(ota_request()).await.unwrap()).await;
+        let body = body_json(send(&app, ota_request()).await).await;
         body["activation"]["code"].as_str().unwrap().to_owned()
     };
 
@@ -315,25 +297,27 @@ async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgP
     let owner_agent = create_agent(&pool, owner_id).await;
     let (other, _) = register(&app, &pool).await;
 
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}","agent_id":{owner_agent}}}"#),
-            Some(other),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &code, "agent_id": owner_agent}).to_string()),
+            Some(&other),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    let res = app
-        .clone()
-        .oneshot(post_json(
+    let res = send(
+        &app,
+        request(
+            "POST",
             "/api/devices/activate",
-            &format!(r#"{{"code":"{code}","agent_id":{owner_agent}}}"#),
-            Some(owner),
-        ))
-        .await
-        .unwrap();
+            Some(&json!({"code": &code, "agent_id": owner_agent}).to_string()),
+            Some(&owner),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
 }
