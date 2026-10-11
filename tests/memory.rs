@@ -11,8 +11,8 @@ use tokio_util::sync::CancellationToken;
 use common::{RecordingHook, owner, session};
 use dashachun::agent::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor, Llm,
-    LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ToolChoice,
-    ToolSpec,
+    LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ReasoningEffort,
+    ToolChoice, ToolSpec,
 };
 use dashachun::agent::{ChatItem, ToolCall};
 
@@ -477,6 +477,7 @@ async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
 struct ProposeLlm {
     rounds: Mutex<VecDeque<Vec<Result<LlmEvent, LlmError>>>>,
     calls: Mutex<Vec<Vec<ChatItem>>>,
+    efforts: Mutex<Vec<Option<ReasoningEffort>>>,
 }
 
 impl ProposeLlm {
@@ -484,6 +485,7 @@ impl ProposeLlm {
         Self {
             rounds: Mutex::new(rounds.into()),
             calls: Mutex::new(Vec::new()),
+            efforts: Mutex::new(Vec::new()),
         }
     }
 
@@ -494,6 +496,10 @@ impl ProposeLlm {
     fn last_prompt(&self) -> Vec<ChatItem> {
         self.calls.lock().unwrap().last().unwrap().clone()
     }
+
+    fn efforts(&self) -> Vec<Option<ReasoningEffort>> {
+        self.efforts.lock().unwrap().clone()
+    }
 }
 
 impl Llm for ProposeLlm {
@@ -502,9 +508,11 @@ impl Llm for ProposeLlm {
         history: Vec<ChatItem>,
         _tools: Vec<ToolSpec>,
         _tool_choice: Option<ToolChoice>,
+        reasoning: Option<ReasoningEffort>,
         _cancel: CancellationToken,
     ) -> LlmEvents<'_> {
         self.calls.lock().unwrap().push(history);
+        self.efforts.lock().unwrap().push(reasoning);
         let round = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
         Box::pin(futures_util::stream::iter(round))
     }
@@ -628,6 +636,8 @@ async fn extractor_flushes_a_full_batch_into_entries(pool: PgPool) {
     let listed = entries.list().await;
     assert_eq!(listed[0].content, "用户每天用 Go 写后端");
     assert_eq!(listed[1].content, "用户在杭州工作");
+    // The flush runs at low effort — a background batch nobody waits on.
+    assert_eq!(llm.efforts(), vec![Some(ReasoningEffort::Low)]);
 
     // The dialogue held the utterances and the spoken reply, not the tool
     // exchange.

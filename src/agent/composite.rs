@@ -9,9 +9,9 @@ use tracing::{Instrument, debug, info, trace, warn};
 
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
-    AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, Memory, ReplyCapture, StreamEvent,
-    StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolEntry, Tts, TtsEvent,
-    UtteranceCapture, emotion, stop_after_memory_writes, stream_text,
+    AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, Memory, ReasoningEffort,
+    ReplyCapture, StreamEvent, StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolEntry,
+    Tts, TtsEvent, UtteranceCapture, emotion, stop_after_memory_writes, stream_text,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -757,6 +757,10 @@ async fn think_stage(
         StreamTextParams::builder(deps.llm.as_ref())
             .messages(messages)
             .tools(&deps.tools)
+            // Thinking models buffer reasoning before any content — a spoken
+            // reply must start immediately, so the turn pins reasoning off
+            // no matter what the provider config says.
+            .reasoning(ReasoningEffort::None)
             .stop_when(vec![stop_after_memory_writes()])
             .cancel(cancel.clone())
             .build(),
@@ -1032,12 +1036,37 @@ mod tests {
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             self.calls.lock().unwrap().push(history);
             let text = self.reply.clone();
             Box::pin(futures_util::stream::iter([
                 Ok(LlmEvent::Delta { text }),
+                Ok(LlmEvent::Done),
+            ]))
+        }
+    }
+
+    /// Records the `reasoning` every call received — the voice turn's
+    /// reasoning-off pin is a latency guarantee, this is its guard.
+    #[derive(Default)]
+    struct EffortProbe {
+        efforts: Mutex<Vec<Option<ReasoningEffort>>>,
+    }
+
+    impl Llm for EffortProbe {
+        fn chat(
+            &self,
+            _history: Vec<ChatItem>,
+            _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
+            reasoning: Option<crate::agent::ReasoningEffort>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            self.efforts.lock().unwrap().push(reasoning);
+            Box::pin(futures_util::stream::iter([
+                Ok(LlmEvent::Delta { text: "hi".into() }),
                 Ok(LlmEvent::Done),
             ]))
         }
@@ -1055,6 +1084,7 @@ mod tests {
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -1095,6 +1125,7 @@ mod tests {
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -1574,6 +1605,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let events = self
@@ -1708,6 +1740,29 @@ mod tests {
                 ChatItem::user("hello"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn the_voice_turn_pins_reasoning_off() {
+        let probe = Arc::new(EffortProbe::default());
+        let agent = CompositeAgent {
+            llm: probe.clone(),
+            vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+            ..stub_agent()
+        };
+        let (tx, _output) = run(agent);
+
+        tx.send(AgentInput::ListenStart { mode: None })
+            .await
+            .unwrap();
+        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+        let efforts = wait_until("the llm call", || {
+            let seen = probe.efforts.lock().unwrap().clone();
+            (!seen.is_empty()).then_some(seen)
+        })
+        .await;
+        assert_eq!(efforts, vec![Some(ReasoningEffort::None)]);
     }
 
     #[tokio::test]
@@ -1891,6 +1946,7 @@ mod tests {
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -2070,6 +2126,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::unfold(false, move |delivered| {
@@ -2433,6 +2490,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
             _tool_choice: Option<crate::agent::ToolChoice>,
+            _reasoning: Option<crate::agent::ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             // The pause before the failure lets the driver process the first

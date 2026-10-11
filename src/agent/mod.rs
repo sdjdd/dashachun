@@ -22,7 +22,9 @@ pub use generate::{
     StepResult, StopCondition, StreamEvent, StreamEvents, StreamResult, StreamTextParams,
     generate_text, stream_text,
 };
-pub use llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolChoice, ToolSpec};
+pub use llm::{
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice, ToolSpec,
+};
 pub use memory::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor,
     InMemEntryMemory, InMemMemory, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, MemoryOwner,

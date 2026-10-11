@@ -195,20 +195,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn openai_rejects_a_bad_reasoning_effort_at_build_time() {
-        let registry = ProviderRegistry::with_builtins();
-        let err = err_of(registry.build_llm(
-            "openai",
-            &json!({
-                "base_url": "http://localhost/v1",
-                "api_key": "k",
-                "model": "m",
-                "reasoning_effort": "bogus"
-            }),
-        ));
-        assert!(err.contains("reasoning effort"), "unexpected error: {err}");
-    }
     #[tokio::test]
     async fn builds_the_volc_tts_from_its_config() {
         let registry = ProviderRegistry::with_builtins();

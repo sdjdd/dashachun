@@ -20,21 +20,18 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolChoice, ToolSpec};
+use crate::agent::{
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice, ToolSpec,
+};
 use crate::provider::ProviderRegistry;
 
-fn parse_reasoning_effort(
-    value: &str,
-) -> Result<async_openai::types::chat::ReasoningEffort, LlmError> {
-    use async_openai::types::chat::ReasoningEffort;
-    match value.to_ascii_lowercase().as_str() {
-        "none" => Ok(ReasoningEffort::None),
-        "low" => Ok(ReasoningEffort::Low),
-        "medium" => Ok(ReasoningEffort::Medium),
-        "high" => Ok(ReasoningEffort::High),
-        other => Err(LlmError::from(format!(
-            "invalid reasoning effort {other}: expected none/low/medium/high"
-        ))),
+fn reasoning_wire(effort: ReasoningEffort) -> async_openai::types::chat::ReasoningEffort {
+    use async_openai::types::chat::ReasoningEffort as Wire;
+    match effort {
+        ReasoningEffort::None => Wire::None,
+        ReasoningEffort::Low => Wire::Low,
+        ReasoningEffort::Medium => Wire::Medium,
+        ReasoningEffort::High => Wire::High,
     }
 }
 
@@ -48,8 +45,6 @@ pub struct OpenAiConfig {
     pub model: String,
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    #[serde(default)]
-    pub reasoning_effort: Option<String>,
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -59,7 +54,6 @@ impl fmt::Debug for OpenAiConfig {
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
-            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -73,10 +67,6 @@ pub fn register(registry: &mut ProviderRegistry) {
 fn build(config: &Value) -> Result<Arc<dyn Llm>, String> {
     let config: OpenAiConfig = serde_json::from_value(config.clone())
         .map_err(|err| format!("invalid openai llm config: {err}"))?;
-    if let Some(effort) = &config.reasoning_effort {
-        parse_reasoning_effort(effort)
-            .map_err(|err| format!("invalid openai llm config: {err}"))?;
-    }
     Ok(Arc::new(OpenAiLlm::new(config)))
 }
 
@@ -100,6 +90,7 @@ impl OpenAiLlm {
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
         tool_choice: Option<ToolChoice<'_>>,
+        reasoning: Option<ReasoningEffort>,
     ) -> Result<async_openai::types::chat::CreateChatCompletionRequest, LlmError> {
         let messages = history
             .into_iter()
@@ -164,8 +155,10 @@ impl OpenAiLlm {
         if let Some(max_tokens) = self.config.max_tokens {
             request.max_tokens(max_tokens);
         }
-        if let Some(effort) = self.config.reasoning_effort.as_deref() {
-            request.reasoning_effort(parse_reasoning_effort(effort)?);
+        // The caller decides the effort per call — with none given, the
+        // field is omitted and the server default applies.
+        if let Some(effort) = reasoning {
+            request.reasoning_effort(reasoning_wire(effort));
         }
         if !tools.is_empty() {
             request.tools(
@@ -221,10 +214,11 @@ impl Llm for OpenAiLlm {
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
         tool_choice: Option<ToolChoice<'_>>,
+        reasoning: Option<ReasoningEffort>,
         cancel: CancellationToken,
     ) -> LlmEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<LlmEvent, LlmError>>();
-        let request = match self.build_request(history, tools, tool_choice) {
+        let request = match self.build_request(history, tools, tool_choice, reasoning) {
             Ok(request) => request,
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -353,18 +347,6 @@ async fn run(
 mod tests {
     use super::*;
     use async_openai::types::chat::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
-    #[test]
-    fn parses_reasoning_effort_case_insensitively() {
-        assert_eq!(
-            parse_reasoning_effort("none").unwrap(),
-            async_openai::types::chat::ReasoningEffort::None
-        );
-        assert_eq!(
-            parse_reasoning_effort("HIGH").unwrap(),
-            async_openai::types::chat::ReasoningEffort::High
-        );
-        assert!(parse_reasoning_effort("bogus").is_err());
-    }
 
     fn config() -> OpenAiConfig {
         OpenAiConfig {
@@ -372,7 +354,6 @@ mod tests {
             api_key: "k".into(),
             model: "m".into(),
             max_tokens: None,
-            reasoning_effort: None,
         }
     }
 
@@ -396,6 +377,7 @@ mod tests {
                 ],
                 Vec::new(),
                 None,
+                None,
             )
             .unwrap();
         let value = serde_json::to_value(&request).unwrap();
@@ -417,6 +399,7 @@ mod tests {
                 vec![ChatItem::user("hi")],
                 tool_specs(),
                 Some(ToolChoice::Named("add")),
+                None,
             )
             .unwrap(),
         )
@@ -431,6 +414,7 @@ mod tests {
                 vec![ChatItem::user("hi")],
                 tool_specs(),
                 Some(ToolChoice::Required),
+                None,
             )
             .unwrap(),
         )
@@ -444,6 +428,7 @@ mod tests {
                 vec![ChatItem::user("hi")],
                 tool_specs(),
                 Some(ToolChoice::Auto),
+                None,
             )
             .unwrap(),
         )
@@ -455,7 +440,7 @@ mod tests {
     fn tool_choice_none_is_omitted_and_needs_advertised_tools() {
         let llm = OpenAiLlm::new(config());
         let value = serde_json::to_value(
-            llm.build_request(vec![ChatItem::user("hi")], tool_specs(), None)
+            llm.build_request(vec![ChatItem::user("hi")], tool_specs(), None, None)
                 .unwrap(),
         )
         .unwrap();
@@ -468,12 +453,54 @@ mod tests {
                 vec![ChatItem::user("hi")],
                 Vec::new(),
                 Some(ToolChoice::Named("add")),
+                None,
             )
             .unwrap(),
         )
         .unwrap();
         assert!(value.get("tool_choice").is_none());
         assert!(value.get("tools").is_none());
+    }
+
+    #[test]
+    fn reasoning_maps_to_the_wire() {
+        let llm = OpenAiLlm::new(config());
+        let value = serde_json::to_value(
+            llm.build_request(
+                vec![ChatItem::user("hi")],
+                Vec::new(),
+                None,
+                Some(ReasoningEffort::Low),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["reasoning_effort"], "low");
+
+        // `None` is a real value, not the absent one: it switches reasoning
+        // off on the wire.
+        let value = serde_json::to_value(
+            llm.build_request(
+                vec![ChatItem::user("hi")],
+                Vec::new(),
+                None,
+                Some(ReasoningEffort::None),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn reasoning_unset_is_omitted() {
+        let llm = OpenAiLlm::new(config());
+        let value = serde_json::to_value(
+            llm.build_request(vec![ChatItem::user("hi")], Vec::new(), None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(value.get("reasoning_effort").is_none());
     }
 
     fn chunk(

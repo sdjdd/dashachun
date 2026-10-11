@@ -32,6 +32,18 @@ pub enum ToolChoice<'a> {
     Named(&'a str),
 }
 
+/// The chat API's `reasoning_effort` for thinking models, set per call: a
+/// `Some` effort rides the call's every round; an absent one omits the wire
+/// field entirely (the server default applies). The `None` variant sends
+/// `none` explicitly — reasoning off for this call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatItem {
@@ -138,6 +150,7 @@ pub trait Llm: Send + Sync {
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
         tool_choice: Option<ToolChoice<'_>>,
+        reasoning: Option<ReasoningEffort>,
         cancel: CancellationToken,
     ) -> LlmEvents<'_>;
 }

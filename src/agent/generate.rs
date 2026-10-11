@@ -19,7 +19,9 @@ use std::pin::Pin;
 use futures_util::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use super::llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolChoice};
+use super::llm::{
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice,
+};
 use super::tool::{ToolEntry, execute_tool};
 
 /// Cap on LLM rounds per generation. A model stuck requesting tools would
@@ -77,6 +79,7 @@ struct Loop<'a> {
     llm: &'a dyn Llm,
     tools: &'a [ToolEntry],
     tool_choice: Option<ToolChoice<'a>>,
+    reasoning: Option<ReasoningEffort>,
     cancel: CancellationToken,
     stop_when: Vec<StopCondition>,
     working: Vec<ChatItem>,
@@ -106,7 +109,10 @@ struct Loop<'a> {
 /// (none: the model decides — the wire field is omitted; `Auto` sends `auto`
 /// explicitly, `Required` forces some tool call, `Named(&str)` exactly that
 /// tool; it rides every round's request and is ignored when no tools are
-/// advertised), `stop_when` (empty:
+/// advertised), `reasoning` (unset: the provider's configured
+/// `reasoning_effort`, if any, applies — a set value overrides it for this
+/// call's every round, with [`ReasoningEffort::None`] sending `none`
+/// explicitly to switch reasoning off), `stop_when` (empty:
 /// never stop early) and `cancel` (a fresh token).
 #[derive(bon::Builder)]
 pub struct StreamTextParams<'a> {
@@ -116,6 +122,7 @@ pub struct StreamTextParams<'a> {
     pub messages: Vec<ChatItem>,
     pub tools: Option<&'a [ToolEntry]>,
     pub tool_choice: Option<ToolChoice<'a>>,
+    pub reasoning: Option<ReasoningEffort>,
     #[builder(default)]
     pub stop_when: Vec<StopCondition>,
     #[builder(default = CancellationToken::new())]
@@ -138,6 +145,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         messages,
         tools,
         tool_choice,
+        reasoning,
         stop_when,
         cancel,
     } = params;
@@ -146,6 +154,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         llm,
         tools,
         tool_choice,
+        reasoning,
         cancel,
         stop_when,
         working: messages,
@@ -185,6 +194,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             state.working.clone(),
                             specs,
                             state.tool_choice,
+                            state.reasoning,
                             state.cancel.clone(),
                         );
                         state.phase = Phase::Chat(chat);
@@ -338,6 +348,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<ToolSpec>,
             _tool_choice: Option<ToolChoice<'_>>,
+            _reasoning: Option<ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let events =
@@ -358,6 +369,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<ToolSpec>,
             _tool_choice: Option<ToolChoice<'_>>,
+            _reasoning: Option<ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::unfold(
@@ -444,10 +456,11 @@ mod tests {
         vec![ToolEntry::new(Add), ToolEntry::new(Failing)]
     }
 
-    /// The [`ScriptedLlm`] behavior plus a record of the `tool_choice` every
-    /// round received — the loop-contract probe.
+    /// The [`ScriptedLlm`] behavior plus a record of the `tool_choice` and
+    /// `reasoning` every round received — the loop-contract probe.
     struct RecordingLlm {
         choices: Mutex<Vec<Option<RecordedChoice>>>,
+        efforts: Mutex<Vec<Option<ReasoningEffort>>>,
         rounds: Mutex<VecDeque<Vec<Result<LlmEvent, LlmError>>>>,
     }
 
@@ -462,12 +475,17 @@ mod tests {
         fn new(rounds: Vec<Vec<Result<LlmEvent, LlmError>>>) -> Self {
             Self {
                 choices: Mutex::new(Vec::new()),
+                efforts: Mutex::new(Vec::new()),
                 rounds: Mutex::new(rounds.into()),
             }
         }
 
         fn choices(&self) -> Vec<Option<RecordedChoice>> {
             self.choices.lock().unwrap().clone()
+        }
+
+        fn efforts(&self) -> Vec<Option<ReasoningEffort>> {
+            self.efforts.lock().unwrap().clone()
         }
     }
 
@@ -477,6 +495,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<ToolSpec>,
             tool_choice: Option<ToolChoice<'_>>,
+            reasoning: Option<ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             self.choices
@@ -487,6 +506,7 @@ mod tests {
                     ToolChoice::Required => RecordedChoice::Required,
                     ToolChoice::Named(name) => RecordedChoice::Named(name.into()),
                 }));
+            self.efforts.lock().unwrap().push(reasoning);
             let events =
                 self.rounds.lock().unwrap().pop_front().unwrap_or_else(|| {
                     vec![Err(LlmError::Failed("scripted llm exhausted".into()))]
@@ -832,6 +852,41 @@ mod tests {
         .unwrap();
         assert_eq!(result.steps, 2);
         assert_eq!(llm.choices(), vec![None, None]);
+    }
+
+    #[tokio::test]
+    async fn reasoning_rides_every_round() {
+        let llm = RecordingLlm::new(vec![
+            vec![call("add", r#"{"x":1,"y":2}"#), done()],
+            vec![delta("等于 3"), done()],
+        ]);
+        let result = generate_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("1+2?")])
+                .tools(&typed_tools())
+                .tool_choice(ToolChoice::Named("add"))
+                .reasoning(ReasoningEffort::Low)
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.steps, 2);
+        assert_eq!(
+            llm.efforts(),
+            vec![Some(ReasoningEffort::Low), Some(ReasoningEffort::Low)]
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_defaults_to_none_every_round() {
+        let llm = RecordingLlm::new(vec![vec![delta("好"), done()]]);
+        drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("hi")])
+                .build(),
+        ))
+        .await;
+        assert_eq!(llm.efforts(), vec![None]);
     }
 
     #[tokio::test]

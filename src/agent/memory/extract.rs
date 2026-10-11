@@ -17,8 +17,8 @@ use tracing::{debug, warn};
 
 use crate::agent::tool::{MemoryPropose, ToolEntry};
 use crate::agent::{
-    AgentSession, ChatItem, Llm, StepResult, StopCondition, StreamTextParams, Tool, ToolChoice,
-    generate_text,
+    AgentSession, ChatItem, Llm, ReasoningEffort, StepResult, StopCondition, StreamTextParams,
+    Tool, ToolChoice, generate_text,
 };
 
 use super::{EntryMemory, MemoryEntry, MemoryHook, MemoryOwner, entry_id};
@@ -220,6 +220,9 @@ async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
             .messages(messages)
             .tools(&tools)
             .tool_choice(ToolChoice::Named(MemoryPropose::NAME))
+            // A background batch: a little thinking sharpens the distillation
+            // and nobody waits on the first token.
+            .reasoning(ReasoningEffort::Low)
             .stop_when(vec![stop_after_proposal()])
             .build(),
     )
@@ -388,6 +391,7 @@ mod tests {
             _history: Vec<ChatItem>,
             _tools: Vec<ToolSpec>,
             _tool_choice: Option<ToolChoice>,
+            _reasoning: Option<ReasoningEffort>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::iter(vec![Err(LlmError::Failed(
