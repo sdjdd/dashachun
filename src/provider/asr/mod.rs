@@ -34,12 +34,6 @@ impl StubAsr {
     }
 }
 
-impl Default for StubAsr {
-    fn default() -> Self {
-        Self::new("你好")
-    }
-}
-
 impl Asr for StubAsr {
     fn transcribe(&self, audio: AudioStream, _cancel: CancellationToken) -> AsrEvents<'_> {
         let text = self.text.clone();
