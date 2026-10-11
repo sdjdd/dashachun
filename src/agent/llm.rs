@@ -1,4 +1,3 @@
-use std::fmt;
 use std::pin::Pin;
 
 use futures_util::Stream;
@@ -117,20 +116,11 @@ pub enum LlmEvent {
     Done,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum LlmError {
+    #[error("llm failed: {0}")]
     Failed(String),
 }
-
-impl fmt::Display for LlmError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LlmError::Failed(message) => write!(f, "llm failed: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for LlmError {}
 
 impl From<String> for LlmError {
     fn from(message: String) -> Self {

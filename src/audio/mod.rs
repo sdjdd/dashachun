@@ -1,4 +1,3 @@
-use std::fmt;
 use std::pin::Pin;
 
 use futures_util::Stream;
@@ -31,64 +30,20 @@ pub const DOWNLINK: DownlinkAudio = DownlinkAudio {
 
 const MAX_FRAME_SAMPLES: usize = 5760;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
+    #[error("unsupported channel count: {0}")]
     UnsupportedChannels(u16),
-    Opus(opus::Error),
+    #[error("opus decode failed: {0}")]
+    Opus(#[from] opus::Error),
 }
 
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DecodeError::UnsupportedChannels(n) => write!(f, "unsupported channel count: {n}"),
-            DecodeError::Opus(err) => write!(f, "opus decode failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for DecodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            DecodeError::Opus(err) => Some(err),
-            DecodeError::UnsupportedChannels(_) => None,
-        }
-    }
-}
-
-impl From<opus::Error> for DecodeError {
-    fn from(err: opus::Error) -> Self {
-        DecodeError::Opus(err)
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
+    #[error("unsupported channel count: {0}")]
     UnsupportedChannels(u16),
-    Opus(opus::Error),
-}
-
-impl fmt::Display for EncodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EncodeError::UnsupportedChannels(n) => write!(f, "unsupported channel count: {n}"),
-            EncodeError::Opus(err) => write!(f, "opus encode failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for EncodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            EncodeError::Opus(err) => Some(err),
-            EncodeError::UnsupportedChannels(_) => None,
-        }
-    }
-}
-
-impl From<opus::Error> for EncodeError {
-    fn from(err: opus::Error) -> Self {
-        EncodeError::Opus(err)
-    }
+    #[error("opus encode failed: {0}")]
+    Opus(#[from] opus::Error),
 }
 
 pub struct OpusDecoder {

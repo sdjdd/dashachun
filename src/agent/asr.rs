@@ -1,4 +1,3 @@
-use std::fmt;
 use std::pin::Pin;
 
 use futures_util::Stream;
@@ -14,20 +13,11 @@ pub enum AsrEvent {
     Final { text: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AsrError {
+    #[error("asr failed: {0}")]
     Failed(String),
 }
-
-impl fmt::Display for AsrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AsrError::Failed(message) => write!(f, "asr failed: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for AsrError {}
 
 impl From<String> for AsrError {
     fn from(message: String) -> Self {

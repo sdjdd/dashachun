@@ -106,24 +106,15 @@ pub struct Response {
     pub payload: Option<Value>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
+    #[error("truncated response frame")]
     Truncated,
-    Gzip(std::io::Error),
-    Json(serde_json::Error),
+    #[error("gzip error: {0}")]
+    Gzip(#[from] std::io::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
 }
-
-impl std::fmt::Display for ProtocolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProtocolError::Truncated => write!(f, "truncated response frame"),
-            ProtocolError::Gzip(err) => write!(f, "gzip error: {err}"),
-            ProtocolError::Json(err) => write!(f, "json error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for ProtocolError {}
 
 pub fn parse_response(msg: &[u8]) -> Result<Response, ProtocolError> {
     if msg.len() < 4 {

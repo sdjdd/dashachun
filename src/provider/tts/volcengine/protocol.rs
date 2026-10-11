@@ -151,20 +151,11 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
+    #[error("truncated message frame")]
     Truncated,
 }
-
-impl std::fmt::Display for ProtocolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProtocolError::Truncated => write!(f, "truncated message frame"),
-        }
-    }
-}
-
-impl std::error::Error for ProtocolError {}
 
 fn take<'a>(data: &mut &'a [u8], n: usize) -> Result<&'a [u8], ProtocolError> {
     if data.len() < n {

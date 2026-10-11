@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::fmt;
 use std::pin::Pin;
 
 use futures_util::{Stream, StreamExt};
@@ -101,36 +100,12 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     std::env::var(key).ok().and_then(|value| value.parse().ok())
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum VadError {
+    #[error("unsupported vad sample rate: {0}")]
     UnsupportedSampleRate(u32),
-    Build(voice_activity_detector::Error),
-}
-
-impl fmt::Display for VadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VadError::UnsupportedSampleRate(rate) => {
-                write!(f, "unsupported vad sample rate: {rate}")
-            }
-            VadError::Build(err) => write!(f, "vad model error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for VadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            VadError::Build(err) => Some(err),
-            VadError::UnsupportedSampleRate(_) => None,
-        }
-    }
-}
-
-impl From<voice_activity_detector::Error> for VadError {
-    fn from(err: voice_activity_detector::Error) -> Self {
-        VadError::Build(err)
-    }
+    #[error("vad model error: {0}")]
+    Build(#[from] voice_activity_detector::Error),
 }
 
 pub trait Vad: Send {

@@ -1,4 +1,3 @@
-use std::fmt;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -23,20 +22,11 @@ pub enum TtsEvent {
     Done,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum TtsError {
+    #[error("tts failed: {0}")]
     Failed(String),
 }
-
-impl fmt::Display for TtsError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TtsError::Failed(message) => write!(f, "tts failed: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for TtsError {}
 
 impl From<String> for TtsError {
     fn from(message: String) -> Self {
