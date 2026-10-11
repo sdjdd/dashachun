@@ -27,6 +27,24 @@ pub enum AddError {
     Failed(String),
 }
 
+/// One proposed change to the scope's entries, already validated — the
+/// payload the extraction tool submits, applied as one batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryOp {
+    Add(String),
+    Update(i32, String),
+    Delete(i32),
+}
+
+/// The per-op outcome of [`EntryMemory::apply`], in the submitted order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EntryOpResult {
+    Added(i32),
+    Updated(i32),
+    Deleted(i32),
+    Skipped(String),
+}
+
 /// The entry-based user memory for one (user_id, agent_id) scope: short
 /// durable facts the LLM maintains through the memory tools and the prompt
 /// reads every turn. A fresh instance is built per connection, bound to the
@@ -47,6 +65,12 @@ pub trait EntryMemory: Send + Sync {
     /// Removes an entry; `false` when the id is unknown. The id is never
     /// reused within the scope.
     async fn delete(&self, mem_no: i32) -> Result<bool, String>;
+
+    /// Applies a batch of changes in one transaction, in order, and reports
+    /// one outcome per submitted op. Best-effort: a full memory skips the
+    /// remaining adds, an unknown id skips that op, a store failure skips
+    /// them all — nothing about one op blocks the others.
+    async fn apply(&self, ops: Vec<EntryOp>) -> Vec<EntryOpResult>;
 }
 
 pub struct DbEntryMemory {
@@ -162,6 +186,106 @@ impl EntryMemory for DbEntryMemory {
         .map_err(|err| err.to_string())?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn apply(&self, ops: Vec<EntryOp>) -> Vec<EntryOpResult> {
+        match self.apply_tx(&ops).await {
+            Ok(results) => results,
+            Err(err) => {
+                warn!(%err, "failed to apply a memory entry batch");
+                ops.iter()
+                    .map(|_| EntryOpResult::Skipped("memory store failed".into()))
+                    .collect()
+            }
+        }
+    }
+}
+
+impl DbEntryMemory {
+    /// One transaction for the whole batch — the advisory lock serializes
+    /// the scope, so the running active count and the monotonic id
+    /// assignment stay exact even across devices.
+    async fn apply_tx(&self, ops: &[EntryOp]) -> Result<Vec<EntryOpResult>, String> {
+        let mut tx = self.pool.begin().await.map_err(|err| err.to_string())?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("{}:{}", self.user_id, self.agent_id))
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM memory_entries \
+             WHERE user_id = $1 AND agent_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(self.user_id)
+        .bind(self.agent_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| err.to_string())?;
+        let mut results = Vec::with_capacity(ops.len());
+        for op in ops {
+            results.push(match op {
+                EntryOp::Add(content) => {
+                    if active >= MAX_ENTRIES as i64 {
+                        EntryOpResult::Skipped(format!(
+                            "memory is full ({MAX_ENTRIES} entries)"
+                        ))
+                    } else {
+                        let (mem_no, _): (i32, String) = sqlx::query_as(
+                            "INSERT INTO memory_entries (user_id, agent_id, mem_no, content) \
+                             VALUES ($1, $2, (SELECT coalesce(max(mem_no), 0) + 1 FROM memory_entries \
+                             WHERE user_id = $1 AND agent_id = $2), $3) \
+                             RETURNING mem_no, content",
+                        )
+                        .bind(self.user_id)
+                        .bind(self.agent_id)
+                        .bind(content)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                        active += 1;
+                        EntryOpResult::Added(mem_no)
+                    }
+                }
+                EntryOp::Update(mem_no, content) => {
+                    let updated = sqlx::query(
+                        "UPDATE memory_entries SET content = $3, updated_at = now() \
+                         WHERE user_id = $1 AND agent_id = $2 AND mem_no = $4 AND deleted_at IS NULL",
+                    )
+                    .bind(self.user_id)
+                    .bind(self.agent_id)
+                    .bind(content)
+                    .bind(mem_no)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                    if updated.rows_affected() > 0 {
+                        EntryOpResult::Updated(*mem_no)
+                    } else {
+                        EntryOpResult::Skipped(format!("unknown {}", entry_id(*mem_no)))
+                    }
+                }
+                EntryOp::Delete(mem_no) => {
+                    let deleted = sqlx::query(
+                        "UPDATE memory_entries SET deleted_at = now() \
+                         WHERE user_id = $1 AND agent_id = $2 AND mem_no = $3 AND deleted_at IS NULL",
+                    )
+                    .bind(self.user_id)
+                    .bind(self.agent_id)
+                    .bind(mem_no)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                    if deleted.rows_affected() > 0 {
+                        active -= 1;
+                        EntryOpResult::Deleted(*mem_no)
+                    } else {
+                        EntryOpResult::Skipped(format!("unknown {}", entry_id(*mem_no)))
+                    }
+                }
+            });
+        }
+        tx.commit().await.map_err(|err| err.to_string())?;
+        Ok(results)
+    }
 }
 
 #[derive(Default)]
@@ -223,6 +347,48 @@ impl EntryMemory for InMemEntryMemory {
         state.entries.retain(|entry| entry.mem_no != mem_no);
         Ok(state.entries.len() < before)
     }
+
+    async fn apply(&self, ops: Vec<EntryOp>) -> Vec<EntryOpResult> {
+        let mut state = self.state.lock().unwrap();
+        let mut results = Vec::with_capacity(ops.len());
+        for op in ops {
+            results.push(match op {
+                EntryOp::Add(content) => {
+                    if state.entries.len() >= MAX_ENTRIES {
+                        EntryOpResult::Skipped(format!("memory is full ({MAX_ENTRIES} entries)"))
+                    } else {
+                        state.next_no += 1;
+                        let mem_no = state.next_no;
+                        state.entries.push(MemoryEntry { mem_no, content });
+                        EntryOpResult::Added(mem_no)
+                    }
+                }
+                EntryOp::Update(mem_no, content) => {
+                    match state
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.mem_no == mem_no)
+                    {
+                        Some(entry) => {
+                            entry.content = content;
+                            EntryOpResult::Updated(mem_no)
+                        }
+                        None => EntryOpResult::Skipped(format!("unknown {}", entry_id(mem_no))),
+                    }
+                }
+                EntryOp::Delete(mem_no) => {
+                    let before = state.entries.len();
+                    state.entries.retain(|entry| entry.mem_no != mem_no);
+                    if state.entries.len() < before {
+                        EntryOpResult::Deleted(mem_no)
+                    } else {
+                        EntryOpResult::Skipped(format!("unknown {}", entry_id(mem_no)))
+                    }
+                }
+            });
+        }
+        results
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +444,76 @@ mod tests {
         assert!(memory.delete(1).await.unwrap());
         assert!(!memory.delete(1).await.unwrap());
         assert!(memory.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inmem_apply_runs_a_mixed_batch_best_effort() {
+        let memory = InMemEntryMemory::default();
+        memory.add("old").await.unwrap();
+        let results = memory
+            .apply(vec![
+                EntryOp::Update(1, "renamed".into()),
+                EntryOp::Add("new fact".into()),
+                EntryOp::Delete(9),
+            ])
+            .await;
+        assert_eq!(
+            results,
+            vec![
+                EntryOpResult::Updated(1),
+                EntryOpResult::Added(2),
+                EntryOpResult::Skipped("unknown mem_09".into()),
+            ]
+        );
+        assert_eq!(
+            memory.list().await,
+            vec![
+                MemoryEntry {
+                    mem_no: 1,
+                    content: "renamed".into()
+                },
+                MemoryEntry {
+                    mem_no: 2,
+                    content: "new fact".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn inmem_apply_fills_to_the_cap_and_skips_the_rest() {
+        let memory = InMemEntryMemory::default();
+        for i in 0..MAX_ENTRIES - 1 {
+            memory.add(&format!("fact {i}")).await.unwrap();
+        }
+        let results = memory
+            .apply(vec![
+                EntryOp::Add("fits".into()),
+                EntryOp::Add("overflows".into()),
+            ])
+            .await;
+        assert_eq!(results[0], EntryOpResult::Added(MAX_ENTRIES as i32));
+        assert!(matches!(&results[1], EntryOpResult::Skipped(reason) if reason.contains("full")));
+        assert_eq!(memory.list().await.len(), MAX_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn inmem_apply_frees_a_slot_within_one_batch() {
+        let memory = InMemEntryMemory::default();
+        memory.add("stale").await.unwrap();
+        let results = memory
+            .apply(vec![EntryOp::Delete(1), EntryOp::Add("fresh".into())])
+            .await;
+        assert_eq!(
+            results,
+            vec![EntryOpResult::Deleted(1), EntryOpResult::Added(2)]
+        );
+        assert_eq!(
+            memory.list().await,
+            vec![MemoryEntry {
+                mem_no: 2,
+                content: "fresh".into()
+            }]
+        );
     }
 }

@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::agent::generate::{StepResult, StopCondition};
-use crate::agent::memory::{AddError, EntryMemory, MAX_ENTRIES, entry_id};
+use crate::agent::memory::{AddError, EntryMemory, EntryOp, EntryOpResult, MAX_ENTRIES, entry_id};
 
 use super::Tool;
 
@@ -166,6 +166,123 @@ impl Tool for MemoryDelete {
 
 const MEMORY_TOOLS: [&str; 3] = [MemoryAdd::NAME, MemoryUpdate::NAME, MemoryDelete::NAME];
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryProposeArgs {
+    /// The proposed entry changes for this conversation batch; an empty
+    /// list means nothing is worth remembering.
+    memories: Vec<MemoryOp>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub enum MemoryOp {
+    /// Record a new durable fact about the user.
+    Add {
+        /// The fact to remember, short and self-contained.
+        content: String,
+    },
+    /// Replace the text of an existing entry.
+    Update {
+        /// The id of the entry to replace, e.g. "mem_03".
+        id: String,
+        /// The replacement text, short and self-contained.
+        content: String,
+    },
+    /// Remove an entry that no longer holds.
+    Delete {
+        /// The id of the entry to remove, e.g. "mem_03".
+        id: String,
+    },
+}
+
+/// The memory extractor's one tool: the model submits its whole decision —
+/// adds, updates, deletes, or an empty list — as a single structured call,
+/// which applies as one batch. Best-effort: an invalid id or overlong
+/// content skips that op and is reported, and the output keeps the
+/// submitted order.
+pub struct MemoryPropose {
+    memory: Arc<dyn EntryMemory>,
+}
+
+impl MemoryPropose {
+    pub fn new(memory: Arc<dyn EntryMemory>) -> Self {
+        Self { memory }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for MemoryPropose {
+    const NAME: &'static str = "memory_propose";
+    type Args = MemoryProposeArgs;
+    type Output = String;
+    type Error = String;
+
+    fn description(&self) -> String {
+        "Submit the batch's memory decisions in one call: add, update or \
+         delete entries. An empty list means nothing is worth remembering."
+            .to_string()
+    }
+
+    async fn call(&self, args: MemoryProposeArgs) -> Result<String, String> {
+        if args.memories.is_empty() {
+            return Ok("nothing to record".into());
+        }
+        // Validate every op up front; invalid ones never reach the store and
+        // the report keeps the submitted order.
+        let mut ops: Vec<EntryOp> = Vec::with_capacity(args.memories.len());
+        let mut plan: Vec<Result<usize, String>> = Vec::with_capacity(args.memories.len());
+        for op in &args.memories {
+            match op {
+                MemoryOp::Add { content } => match check_content(content) {
+                    Ok(content) => {
+                        plan.push(Ok(ops.len()));
+                        ops.push(EntryOp::Add(content));
+                    }
+                    Err(err) => plan.push(Err(err)),
+                },
+                MemoryOp::Update { id, content } => match (parse_id(id), check_content(content)) {
+                    (Some(mem_no), Ok(content)) => {
+                        plan.push(Ok(ops.len()));
+                        ops.push(EntryOp::Update(mem_no, content));
+                    }
+                    (None, _) => plan.push(Err(format!(
+                        "invalid id `{id}`; use the [mem_NN] shown in the prompt"
+                    ))),
+                    (_, Err(err)) => plan.push(Err(err)),
+                },
+                MemoryOp::Delete { id } => match parse_id(id) {
+                    Some(mem_no) => {
+                        plan.push(Ok(ops.len()));
+                        ops.push(EntryOp::Delete(mem_no));
+                    }
+                    None => plan.push(Err(format!(
+                        "invalid id `{id}`; use the [mem_NN] shown in the prompt"
+                    ))),
+                },
+            }
+        }
+        let applied = self.memory.apply(ops).await;
+        let mut report = Vec::with_capacity(plan.len());
+        for slot in &plan {
+            match slot {
+                Ok(index) => report.push(render_result(&applied[*index])),
+                Err(reason) => report.push(format!("skipped ({reason})")),
+            }
+        }
+        Ok(report.join("; "))
+    }
+}
+
+fn render_result(result: &EntryOpResult) -> String {
+    match result {
+        EntryOpResult::Added(mem_no) => format!("added [{}]", entry_id(*mem_no)),
+        EntryOpResult::Updated(mem_no) => format!("updated [{}]", entry_id(*mem_no)),
+        EntryOpResult::Deleted(mem_no) => format!("deleted [{}]", entry_id(*mem_no)),
+        EntryOpResult::Skipped(reason) => format!("skipped ({reason})"),
+    }
+}
+
 /// The voice turn's stop condition: once a round produced text, a round of
 /// only successful memory writes ends the turn — a second round could only
 /// re-confirm what was just said. A failed call (a full memory, an invalid
@@ -188,7 +305,7 @@ pub fn stop_after_memory_writes() -> StopCondition {
 mod tests {
     use super::*;
     use crate::agent::ToolCall;
-    use crate::agent::memory::InMemEntryMemory;
+    use crate::agent::memory::{InMemEntryMemory, MemoryEntry};
     use crate::agent::tool::ToolEntry;
 
     fn memory() -> Arc<dyn EntryMemory> {
@@ -379,5 +496,123 @@ mod tests {
             true,
             "删掉了"
         )]));
+    }
+
+    #[test]
+    fn propose_args_take_the_structured_shape() {
+        let args: MemoryProposeArgs = serde_json::from_str(
+            r#"{"memories":[
+                {"action":"update","id":"mem_01","content":"用户目前使用 Go 开发后端。"},
+                {"action":"add","content":"用户养了一只猫"},
+                {"action":"delete","id":"mem_09"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(args.memories.len(), 3);
+        assert!(matches!(
+            &args.memories[0],
+            MemoryOp::Update { id, content }
+                if id == "mem_01" && content == "用户目前使用 Go 开发后端。"
+        ));
+        assert!(
+            matches!(&args.memories[1], MemoryOp::Add { content } if content == "用户养了一只猫")
+        );
+        assert!(matches!(&args.memories[2], MemoryOp::Delete { id } if id == "mem_09"));
+        assert!(
+            serde_json::from_str::<MemoryProposeArgs>(r#"{"memories":[{"action":"drop"}]}"#)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_applies_a_mixed_batch_in_order() {
+        let memory = memory();
+        memory.add("old").await.unwrap();
+        let tool = MemoryPropose::new(memory.clone());
+        let outcome = tool
+            .call(MemoryProposeArgs {
+                memories: vec![
+                    MemoryOp::Update {
+                        id: "mem_01".into(),
+                        content: "renamed".into(),
+                    },
+                    MemoryOp::Add {
+                        content: "new fact".into(),
+                    },
+                    MemoryOp::Delete {
+                        id: "mem_09".into(),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            "updated [mem_01]; added [mem_02]; skipped (unknown mem_09)"
+        );
+        assert_eq!(
+            memory.list().await,
+            vec![
+                MemoryEntry {
+                    mem_no: 1,
+                    content: "renamed".into()
+                },
+                MemoryEntry {
+                    mem_no: 2,
+                    content: "new fact".into()
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_reports_an_empty_decision_and_skips_invalid_ops() {
+        let memory = memory();
+        let tool = MemoryPropose::new(memory.clone());
+        let outcome = tool
+            .call(MemoryProposeArgs { memories: vec![] })
+            .await
+            .unwrap();
+        assert_eq!(outcome, "nothing to record");
+
+        let long = "长".repeat(MAX_CONTENT_CHARS + 1);
+        let outcome = tool
+            .call(MemoryProposeArgs {
+                memories: vec![
+                    MemoryOp::Add { content: long },
+                    MemoryOp::Delete { id: "abc".into() },
+                    MemoryOp::Add {
+                        content: "有效".into(),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+        assert!(outcome.contains("skipped (content is too long"));
+        assert!(outcome.contains("skipped (invalid id `abc`"));
+        assert!(outcome.contains("added [mem_01]"));
+    }
+
+    #[tokio::test]
+    async fn propose_skips_adds_when_the_memory_is_full() {
+        let memory = memory();
+        for i in 0..MAX_ENTRIES {
+            memory.add(&format!("fact {i}")).await.unwrap();
+        }
+        let tool = MemoryPropose::new(memory.clone());
+        let outcome = tool
+            .call(MemoryProposeArgs {
+                memories: vec![
+                    MemoryOp::Add {
+                        content: "one more".into(),
+                    },
+                    MemoryOp::Delete {
+                        id: "mem_20".into(),
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+        assert!(outcome.contains("skipped (memory is full"), "{outcome}");
+        assert!(outcome.contains("deleted [mem_20]"));
     }
 }

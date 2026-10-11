@@ -1,12 +1,18 @@
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 mod common;
 
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 
 use common::{RecordingHook, owner, session};
 use dashachun::agent::{
-    AddError, DbEntryMemory, DbMemory, EntryMemory, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook,
+    AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor, Llm,
+    LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ToolChoice,
+    ToolSpec,
 };
 use dashachun::agent::{ChatItem, ToolCall};
 
@@ -462,4 +468,292 @@ async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 2);
+}
+
+// extractor
+
+/// A one-shot LLM: pops one scripted round per `chat` call and records the
+/// received history, so tests can assert on the prompts it was handed.
+struct ProposeLlm {
+    rounds: Mutex<VecDeque<Vec<Result<LlmEvent, LlmError>>>>,
+    calls: Mutex<Vec<Vec<ChatItem>>>,
+}
+
+impl ProposeLlm {
+    fn new(rounds: Vec<Vec<Result<LlmEvent, LlmError>>>) -> Self {
+        Self {
+            rounds: Mutex::new(rounds.into()),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.lock().unwrap().len()
+    }
+
+    fn last_prompt(&self) -> Vec<ChatItem> {
+        self.calls.lock().unwrap().last().unwrap().clone()
+    }
+}
+
+impl Llm for ProposeLlm {
+    fn chat(
+        &self,
+        history: Vec<ChatItem>,
+        _tools: Vec<ToolSpec>,
+        _tool_choice: Option<ToolChoice>,
+        _cancel: CancellationToken,
+    ) -> LlmEvents<'_> {
+        self.calls.lock().unwrap().push(history);
+        let round = self.rounds.lock().unwrap().pop_front().unwrap_or_default();
+        Box::pin(futures_util::stream::iter(round))
+    }
+}
+
+fn propose_call(arguments: &str) -> Result<LlmEvent, LlmError> {
+    Ok(LlmEvent::ToolCall(ToolCall {
+        id: "call_p".into(),
+        name: "memory_propose".into(),
+        arguments: arguments.into(),
+    }))
+}
+
+#[sqlx::test]
+#[ignore]
+async fn entry_memory_applies_a_batch_in_one_transaction(pool: PgPool) {
+    let memory = DbEntryMemory::new(pool.clone(), 7, 3);
+    memory.add("old").await.unwrap();
+    let results = memory
+        .apply(vec![
+            EntryOp::Update(1, "renamed".into()),
+            EntryOp::Add("new fact".into()),
+            EntryOp::Delete(9),
+        ])
+        .await;
+    assert_eq!(
+        results,
+        vec![
+            EntryOpResult::Updated(1),
+            EntryOpResult::Added(2),
+            EntryOpResult::Skipped("unknown mem_09".into()),
+        ]
+    );
+    assert_eq!(
+        memory.list().await,
+        vec![
+            MemoryEntry {
+                mem_no: 1,
+                content: "renamed".into()
+            },
+            MemoryEntry {
+                mem_no: 2,
+                content: "new fact".into()
+            },
+        ]
+    );
+
+    // Deleting frees a slot within the same batch, ids stay monotonic, and
+    // another scope sees none of it.
+    let results = memory
+        .apply(vec![EntryOp::Delete(1), EntryOp::Add("third".into())])
+        .await;
+    assert_eq!(
+        results,
+        vec![EntryOpResult::Deleted(1), EntryOpResult::Added(3)]
+    );
+    let other = DbEntryMemory::new(pool, 8, 4);
+    assert!(other.list().await.is_empty());
+}
+
+#[sqlx::test]
+#[ignore]
+async fn extractor_flushes_a_full_batch_into_entries(pool: PgPool) {
+    // Mirrors the extractor's BATCH_ROWS.
+    const BATCH_ROWS: usize = 12;
+
+    let owner = owner(7, 3);
+    let entries: Arc<dyn EntryMemory> = Arc::new(DbEntryMemory::new(pool.clone(), 7, 3));
+    let llm = Arc::new(ProposeLlm::new(vec![vec![
+        propose_call(
+            r#"{"memories":[
+                {"action":"add","content":"用户每天用 Go 写后端"},
+                {"action":"add","content":"用户在杭州工作"}]}"#,
+        ),
+        Ok(LlmEvent::Done),
+    ]]));
+    let extractor = Arc::new(Extractor::new(
+        pool.clone(),
+        owner.clone(),
+        llm.clone(),
+        entries.clone(),
+    ));
+    let memory = DbMemory::load(
+        pool.clone(),
+        owner,
+        vec![extractor.clone() as Arc<dyn MemoryHook>],
+    )
+    .await
+    .unwrap();
+
+    for turn in 1..=(BATCH_ROWS - 1) {
+        memory
+            .store_utterance(&session("s1"), &format!("turn {turn}"))
+            .await
+            .unwrap();
+    }
+    // One tool turn: its tool rows are plumbing — only the final reply row
+    // is announced to the hook and reaches the dialogue.
+    memory.log_items(
+        &session("s1"),
+        vec![
+            ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_w".into(),
+                name: "get_weather".into(),
+                arguments: "{}".into(),
+            }]),
+            ChatItem::tool("call_w", "sunny 26 degrees"),
+            ChatItem::assistant("今天晴"),
+        ],
+    );
+
+    // The 12th announced row triggers the flush; wait for the entries.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while entries.list().await.len() < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "extraction did not run"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let listed = entries.list().await;
+    assert_eq!(listed[0].content, "用户每天用 Go 写后端");
+    assert_eq!(listed[1].content, "用户在杭州工作");
+
+    // The dialogue held the utterances and the spoken reply, not the tool
+    // exchange.
+    let prompt = llm.last_prompt();
+    assert_eq!(prompt.len(), 2);
+    assert!(matches!(&prompt[0], ChatItem::System { .. }));
+    let ChatItem::User { content } = &prompt[1] else {
+        panic!("expected the dialogue batch")
+    };
+    assert!(content.contains("用户：turn 1\n"));
+    assert!(content.contains("用户：turn 11"));
+    assert!(content.contains("助手：今天晴"));
+    assert!(!content.contains("sunny 26 degrees"));
+}
+
+#[sqlx::test]
+#[ignore]
+async fn a_failed_flush_stays_pending_and_retries_on_the_next_batch(pool: PgPool) {
+    const BATCH_ROWS: usize = 12;
+
+    let owner = owner(7, 3);
+    let entries: Arc<dyn EntryMemory> = Arc::new(DbEntryMemory::new(pool.clone(), 7, 3));
+    let llm = Arc::new(ProposeLlm::new(vec![
+        vec![Err(LlmError::Failed("provider down".into()))],
+        vec![
+            propose_call(r#"{"memories":[{"action":"add","content":"用户喜欢深夜编码"}]}"#),
+            Ok(LlmEvent::Done),
+        ],
+    ]));
+    let extractor = Arc::new(Extractor::new(
+        pool.clone(),
+        owner.clone(),
+        llm.clone(),
+        entries.clone(),
+    ));
+    let memory = DbMemory::load(pool.clone(), owner, vec![extractor as Arc<dyn MemoryHook>])
+        .await
+        .unwrap();
+
+    for turn in 1..=BATCH_ROWS {
+        memory
+            .store_utterance(&session("s1"), &format!("turn {turn}"))
+            .await
+            .unwrap();
+    }
+    // Round 1 fails; wait for it to have happened, nothing is recorded.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while llm.call_count() < 1 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first flush never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(entries.list().await.is_empty());
+
+    // The failed rows stayed pending: one more utterance completes a new
+    // full batch over all 13 rows and the retry lands the entry.
+    memory
+        .store_utterance(&session("s1"), "turn 13")
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while entries.list().await.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the retry never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(llm.call_count(), 2);
+    let listed = entries.list().await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].content, "用户喜欢深夜编码");
+    // The retry batch covered every row, including the failed round's.
+    let ChatItem::User { content } = &llm.last_prompt()[1] else {
+        panic!("expected the dialogue batch")
+    };
+    assert!(content.contains("用户：turn 1\n"));
+    assert!(content.contains("用户：turn 13"));
+}
+
+#[sqlx::test]
+#[ignore]
+async fn teardown_flushes_the_remaining_rows(pool: PgPool) {
+    let owner = owner(7, 3);
+    let entries: Arc<dyn EntryMemory> = Arc::new(DbEntryMemory::new(pool.clone(), 7, 3));
+    let llm = Arc::new(ProposeLlm::new(vec![vec![
+        propose_call(r#"{"memories":[{"action":"add","content":"用户养了一只猫"}]}"#),
+        Ok(LlmEvent::Done),
+    ]]));
+    let extractor = Arc::new(Extractor::new(
+        pool.clone(),
+        owner.clone(),
+        llm.clone(),
+        entries.clone(),
+    ));
+    {
+        let memory = DbMemory::load(
+            pool.clone(),
+            owner,
+            vec![extractor.clone() as Arc<dyn MemoryHook>],
+        )
+        .await
+        .unwrap();
+        for turn in 1..=3 {
+            memory
+                .store_utterance(&session("s1"), &format!("turn {turn}"))
+                .await
+                .unwrap();
+        }
+    }
+
+    // Below the batch threshold nothing ran while connected.
+    assert!(entries.list().await.is_empty());
+    assert_eq!(llm.call_count(), 0);
+
+    // The connection is gone: the teardown flush runs the remainder.
+    drop(extractor);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while entries.list().await.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the teardown flush never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(entries.list().await[0].content, "用户养了一只猫");
 }

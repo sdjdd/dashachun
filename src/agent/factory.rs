@@ -4,7 +4,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use super::capture::{AudioCapture, AudioStorage};
-use super::memory::{DbEntryMemory, DbMemory, EntryMemory, MemoryHook, MemoryOwner};
+use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
 use super::tool::{MemoryAdd, MemoryDelete, MemoryUpdate};
 use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolEntry, Tts};
@@ -99,6 +99,12 @@ impl AgentFactory {
             client_id: record.client_id,
             device_id: record.device_id.clone(),
         };
+        // The entry memory is scope-bound per connection; the memory tools
+        // hold the same instance, so the prompt reads what they write. The
+        // base registry is generation-shared — each connection extends a
+        // clone of it with its own memory tools.
+        let entries: Arc<dyn EntryMemory> =
+            Arc::new(DbEntryMemory::new(self.pool.clone(), user_id, agent_id));
         // The audio feature plugs in here: it implements both the driver's
         // Capture surface and the memory's MemoryHook, so committed rows
         // hand their ids straight to the open captures. The storage is the
@@ -109,18 +115,26 @@ impl AgentFactory {
             record.client_id,
             audio_storage,
         ));
+        // The extractor is the memory's second hook: it owns exactly this
+        // connection's rows — the announced ids buffer until a batch is
+        // full, then one background extraction proposes entry changes
+        // against the same entry memory the tools write and the prompt
+        // reads.
+        let extractor = Extractor::new(
+            self.pool.clone(),
+            owner.clone(),
+            Arc::clone(&self.llm),
+            Arc::clone(&entries),
+        );
         let memory = DbMemory::load(
             self.pool.clone(),
             owner,
-            vec![audio.clone() as Arc<dyn MemoryHook>],
+            vec![
+                audio.clone() as Arc<dyn MemoryHook>,
+                Arc::new(extractor) as Arc<dyn MemoryHook>,
+            ],
         )
         .await?;
-        // The entry memory is scope-bound per connection; the memory tools
-        // hold the same instance, so the prompt reads what they write. The
-        // base registry is generation-shared — each connection extends a
-        // clone of it with its own memory tools.
-        let entries: Arc<dyn EntryMemory> =
-            Arc::new(DbEntryMemory::new(self.pool.clone(), user_id, agent_id));
         let mut tools = self.tools.clone();
         tools.push(ToolEntry::new(MemoryAdd::new(entries.clone())));
         tools.push(ToolEntry::new(MemoryUpdate::new(entries.clone())));

@@ -29,7 +29,7 @@ use dashachun::settings::OtaSettings;
 use dashachun::state::ServerState;
 use dashachun::vad::{SileroVadFactory, VadConfig};
 
-// ---------------------------------------------------------------- REST app
+// REST app
 
 /// A random unique username so re-runs never collide.
 pub fn test_name() -> String {
@@ -210,7 +210,7 @@ pub async fn register(
     (cookie, user_id)
 }
 
-// -------------------------------------------------------- memory / capture
+// memory / capture
 
 pub fn session(id: &str) -> AgentSession {
     AgentSession {

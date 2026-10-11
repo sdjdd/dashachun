@@ -6,6 +6,7 @@
 
 mod db;
 mod entries;
+mod extract;
 mod inmem;
 
 use async_trait::async_trait;
@@ -16,8 +17,10 @@ use crate::agent::ChatItem;
 
 pub use db::DbMemory;
 pub use entries::{
-    AddError, DbEntryMemory, EntryMemory, InMemEntryMemory, MAX_ENTRIES, MemoryEntry, entry_id,
+    AddError, DbEntryMemory, EntryMemory, EntryOp, EntryOpResult, InMemEntryMemory, MAX_ENTRIES,
+    MemoryEntry, entry_id,
 };
+pub use extract::Extractor;
 pub use inmem::InMemMemory;
 
 /// Device-side identity stamped onto every message row, taken from the
