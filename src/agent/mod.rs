@@ -4,6 +4,7 @@ mod composite;
 pub mod dto;
 mod emotion;
 mod factory;
+mod generate;
 mod llm;
 mod memory;
 mod prompt;
@@ -17,6 +18,7 @@ pub use capture::{
 };
 pub use composite::CompositeAgent;
 pub use factory::AgentFactory;
+pub use generate::{StreamEvent, StreamEvents, StreamResult, generate_text, stream_text};
 pub use llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
 pub use memory::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, InMemEntryMemory, InMemMemory, MAX_ENTRIES,

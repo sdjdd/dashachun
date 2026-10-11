@@ -95,7 +95,6 @@ impl ToolHandler for GetWeather {
         let content = self.forecast(&location).await?;
         Ok(ToolOutcome {
             content,
-            output: None,
             needs_reply: true,
         })
     }

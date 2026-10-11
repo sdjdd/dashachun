@@ -40,7 +40,6 @@ impl ToolHandler for GetDateTime {
         let now = OffsetDateTime::now_utc().to_offset(self.offset);
         Ok(ToolOutcome {
             content: describe(now),
-            output: None,
             needs_reply: true,
         })
     }

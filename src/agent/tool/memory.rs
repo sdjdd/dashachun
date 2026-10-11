@@ -84,14 +84,12 @@ impl ToolHandler for MemoryAdd {
         match self.memory.add(&content).await {
             Ok(entry) => Ok(ToolOutcome {
                 content: format!("stored as [{}]", entry_id(entry.mem_no)),
-                output: None,
                 needs_reply: false,
             }),
             Err(AddError::Full) => Ok(ToolOutcome {
                 content: format!(
                     "memory is full ({MAX_ENTRIES} entries); update or delete an existing entry instead"
                 ),
-                output: None,
                 needs_reply: true,
             }),
             Err(AddError::Failed(err)) => Err(err),
@@ -133,13 +131,11 @@ impl ToolHandler for MemoryUpdate {
         if self.memory.update(mem_no, &content).await? {
             Ok(ToolOutcome {
                 content: format!("updated [{id}]"),
-                output: None,
                 needs_reply: false,
             })
         } else {
             Ok(ToolOutcome {
                 content: format!("no memory entry [{id}]"),
-                output: None,
                 needs_reply: false,
             })
         }
@@ -179,13 +175,11 @@ impl ToolHandler for MemoryDelete {
         if self.memory.delete(mem_no).await? {
             Ok(ToolOutcome {
                 content: format!("deleted [{id}]"),
-                output: None,
                 needs_reply: false,
             })
         } else {
             Ok(ToolOutcome {
                 content: format!("no memory entry [{id}]"),
-                output: None,
                 needs_reply: false,
             })
         }

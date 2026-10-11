@@ -7,12 +7,11 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, trace, warn};
 
-use crate::agent::tool::execute_tool;
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
-    AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, LlmEvent, Memory, ReplyCapture,
-    Subtitle, SystemPrompt, TextStream, ToolCall, ToolContext, ToolRegistry, Tts, TtsEvent,
-    UtteranceCapture, emotion,
+    AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, Memory, ReplyCapture, StreamEvent,
+    Subtitle, SystemPrompt, TextStream, ToolContext, ToolRegistry, Tts, TtsEvent, UtteranceCapture,
+    emotion, stream_text,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
 
@@ -84,7 +83,6 @@ enum ReplyEvent {
     SpeakError { message: String },
     Delta { text: String },
     Emotion { emotion: emotion::Emotion },
-    Output { output: AgentOutput },
     ReplyDone { reply: String, items: Vec<ChatItem> },
     Failed { message: String },
 }
@@ -671,11 +669,6 @@ async fn reply_stage(
                             break;
                         }
                     }
-                    ReplyEvent::Output { output } => {
-                        if out_tx.send(output).await.is_err() {
-                            break;
-                        }
-                    }
                     ReplyEvent::ReplyDone { reply, items } => {
                         info!(session_id = %session.id, %reply, "llm result");
                         agent.memory.log_items(&session, items.clone());
@@ -741,10 +734,11 @@ async fn run_turn(
     }
 }
 
-/// The thinking leg: the sequential tool loop. Streams each round's deltas as
-/// raw `Delta` events (the partial-reply text), detects the turn's leading
-/// emoji, strips emoji out of the text handed to the speak leg, and runs tools
-/// between rounds with the Thinking/Neutral emotion markers around them.
+/// The thinking leg: one `stream_text` call per turn. The tool sub-loop
+/// lives entirely in the generation layer; this stage maps its events onto
+/// the reply pipeline — raw deltas (the partial-reply text), the turn's
+/// leading emoji, the emoji-stripped text for the speak leg, and the
+/// produced messages into `ReplyDone` for the memory.
 async fn think_stage(
     deps: &TurnDeps,
     history: Vec<ChatItem>,
@@ -754,74 +748,51 @@ async fn think_stage(
     turn_id: u64,
     cancel: &CancellationToken,
 ) -> TurnOutcome {
-    let mut working = history;
-    let mut new_items: Vec<ChatItem> = Vec::new();
-    let mut reply = String::new();
+    let mut messages = Vec::new();
+    if let Some(system) = prompt.chat_item() {
+        messages.push(system);
+    }
+    messages.extend(history);
+    let ctx = ToolContext::default();
+    let mut stream = stream_text(
+        deps.llm.as_ref(),
+        messages,
+        &deps.tools,
+        &ctx,
+        cancel.clone(),
+    );
     let mut stripper = emotion::Stripper::new();
     let mut emotion_pending = true;
     let mut speak_started = false;
-
     loop {
-        if cancel.is_cancelled() {
-            return TurnOutcome::Cancelled;
-        }
-        let mut calls: Vec<ToolCall> = Vec::new();
-        let mut text = String::new();
-        let mut messages = Vec::with_capacity(working.len() + 1);
-        if let Some(system) = prompt.chat_item() {
-            messages.push(system);
-        }
-        messages.extend(working.iter().cloned());
-        let mut chat = deps.llm.chat(messages, deps.tools.specs(), cancel.clone());
-        loop {
-            let result = tokio::select! {
-                item = chat.next() => match item {
-                    Some(result) => result,
-                    None => break,
-                },
-                _ = cancel.cancelled() => return TurnOutcome::Cancelled,
-            };
-            match result {
-                Ok(LlmEvent::Delta { text: delta }) => {
-                    if delta.is_empty() {
-                        continue;
-                    }
-                    text.push_str(&delta);
-                    trace!(session_id = %deps.session_id, text = %delta, "llm delta");
+        let ev = tokio::select! {
+            item = stream.next() => match item {
+                Some(item) => item,
+                // A stream that ends without `Done` was cancelled.
+                None => return TurnOutcome::Cancelled,
+            },
+            _ = cancel.cancelled() => return TurnOutcome::Cancelled,
+        };
+        match ev {
+            Ok(StreamEvent::Delta { text }) => {
+                trace!(session_id = %deps.session_id, text = %text, "llm delta");
+                if emit(
+                    events,
+                    turn_id,
+                    ReplyEvent::Delta { text: text.clone() },
+                    cancel,
+                )
+                .await
+                .is_err()
+                {
+                    return TurnOutcome::Cancelled;
+                }
+                if emotion_pending && let Some(found) = emotion::detect(&text) {
+                    emotion_pending = false;
                     if emit(
                         events,
                         turn_id,
-                        ReplyEvent::Delta {
-                            text: delta.clone(),
-                        },
-                        cancel,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        return TurnOutcome::Cancelled;
-                    }
-                    if emotion_pending && let Some(found) = emotion::detect(&delta) {
-                        emotion_pending = false;
-                        if emit(
-                            events,
-                            turn_id,
-                            ReplyEvent::Emotion { emotion: found },
-                            cancel,
-                        )
-                        .await
-                        .is_err()
-                        {
-                            return TurnOutcome::Cancelled;
-                        }
-                    }
-                    let spoken = stripper.push(&delta);
-                    if speak_chunk(
-                        spoken,
-                        &mut speak_started,
-                        speak_tx,
-                        events,
-                        turn_id,
+                        ReplyEvent::Emotion { emotion: found },
                         cancel,
                     )
                     .await
@@ -830,129 +801,57 @@ async fn think_stage(
                         return TurnOutcome::Cancelled;
                     }
                 }
-                Ok(LlmEvent::ToolCall(call)) => calls.push(call),
-                Ok(LlmEvent::Done) => break,
-                Err(err) => {
-                    let _ = emit(
-                        events,
-                        turn_id,
-                        ReplyEvent::Failed {
-                            message: err.to_string(),
-                        },
-                        cancel,
-                    )
-                    .await;
-                    return TurnOutcome::Failed;
+                let spoken = stripper.push(&text);
+                if speak_chunk(
+                    spoken,
+                    &mut speak_started,
+                    speak_tx,
+                    events,
+                    turn_id,
+                    cancel,
+                )
+                .await
+                .is_err()
+                {
+                    return TurnOutcome::Cancelled;
                 }
             }
-        }
-
-        if calls.is_empty() {
-            if !text.is_empty() {
-                reply.push_str(&text);
-                new_items.push(ChatItem::assistant(text));
-            }
-            let tail = stripper.finish();
-            if speak_chunk(tail, &mut speak_started, speak_tx, events, turn_id, cancel)
-                .await
-                .is_err()
-            {
-                return TurnOutcome::Cancelled;
-            }
-            if emit(
-                events,
-                turn_id,
-                ReplyEvent::ReplyDone {
-                    reply,
-                    items: new_items,
-                },
-                cancel,
-            )
-            .await
-            .is_err()
-            {
-                return TurnOutcome::Cancelled;
-            }
-            return TurnOutcome::Done;
-        }
-
-        if emit(
-            events,
-            turn_id,
-            ReplyEvent::Emotion {
-                emotion: emotion::Emotion::Thinking,
-            },
-            cancel,
-        )
-        .await
-        .is_err()
-        {
-            return TurnOutcome::Cancelled;
-        }
-        let spoke = !text.is_empty();
-        let round = if text.is_empty() {
-            ChatItem::assistant_tool_calls(calls.clone())
-        } else {
-            reply.push_str(&text);
-            ChatItem::assistant_text_tool_calls(text, calls.clone())
-        };
-        new_items.push(round.clone());
-        working.push(round);
-        let mut needs_reply = false;
-        for call in calls {
-            let outcome = execute_tool(&deps.tools, &ToolContext::default(), &call).await;
-            if let Some(output) = outcome.output
-                && emit(events, turn_id, ReplyEvent::Output { output }, cancel)
+            Ok(StreamEvent::Done(result)) => {
+                let tail = stripper.finish();
+                if speak_chunk(tail, &mut speak_started, speak_tx, events, turn_id, cancel)
                     .await
                     .is_err()
-            {
-                return TurnOutcome::Cancelled;
-            }
-            if outcome.needs_reply {
-                needs_reply = true;
-            }
-            new_items.push(ChatItem::tool(call.id.clone(), outcome.content.clone()));
-            working.push(ChatItem::tool(call.id, outcome.content));
-        }
-        if emit(
-            events,
-            turn_id,
-            ReplyEvent::Emotion {
-                emotion: emotion::Emotion::Neutral,
-            },
-            cancel,
-        )
-        .await
-        .is_err()
-        {
-            return TurnOutcome::Cancelled;
-        }
-        if spoke && !needs_reply {
-            // The round's spoken text already answered and every tool was
-            // silent plumbing; asking the model again would only produce a
-            // second confirmation of what it just said.
-            let tail = stripper.finish();
-            if speak_chunk(tail, &mut speak_started, speak_tx, events, turn_id, cancel)
+                {
+                    return TurnOutcome::Cancelled;
+                }
+                if emit(
+                    events,
+                    turn_id,
+                    ReplyEvent::ReplyDone {
+                        reply: result.text,
+                        items: result.messages,
+                    },
+                    cancel,
+                )
                 .await
                 .is_err()
-            {
-                return TurnOutcome::Cancelled;
+                {
+                    return TurnOutcome::Cancelled;
+                }
+                return TurnOutcome::Done;
             }
-            if emit(
-                events,
-                turn_id,
-                ReplyEvent::ReplyDone {
-                    reply,
-                    items: new_items,
-                },
-                cancel,
-            )
-            .await
-            .is_err()
-            {
-                return TurnOutcome::Cancelled;
+            Err(err) => {
+                let _ = emit(
+                    events,
+                    turn_id,
+                    ReplyEvent::Failed {
+                        message: err.to_string(),
+                    },
+                    cancel,
+                )
+                .await;
+                return TurnOutcome::Failed;
             }
-            return TurnOutcome::Done;
         }
     }
 }
@@ -1088,7 +987,9 @@ mod tests {
     use crate::agent::collect;
     use crate::agent::memory::HISTORY_LIMIT;
     use crate::agent::tool::MemoryAdd;
-    use crate::agent::{AsrError, AsrEvents, LlmEvents, Tts, TtsError, TtsEvent, TtsEvents};
+    use crate::agent::{
+        AsrError, AsrEvents, LlmEvent, LlmEvents, ToolCall, Tts, TtsError, TtsEvent, TtsEvents,
+    };
     use crate::provider::asr::StubAsr;
     use crate::provider::llm::StubLlm;
     use crate::provider::tts::StubTts;
@@ -2092,88 +1993,6 @@ mod tests {
                 }]),
                 ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
             ]
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_emits_thinking_emotion() {
-        let agent = CompositeAgent {
-            llm: Arc::new(ToolCallingLlm {
-                calls: Arc::new(Mutex::new(Vec::new())),
-                tool_calls: vec![ToolCall {
-                    id: "call_x".into(),
-                    name: "nonexistent".into(),
-                    arguments: "{}".into(),
-                }],
-                reply: "🙂搞定".into(),
-            }),
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
-            ..stub_agent()
-        };
-        let (tx, mut output) = run(agent);
-
-        tx.send(AgentInput::ListenStart { mode: None })
-            .await
-            .unwrap();
-        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
-
-        let seen = collect_reply(&mut output).await;
-
-        let thinking = seen.iter().position(
-            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "thinking"),
-        );
-        assert!(
-            thinking.is_some(),
-            "tool call should emit thinking: {seen:?}"
-        );
-        let reply_emotion = seen.iter().position(
-            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "happy"),
-        );
-        assert!(
-            thinking < reply_emotion,
-            "thinking must precede the reply emotion"
-        );
-    }
-
-    #[tokio::test]
-    async fn tool_call_without_reply_emoji_resets_to_neutral() {
-        let agent = CompositeAgent {
-            llm: Arc::new(ToolCallingLlm {
-                calls: Arc::new(Mutex::new(Vec::new())),
-                tool_calls: vec![ToolCall {
-                    id: "call_x".into(),
-                    name: "nonexistent".into(),
-                    arguments: "{}".into(),
-                }],
-                reply: "搞定了".into(),
-            }),
-            tts: Arc::new(ScriptedTts),
-            vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
-            ..stub_agent()
-        };
-        let (tx, mut output) = run(agent);
-
-        tx.send(AgentInput::ListenStart { mode: None })
-            .await
-            .unwrap();
-        tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
-
-        let seen = collect_reply(&mut output).await;
-
-        let thinking = seen.iter().position(
-            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "thinking"),
-        );
-        let neutral = seen.iter().position(
-            |item| matches!(item, AgentOutput::Emotion { emotion } if emotion == "neutral"),
-        );
-        assert!(
-            thinking.is_some(),
-            "tool call should emit thinking: {seen:?}"
-        );
-        assert!(
-            thinking < neutral,
-            "reply without emoji should reset thinking to neutral: {seen:?}"
         );
     }
 
