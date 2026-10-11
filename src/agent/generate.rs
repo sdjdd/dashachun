@@ -19,7 +19,7 @@ use std::pin::Pin;
 use futures_util::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use super::llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall};
+use super::llm::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolChoice};
 use super::tool::{ToolEntry, execute_tool};
 
 /// Cap on LLM rounds per generation. A model stuck requesting tools would
@@ -76,6 +76,7 @@ enum Phase<'a> {
 struct Loop<'a> {
     llm: &'a dyn Llm,
     tools: &'a [ToolEntry],
+    tool_choice: Option<ToolChoice<'a>>,
     cancel: CancellationToken,
     stop_when: Vec<StopCondition>,
     working: Vec<ChatItem>,
@@ -101,8 +102,12 @@ struct Loop<'a> {
 /// The single argument of [`stream_text`] and [`generate_text`] — one
 /// generation call's parameters. `llm` goes positionally into
 /// [`StreamTextParams::builder`]; the rest is optional — `messages` (empty),
-/// `tools` (none: no tools are advertised), `stop_when` (empty: never stop
-/// early) and `cancel` (a fresh token).
+/// `tools` (none: no tools are advertised), `tool_choice`
+/// (none: the model decides — the wire field is omitted; `Auto` sends `auto`
+/// explicitly, `Required` forces some tool call, `Named(&str)` exactly that
+/// tool; it rides every round's request and is ignored when no tools are
+/// advertised), `stop_when` (empty:
+/// never stop early) and `cancel` (a fresh token).
 #[derive(bon::Builder)]
 pub struct StreamTextParams<'a> {
     #[builder(start_fn)]
@@ -110,6 +115,7 @@ pub struct StreamTextParams<'a> {
     #[builder(default)]
     pub messages: Vec<ChatItem>,
     pub tools: Option<&'a [ToolEntry]>,
+    pub tool_choice: Option<ToolChoice<'a>>,
     #[builder(default)]
     pub stop_when: Vec<StopCondition>,
     #[builder(default = CancellationToken::new())]
@@ -131,6 +137,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         llm,
         messages,
         tools,
+        tool_choice,
         stop_when,
         cancel,
     } = params;
@@ -138,6 +145,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
     let state = Loop {
         llm,
         tools,
+        tool_choice,
         cancel,
         stop_when,
         working: messages,
@@ -173,10 +181,12 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             .iter()
                             .map(|entry| entry.spec().clone())
                             .collect();
-                        let chat =
-                            state
-                                .llm
-                                .chat(state.working.clone(), specs, state.cancel.clone());
+                        let chat = state.llm.chat(
+                            state.working.clone(),
+                            specs,
+                            state.tool_choice,
+                            state.cancel.clone(),
+                        );
                         state.phase = Phase::Chat(chat);
                     }
                     Phase::Chat(mut chat) => {
@@ -327,6 +337,7 @@ mod tests {
             &self,
             _history: Vec<ChatItem>,
             _tools: Vec<ToolSpec>,
+            _tool_choice: Option<ToolChoice<'_>>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let events =
@@ -346,6 +357,7 @@ mod tests {
             &self,
             _history: Vec<ChatItem>,
             _tools: Vec<ToolSpec>,
+            _tool_choice: Option<ToolChoice<'_>>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::unfold(
@@ -430,6 +442,57 @@ mod tests {
 
     fn typed_tools() -> Vec<ToolEntry> {
         vec![ToolEntry::new(Add), ToolEntry::new(Failing)]
+    }
+
+    /// The [`ScriptedLlm`] behavior plus a record of the `tool_choice` every
+    /// round received — the loop-contract probe.
+    struct RecordingLlm {
+        choices: Mutex<Vec<Option<RecordedChoice>>>,
+        rounds: Mutex<VecDeque<Vec<Result<LlmEvent, LlmError>>>>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RecordedChoice {
+        Auto,
+        Required,
+        Named(String),
+    }
+
+    impl RecordingLlm {
+        fn new(rounds: Vec<Vec<Result<LlmEvent, LlmError>>>) -> Self {
+            Self {
+                choices: Mutex::new(Vec::new()),
+                rounds: Mutex::new(rounds.into()),
+            }
+        }
+
+        fn choices(&self) -> Vec<Option<RecordedChoice>> {
+            self.choices.lock().unwrap().clone()
+        }
+    }
+
+    impl Llm for RecordingLlm {
+        fn chat(
+            &self,
+            _history: Vec<ChatItem>,
+            _tools: Vec<ToolSpec>,
+            tool_choice: Option<ToolChoice<'_>>,
+            _cancel: CancellationToken,
+        ) -> LlmEvents<'_> {
+            self.choices
+                .lock()
+                .unwrap()
+                .push(tool_choice.map(|choice| match choice {
+                    ToolChoice::Auto => RecordedChoice::Auto,
+                    ToolChoice::Required => RecordedChoice::Required,
+                    ToolChoice::Named(name) => RecordedChoice::Named(name.into()),
+                }));
+            let events =
+                self.rounds.lock().unwrap().pop_front().unwrap_or_else(|| {
+                    vec![Err(LlmError::Failed("scripted llm exhausted".into()))]
+                });
+            Box::pin(futures_util::stream::iter(events))
+        }
     }
 
     async fn drain(events: &mut StreamEvents<'_>) -> Vec<Result<StreamEvent, LlmError>> {
@@ -726,6 +789,49 @@ mod tests {
         assert_eq!(result.text, "算一下等于 3");
         assert_eq!(result.steps, 2);
         assert_eq!(result.messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn tool_choice_rides_every_round() {
+        let llm = RecordingLlm::new(vec![
+            vec![call("add", r#"{"x":1,"y":2}"#), done()],
+            vec![delta("等于 3"), done()],
+        ]);
+        let result = generate_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("1+2?")])
+                .tools(&typed_tools())
+                .tool_choice(ToolChoice::Named("add"))
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.steps, 2);
+        assert_eq!(
+            llm.choices(),
+            vec![
+                Some(RecordedChoice::Named("add".into())),
+                Some(RecordedChoice::Named("add".into()))
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_choice_defaults_to_none_every_round() {
+        let llm = RecordingLlm::new(vec![
+            vec![call("add", r#"{"x":1,"y":2}"#), done()],
+            vec![delta("等于 3"), done()],
+        ]);
+        let result = generate_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("1+2?")])
+                .tools(&typed_tools())
+                .build(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.steps, 2);
+        assert_eq!(llm.choices(), vec![None, None]);
     }
 
     #[tokio::test]

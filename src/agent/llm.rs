@@ -21,6 +21,17 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
+/// Which tool a request forces the model to call — the `Some` half of an
+/// optional `tool_choice`; `None` omits the wire field entirely (the server
+/// default: the model decides). `Auto` sends `auto` explicitly; `Required`
+/// demands some tool call; `Named` demands exactly that tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolChoice<'a> {
+    Auto,
+    Required,
+    Named(&'a str),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "lowercase")]
 pub enum ChatItem {
@@ -126,6 +137,7 @@ pub trait Llm: Send + Sync {
         &self,
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
+        tool_choice: Option<ToolChoice<'_>>,
         cancel: CancellationToken,
     ) -> LlmEvents<'_>;
 }

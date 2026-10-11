@@ -6,11 +6,12 @@ use std::time::Duration;
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+    ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage, ChatCompletionTool,
-    ChatCompletionTools, CreateChatCompletionRequestArgs, FunctionCall, FunctionObject,
+    ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequestArgs,
+    FunctionCall, FunctionName, FunctionObject, ToolChoiceOptions,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -19,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolSpec};
+use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolCall, ToolChoice, ToolSpec};
 use crate::provider::ProviderRegistry;
 
 fn parse_reasoning_effort(
@@ -98,6 +99,7 @@ impl OpenAiLlm {
         &self,
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
+        tool_choice: Option<ToolChoice<'_>>,
     ) -> Result<async_openai::types::chat::CreateChatCompletionRequest, LlmError> {
         let messages = history
             .into_iter()
@@ -181,6 +183,31 @@ impl OpenAiLlm {
                     })
                     .collect::<Vec<_>>(),
             );
+            // A choice without advertised tools is meaningless; `None`
+            // leaves the server default in place.
+            if let Some(choice) = tool_choice {
+                match choice {
+                    ToolChoice::Auto => {
+                        request.tool_choice(ChatCompletionToolChoiceOption::Mode(
+                            ToolChoiceOptions::Auto,
+                        ));
+                    }
+                    ToolChoice::Required => {
+                        request.tool_choice(ChatCompletionToolChoiceOption::Mode(
+                            ToolChoiceOptions::Required,
+                        ));
+                    }
+                    ToolChoice::Named(name) => {
+                        request.tool_choice(ChatCompletionToolChoiceOption::Function(
+                            ChatCompletionNamedToolChoice {
+                                function: FunctionName {
+                                    name: name.to_string(),
+                                },
+                            },
+                        ));
+                    }
+                }
+            }
         }
         request
             .build()
@@ -193,10 +220,11 @@ impl Llm for OpenAiLlm {
         &self,
         history: Vec<ChatItem>,
         tools: Vec<ToolSpec>,
+        tool_choice: Option<ToolChoice<'_>>,
         cancel: CancellationToken,
     ) -> LlmEvents<'_> {
         let (tx, rx) = mpsc::unbounded_channel::<Result<LlmEvent, LlmError>>();
-        let request = match self.build_request(history, tools) {
+        let request = match self.build_request(history, tools, tool_choice) {
             Ok(request) => request,
             Err(err) => {
                 let _ = tx.send(Err(err));
@@ -348,6 +376,14 @@ mod tests {
         }
     }
 
+    fn tool_specs() -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: "add".into(),
+            description: "Add x and y".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }]
+    }
+
     #[test]
     fn maps_items_to_request_messages() {
         let llm = OpenAiLlm::new(config());
@@ -359,6 +395,7 @@ mod tests {
                     ChatItem::assistant("hello"),
                 ],
                 Vec::new(),
+                None,
             )
             .unwrap();
         let value = serde_json::to_value(&request).unwrap();
@@ -370,6 +407,73 @@ mod tests {
         assert_eq!(messages[1]["content"], "hi");
         assert_eq!(messages[2]["role"], "assistant");
         assert_eq!(messages[2]["content"], "hello");
+    }
+
+    #[test]
+    fn tool_choice_maps_to_the_wire() {
+        let llm = OpenAiLlm::new(config());
+        let value = serde_json::to_value(
+            llm.build_request(
+                vec![ChatItem::user("hi")],
+                tool_specs(),
+                Some(ToolChoice::Named("add")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            value["tool_choice"],
+            serde_json::json!({"type": "function", "function": {"name": "add"}})
+        );
+
+        let value = serde_json::to_value(
+            llm.build_request(
+                vec![ChatItem::user("hi")],
+                tool_specs(),
+                Some(ToolChoice::Required),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["tool_choice"], "required");
+
+        // An explicit `Auto` is sent as `auto` — distinct from `None`, which
+        // omits the field entirely.
+        let value = serde_json::to_value(
+            llm.build_request(
+                vec![ChatItem::user("hi")],
+                tool_specs(),
+                Some(ToolChoice::Auto),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn tool_choice_none_is_omitted_and_needs_advertised_tools() {
+        let llm = OpenAiLlm::new(config());
+        let value = serde_json::to_value(
+            llm.build_request(vec![ChatItem::user("hi")], tool_specs(), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(value.get("tool_choice").is_none());
+
+        // A forced choice without any advertised tool is meaningless and is
+        // dropped instead of invalidating the request.
+        let value = serde_json::to_value(
+            llm.build_request(
+                vec![ChatItem::user("hi")],
+                Vec::new(),
+                Some(ToolChoice::Named("add")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(value.get("tool_choice").is_none());
+        assert!(value.get("tools").is_none());
     }
 
     fn chunk(

@@ -1031,6 +1031,7 @@ mod tests {
             &self,
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             self.calls.lock().unwrap().push(history);
@@ -1053,6 +1054,7 @@ mod tests {
             &self,
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -1092,6 +1094,7 @@ mod tests {
             &self,
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -1570,6 +1573,7 @@ mod tests {
             &self,
             _history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let events = self
@@ -1886,6 +1890,7 @@ mod tests {
             &self,
             history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             let round = {
@@ -2064,6 +2069,7 @@ mod tests {
             &self,
             _history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             Box::pin(futures_util::stream::unfold(false, move |delivered| {
@@ -2426,6 +2432,7 @@ mod tests {
             &self,
             _history: Vec<ChatItem>,
             _tools: Vec<crate::agent::ToolSpec>,
+            _tool_choice: Option<crate::agent::ToolChoice>,
             _cancel: CancellationToken,
         ) -> LlmEvents<'_> {
             // The pause before the failure lets the driver process the first

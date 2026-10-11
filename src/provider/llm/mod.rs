@@ -21,7 +21,7 @@ fn build_stub(config: &Value) -> Result<Arc<dyn Llm>, String> {
 
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolSpec};
+use crate::agent::{ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ToolChoice, ToolSpec};
 
 #[derive(Default)]
 pub struct StubLlm {
@@ -41,6 +41,7 @@ impl Llm for StubLlm {
         &self,
         _history: Vec<ChatItem>,
         _tools: Vec<ToolSpec>,
+        _tool_choice: Option<ToolChoice>,
         _cancel: CancellationToken,
     ) -> LlmEvents<'_> {
         let mut events: Vec<Result<LlmEvent, LlmError>> = Vec::new();
