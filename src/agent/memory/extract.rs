@@ -9,8 +9,9 @@
 //! either flushed them or died), so a crash only ever loses the crashed
 //! connection's unflushed tail.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
+use minijinja::{Environment, Value, context, syntax::SyntaxConfig};
 use sqlx::PgPool;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::{debug, warn};
@@ -27,12 +28,43 @@ use super::{EntryMemory, MemoryEntry, MemoryHook, MemoryOwner, entry_id};
 /// six turns of dialogue per extraction call.
 const BATCH_ROWS: usize = 12;
 
-const EXTRACT_PROMPT: &str = r#"你是长期记忆提炼器。阅读一段你（助手）与用户的对话，对照现有记忆条目，把值得长期保留的信息整理成对条目的修改，然后通过 memory_propose 工具一次性提交：
+const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（助手）与用户的对话，对照现有记忆条目，把值得长期保留的信息整理成对条目的修改，然后通过 memory_propose 工具一次性提交：
 - 只记稳定有用的事实：身份、偏好、习惯、重要关系、长期计划等；寒暄和一次性事务不记。
 - 与现有条目重复或仅措辞不同的事实跳过；事实变化时更新（update）原条目，失效时删除（delete）。
 - 条目接近上限（20）时优先更新或删除，而不是新增。
 - 每条内容一句话，自包含，第三人称。
-- 没有值得记录的就提交空列表。"#;
+- 没有值得记录的就提交空列表。
+
+## 现有记忆条目
+{% if entries %}
+{% for entry in entries %}
+[{{ entry.id }}] {{ entry.content }}
+{% endfor %}
+{% else %}
+（暂无）
+{% endif %}"#;
+
+const EXTRACT_USER: &str = r#"对话记录{% if days|length == 1 %}（{{ days|first }}）{% elif days|length > 1 %}（{{ days|first }} 至 {{ days|last }}）{% endif %}：
+
+{% for line in dialogue %}
+{{ line.speaker }}：{{ line.text }}
+{% endfor %}"#;
+
+static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
+    let mut env = Environment::new();
+    env.set_syntax(
+        SyntaxConfig::builder()
+            .trim_blocks(true)
+            .lstrip_blocks(true)
+            .build()
+            .expect("valid syntax config"),
+    );
+    env.add_template("extract_system", EXTRACT_SYSTEM)
+        .expect("valid extractor system template");
+    env.add_template("extract_user", EXTRACT_USER)
+        .expect("valid extractor user template");
+    env
+});
 
 pub struct Extractor {
     pool: PgPool,
@@ -238,48 +270,75 @@ async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
 
 /// The batch's dialogue lines — user utterances and spoken assistant text in
 /// order; tool exchange rows are plumbing, not conversation.
-fn dialogue_lines(items: &[ChatItem]) -> Vec<String> {
+#[derive(Debug, PartialEq)]
+struct DialogueLine {
+    speaker: &'static str,
+    text: String,
+}
+
+fn dialogue_lines(items: &[ChatItem]) -> Vec<DialogueLine> {
     items
         .iter()
         .filter_map(|item| match item {
-            ChatItem::User { content } => Some(format!("用户：{content}")),
+            ChatItem::User { content } => Some(DialogueLine {
+                speaker: "用户",
+                text: content.clone(),
+            }),
             ChatItem::Assistant { content, .. } => content
                 .as_deref()
                 .filter(|text| !text.is_empty())
-                .map(|text| format!("助手：{text}")),
+                .map(|text| DialogueLine {
+                    speaker: "助手",
+                    text: text.into(),
+                }),
             _ => None,
         })
         .collect()
 }
 
 /// The flush's one exchange: the job description plus the current entries as
-/// the system prompt, the dialogue batch as the user turn.
-fn build_messages(entries: &[MemoryEntry], dialogue: &[String], days: &[String]) -> Vec<ChatItem> {
-    let mut system = String::from(EXTRACT_PROMPT);
-    system.push_str("\n\n## 现有记忆条目\n");
-    if entries.is_empty() {
-        system.push_str("（暂无）\n");
-    } else {
-        for entry in entries {
-            system.push_str(&format!("[{}] {}\n", entry_id(entry.mem_no), entry.content));
-        }
-    }
-    let mut user = String::from("对话记录");
-    match days {
-        [] => {}
-        [day] => user.push_str(&format!("（{day}）")),
-        _ => user.push_str(&format!(
-            "（{} 至 {}）",
-            days.first().unwrap(),
-            days.last().unwrap()
-        )),
-    }
-    user.push_str("：\n");
-    for line in dialogue {
-        user.push('\n');
-        user.push_str(line);
-    }
+/// the system prompt, the dialogue batch as the user turn — both rendered
+/// whole from the module's templates.
+fn build_messages(
+    entries: &[MemoryEntry],
+    dialogue: &[DialogueLine],
+    days: &[String],
+) -> Vec<ChatItem> {
+    let entries = entries
+        .iter()
+        .map(|entry| {
+            context! {
+                id => entry_id(entry.mem_no),
+                content => &entry.content,
+            }
+        })
+        .collect::<Value>();
+    let dialogue = dialogue
+        .iter()
+        .map(|line| {
+            context! {
+                speaker => line.speaker,
+                text => &line.text,
+            }
+        })
+        .collect::<Value>();
+    let system = render_extract("extract_system", context! { entries });
+    let user = render_extract(
+        "extract_user",
+        context! {
+            days => days.iter().map(Value::from).collect::<Value>(),
+            dialogue,
+        },
+    );
     vec![ChatItem::system(system), ChatItem::user(user)]
+}
+
+fn render_extract(name: &str, ctx: Value) -> String {
+    TEMPLATES
+        .get_template(name)
+        .expect("registered extractor template")
+        .render(ctx)
+        .expect("valid extractor template")
 }
 
 /// The flush's stop condition: the first round whose proposal executed
@@ -318,7 +377,16 @@ mod tests {
         ];
         assert_eq!(
             dialogue_lines(&items),
-            vec!["用户：你好", "助手：🙂 今天晴"]
+            vec![
+                DialogueLine {
+                    speaker: "用户",
+                    text: "你好".into(),
+                },
+                DialogueLine {
+                    speaker: "助手",
+                    text: "🙂 今天晴".into(),
+                },
+            ]
         );
     }
 
@@ -328,30 +396,36 @@ mod tests {
             mem_no: 1,
             content: "likes Rust".into(),
         }];
-        let dialogue = vec!["用户：你好".to_string()];
+        let dialogue = vec![DialogueLine {
+            speaker: "用户",
+            text: "你好".into(),
+        }];
 
         let messages = build_messages(&entries, &dialogue, &["2026-10-12".into()]);
         assert_eq!(messages.len(), 2);
         let ChatItem::System { content } = &messages[0] else {
             panic!("expected the extractor prompt")
         };
-        assert!(content.starts_with(EXTRACT_PROMPT));
-        assert!(content.contains("[mem_01] likes Rust"));
+        assert!(content.starts_with("你是长期记忆提炼器。"));
+        assert!(content.contains("memory_propose 工具一次性提交"));
+        assert!(content.ends_with("## 现有记忆条目\n[mem_01] likes Rust\n"));
         let ChatItem::User { content } = &messages[1] else {
             panic!("expected the dialogue batch")
         };
-        assert!(content.contains("对话记录（2026-10-12）"));
-        assert!(content.contains("\n用户：你好"));
+        assert_eq!(content, "对话记录（2026-10-12）：\n\n用户：你好\n");
 
         let messages = build_messages(&[], &dialogue, &["2026-10-11".into(), "2026-10-12".into()]);
-        let ChatItem::User { content } = &messages[1] else {
-            panic!("expected the dialogue batch")
-        };
-        assert!(content.contains("对话记录（2026-10-11 至 2026-10-12）"));
         let ChatItem::System { content } = &messages[0] else {
             panic!("expected the extractor prompt")
         };
-        assert!(content.contains("（暂无）"));
+        assert!(content.ends_with("## 现有记忆条目\n（暂无）\n"));
+        let ChatItem::User { content } = &messages[1] else {
+            panic!("expected the dialogue batch")
+        };
+        assert_eq!(
+            content,
+            "对话记录（2026-10-11 至 2026-10-12）：\n\n用户：你好\n"
+        );
     }
 
     fn step(tool_calls: Vec<ToolCall>, ok: bool) -> StepResult {

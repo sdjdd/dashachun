@@ -16,6 +16,7 @@ flacenc = { version = "0.5", default-features = false }
 flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 garde = { version = "0.23", features = ["derive", "regex"] }
+minijinja = "3"
 opus = "0.4"
 rand = "0.9"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "script"] }
