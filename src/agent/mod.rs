@@ -24,7 +24,7 @@ pub use memory::{
 };
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
-pub use tool::{ToolHandler, ToolOutcome, ToolRegistry};
+pub use tool::{Tool, ToolContext, ToolHandler, ToolOutcome, ToolRegistry};
 pub use tts::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 
 use std::pin::Pin;

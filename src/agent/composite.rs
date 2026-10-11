@@ -5,12 +5,13 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{Instrument, debug, info, trace, warn};
 
+use crate::agent::tool::execute_tool;
 use crate::agent::{
     Agent, AgentInput, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr,
     AsrEvent, AudioStream, Capture, ChatItem, EntryMemory, Llm, LlmEvent, Memory, ReplyCapture,
-    Subtitle, SystemPrompt, TextStream, ToolCall, ToolOutcome, ToolRegistry, Tts, TtsEvent,
+    Subtitle, SystemPrompt, TextStream, ToolCall, ToolContext, ToolRegistry, Tts, TtsEvent,
     UtteranceCapture, emotion,
 };
 use crate::vad::{Vad, VadEvent, VadFactory};
@@ -726,7 +727,9 @@ async fn run_turn(
         token.clone(),
         deps.session_id.clone(),
     ));
-    let outcome = think_stage(&deps, history, prompt, &speak_tx, &events, turn_id, &token).await;
+    let outcome = think_stage(&deps, history, prompt, &speak_tx, &events, turn_id, &token)
+        .instrument(tracing::info_span!("think", session_id = %deps.session_id))
+        .await;
     drop(speak_tx);
     match outcome {
         TurnOutcome::Done => {
@@ -897,7 +900,7 @@ async fn think_stage(
         working.push(round);
         let mut needs_reply = false;
         for call in calls {
-            let outcome = execute_tool(&deps.tools, &call, &deps.session_id).await;
+            let outcome = execute_tool(&deps.tools, &ToolContext::default(), &call).await;
             if let Some(output) = outcome.output
                 && emit(events, turn_id, ReplyEvent::Output { output }, cancel)
                     .await
@@ -1035,56 +1038,6 @@ async fn speak_stage(
             return;
         }
     }
-}
-
-async fn execute_tool(tools: &ToolRegistry, call: &ToolCall, session_id: &str) -> ToolOutcome {
-    debug!(
-        session_id,
-        tool = %call.name,
-        args = %call.arguments,
-        "tool call"
-    );
-    let Some(handler) = tools.get(&call.name) else {
-        warn!(session_id, tool = %call.name, "unknown tool requested");
-        return ToolOutcome {
-            content: format!("error: unknown tool `{}`", call.name),
-            output: None,
-            needs_reply: true,
-        };
-    };
-    let args = if call.arguments.trim().is_empty() {
-        serde_json::Value::Null
-    } else {
-        match serde_json::from_str(&call.arguments) {
-            Ok(args) => args,
-            Err(err) => {
-                warn!(session_id, tool = %call.name, %err, "invalid tool arguments");
-                return ToolOutcome {
-                    content: format!("error: invalid arguments: {err}"),
-                    output: None,
-                    needs_reply: true,
-                };
-            }
-        }
-    };
-    let result = match handler.call(&args).await {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            warn!(session_id, tool = %call.name, %err, "tool failed");
-            ToolOutcome {
-                content: format!("error: {err}"),
-                output: None,
-                needs_reply: true,
-            }
-        }
-    };
-    debug!(
-        session_id,
-        tool = %call.name,
-        result = %result.content,
-        "tool result"
-    );
-    result
 }
 
 /// Ends the reply audio capture at a cut (barge-in, provider error): when
