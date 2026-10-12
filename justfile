@@ -8,22 +8,26 @@ export S3_SECRET_ACCESS_KEY := env_var_or_default("S3_SECRET_ACCESS_KEY", "rustf
 
 suites := "api auth devices memory capture agents providers audio_capture settings oss"
 
-# start the compose dev stack (postgres + valkey + rustfs)
+# start the compose dev stack and wait for its healthchecks
 up:
-    docker compose up -d
+    docker compose up -d --wait
+
+# reformat in place
+fmt:
+    cargo fmt
 
 # one integration suite, against the dev stack
 test name:
     cargo test --test {{name}} -- --ignored
 
-# every integration suite
-tests:
-    for t in {{suites}}; do cargo test --test $t -- --ignored; done
+# every integration suite, against the dev stack
+tests: up
+    fail=0; for t in {{suites}}; do cargo test --test $t -- --ignored || fail=1; done; exit $fail
 
-# everything that must pass before a commit
-ci: up
-    cargo fmt
-    cargo clippy --all-targets
+# everything that must pass before a commit; CI (.github/workflows/ci.yml) runs exactly this
+ci:
+    cargo fmt --check
+    cargo clippy --all-targets -- -D warnings
     cargo test --lib
     just tests
 
