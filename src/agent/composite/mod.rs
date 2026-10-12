@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::agent::{
     Agent, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr, Capture,
-    EntryMemory, Llm, Memory, SystemPrompt, ToolEntry, Tts,
+    EntryMemory, Llm, Memory, SystemPrompt, ToolSet, Tts,
 };
 use crate::util::recv_stream;
 use crate::vad::VadFactory;
@@ -36,7 +36,7 @@ pub struct CompositeAgent {
     pub vad: Arc<dyn VadFactory>,
     pub memory: Arc<dyn Memory>,
     pub entries: Arc<dyn EntryMemory>,
-    pub tools: Vec<ToolEntry>,
+    pub tools: Arc<ToolSet>,
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
 }

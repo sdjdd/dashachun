@@ -16,7 +16,7 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::{debug, warn};
 
-use crate::agent::tool::{MemoryPropose, ToolEntry, stop_after_proposal};
+use crate::agent::tool::{MemoryPropose, ToolSet, stop_after_proposal};
 use crate::agent::{
     AgentSession, ChatItem, Llm, ReasoningEffort, StreamTextParams, Tool, ToolChoice, generate_text,
 };
@@ -70,7 +70,7 @@ pub struct Extractor {
     owner: MemoryOwner,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
-    propose: ToolEntry,
+    propose: ToolSet,
     state: Arc<Mutex<ExtractState>>,
     flush_lock: Arc<AsyncMutex<()>>,
 }
@@ -87,7 +87,7 @@ impl Extractor {
         llm: Arc<dyn Llm>,
         entries: Arc<dyn EntryMemory>,
     ) -> Self {
-        let propose = ToolEntry::new(MemoryPropose::new(Arc::clone(&entries)));
+        let propose = ToolSet::new().tool(MemoryPropose::new(Arc::clone(&entries)));
         Self {
             pool,
             owner,
@@ -178,7 +178,7 @@ struct FlushTask {
     owner: MemoryOwner,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
-    propose: ToolEntry,
+    propose: ToolSet,
     state: Arc<Mutex<ExtractState>>,
 }
 
@@ -248,11 +248,10 @@ async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
     }
     let entries = task.entries.list().await;
     let messages = build_messages(&entries, &dialogue, &days);
-    let tools = std::slice::from_ref(&task.propose);
     let result = generate_text(
         StreamTextParams::builder(task.llm.as_ref())
             .messages(messages)
-            .tools(tools)
+            .tools(&task.propose)
             .tool_choice(ToolChoice::Named(MemoryPropose::NAME))
             // A background batch: a little thinking sharpens the distillation
             // and nobody waits on the first token.

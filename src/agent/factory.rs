@@ -7,7 +7,7 @@ use super::capture::{AudioCapture, AudioStorage};
 use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
 use super::tool::memory_tools;
-use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolEntry, Tts};
+use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolSet, Tts};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
 use crate::provider::{ProviderRegistry, ProviderSpec};
@@ -25,7 +25,7 @@ pub struct AgentFactory {
     llm: Arc<dyn Llm>,
     tts: Arc<dyn Tts>,
     vad: Arc<dyn VadFactory>,
-    tools: Vec<ToolEntry>,
+    tools: ToolSet,
     agents: AgentStore,
     pool: PgPool,
 }
@@ -37,7 +37,7 @@ impl AgentFactory {
         llm: Arc<dyn Llm>,
         tts: Arc<dyn Tts>,
         vad: Arc<dyn VadFactory>,
-        tools: Vec<ToolEntry>,
+        tools: ToolSet,
         agents: AgentStore,
         pool: PgPool,
     ) -> Self {
@@ -59,7 +59,7 @@ impl AgentFactory {
         llm: &ProviderSpec,
         tts: &ProviderSpec,
         vad: Arc<dyn VadFactory>,
-        tools: Vec<ToolEntry>,
+        tools: ToolSet,
         agents: AgentStore,
         pool: PgPool,
     ) -> Result<Self, String> {
@@ -135,8 +135,7 @@ impl AgentFactory {
             ],
         )
         .await?;
-        let mut tools = self.tools.clone();
-        tools.extend(memory_tools(&entries));
+        let tools = self.tools.clone().merge(memory_tools(&entries));
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
             llm: self.llm.clone(),
@@ -144,7 +143,7 @@ impl AgentFactory {
             vad: self.vad.clone(),
             memory: Arc::new(memory) as Arc<dyn Memory>,
             entries,
-            tools,
+            tools: Arc::new(tools),
             system_prompt: SystemPrompt::new(&agent.persona_prompt),
             capture: Some(audio as Arc<dyn Capture>),
         }))

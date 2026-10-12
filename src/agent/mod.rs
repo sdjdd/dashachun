@@ -31,7 +31,7 @@ pub use memory::{
 };
 pub use prompt::SystemPrompt;
 pub use store::{AgentRecord, AgentStore};
-pub use tool::{NoArgs, Tool, ToolEntry, ToolOutcome};
+pub use tool::{NoArgs, Tool, ToolOutcome, ToolSet};
 pub use tts::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 
 use std::pin::Pin;

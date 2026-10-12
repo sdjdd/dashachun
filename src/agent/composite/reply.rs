@@ -14,14 +14,14 @@ use super::{Cancellable, CompositeAgent, ListenEvent, TTS_TEXT_CHANNEL_CAPACITY,
 use crate::agent::tool::stop_after_memory_writes;
 use crate::agent::{
     AgentOutput, AgentSession, Capture, ChatItem, Llm, Memory, ReasoningEffort, ReplyCapture,
-    StreamEvent, StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolEntry, Tts, TtsEvent,
+    StreamEvent, StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolSet, Tts, TtsEvent,
     emotion, stream_text,
 };
 use crate::util::recv_stream;
 
 struct TurnDeps {
     llm: Arc<dyn Llm>,
-    tools: Vec<ToolEntry>,
+    tools: Arc<ToolSet>,
     tts: Arc<dyn Tts>,
     session_id: String,
 }

@@ -184,7 +184,7 @@ mod tests {
 
     use super::Gateway;
     use crate::agent::{
-        Agent, AgentFactory, AgentInputStream, AgentOutputStream, AgentSession, AgentStore,
+        Agent, AgentFactory, AgentInputStream, AgentOutputStream, AgentSession, AgentStore, ToolSet,
     };
     use crate::config::{AppConfig, DeviceConfig, ServerConfig};
     use crate::device::DeviceStore;
@@ -211,7 +211,7 @@ mod tests {
         let pool =
             sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").expect("lazy pool");
         let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
-        let tools = Vec::new();
+        let tools = ToolSet::new();
         let factory = AgentFactory::assemble(
             &ProviderRegistry::with_stubs(),
             &ProviderSpec::stub(),

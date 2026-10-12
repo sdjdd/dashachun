@@ -81,7 +81,7 @@ fn weekday_text(weekday: Weekday) -> &'static str {
 mod tests {
     use super::*;
     use crate::agent::ToolCall;
-    use crate::agent::tool::{ToolEntry, execute_tool};
+    use crate::agent::tool::ToolSet;
 
     fn at(unix_secs: i64, hours: i8, minutes: i8) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(unix_secs)
@@ -117,17 +117,15 @@ mod tests {
 
     #[tokio::test]
     async fn executes_with_empty_or_object_arguments() {
-        let tools = vec![ToolEntry::new(GetDateTime::new(480))];
+        let tools = ToolSet::new().tool(GetDateTime::new(480));
         for arguments in ["", "{}"] {
-            let outcome = execute_tool(
-                &tools,
-                &ToolCall {
+            let outcome = tools
+                .execute(&ToolCall {
                     id: "1".into(),
                     name: "get_datetime".into(),
                     arguments: arguments.into(),
-                },
-            )
-            .await;
+                })
+                .await;
             assert!(outcome.content.contains("UTC+08:00"));
             assert!(outcome.ok);
         }
@@ -135,7 +133,11 @@ mod tests {
 
     #[test]
     fn spec_schema_matches_type() {
-        let spec = ToolEntry::new(GetDateTime::new(480)).spec().clone();
+        let spec = ToolSet::new()
+            .tool(GetDateTime::new(480))
+            .spec("get_datetime")
+            .unwrap()
+            .clone();
         assert_eq!(spec.parameters["type"], "object");
         assert_eq!(spec.parameters["additionalProperties"], false);
     }

@@ -245,8 +245,8 @@ fn session() -> AgentSession {
     }
 }
 
-fn empty_tools() -> Vec<ToolEntry> {
-    Vec::new()
+fn empty_tools() -> Arc<ToolSet> {
+    Arc::new(ToolSet::new())
 }
 
 const OUTPUT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -983,7 +983,7 @@ impl Llm for MemoryLlm {
 async fn memory_tool_stores_an_entry_the_next_turn_sees() {
     let entries = Arc::new(InMemEntryMemory::default());
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let tools = vec![ToolEntry::new(MemoryAdd::new(entries.clone()))];
+    let tools = Arc::new(ToolSet::new().tool(MemoryAdd::new(entries.clone())));
     let agent = CompositeAgent {
         llm: Arc::new(MemoryLlm {
             calls: calls.clone(),

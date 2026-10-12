@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use arc_swap::ArcSwapOption;
 use tokio::sync::{Mutex, watch};
 
-use crate::agent::{AgentFactory, AudioStorage, ToolEntry};
+use crate::agent::{AgentFactory, AudioStorage, ToolSet};
 use crate::config::AppConfig;
 use crate::device::DeviceStore;
 use crate::provider::ProviderRegistry;
@@ -14,7 +14,7 @@ pub struct ServerState {
     pub config: AppConfig,
     pub registry: Arc<ProviderRegistry>,
     pub vad: Arc<dyn VadFactory>,
-    pub tools: Vec<ToolEntry>,
+    pub tools: ToolSet,
     audio_storage: Arc<RwLock<Option<Arc<dyn AudioStorage>>>>,
     factories: Arc<ArcSwapOption<AgentFactory>>,
     pub swap_lock: Arc<Mutex<()>>,
@@ -29,7 +29,7 @@ impl ServerState {
         config: AppConfig,
         registry: Arc<ProviderRegistry>,
         vad: Arc<dyn VadFactory>,
-        tools: Vec<ToolEntry>,
+        tools: ToolSet,
         audio_storage: Option<Arc<dyn AudioStorage>>,
         factories: Arc<ArcSwapOption<AgentFactory>>,
         devices: DeviceStore,
@@ -114,11 +114,11 @@ mod tests {
         }
     }
 
-    fn stub_parts() -> (Arc<ProviderRegistry>, Arc<dyn VadFactory>, Vec<ToolEntry>) {
+    fn stub_parts() -> (Arc<ProviderRegistry>, Arc<dyn VadFactory>, ToolSet) {
         (
             Arc::new(ProviderRegistry::with_stubs()),
             Arc::new(SileroVadFactory::new(VadConfig::default())),
-            Vec::new(),
+            ToolSet::new(),
         )
     }
 

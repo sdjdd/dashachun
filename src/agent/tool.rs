@@ -79,19 +79,18 @@ type ErasedCall =
 
 /// One registered tool as the runtime sees it: the precomputed spec (the
 /// schemars schema runs once at construction, not per round or per lookup)
-/// plus the erased call surface. Built only through [`ToolEntry::new`]; the
-/// fields stay private, so tool authors keep working against the typed
-/// [`Tool`] alone.
+/// plus the erased call surface. Built only by [`ToolSet::tool`]; the fields
+/// stay private, so tool authors keep working against the typed [`Tool`]
+/// alone.
 #[derive(Clone)]
-pub struct ToolEntry {
+struct ToolEntry {
     name: &'static str,
     spec: ToolSpec,
     call: ErasedCall,
 }
 
 impl ToolEntry {
-    /// Wraps a typed [`Tool`] into an erasable entry for a `Vec<ToolEntry>`.
-    pub fn new<T: Tool>(tool: T) -> Self {
+    fn new<T: Tool>(tool: T) -> Self {
         let spec = ToolSpec {
             name: T::NAME.to_string(),
             description: tool.description(),
@@ -108,12 +107,99 @@ impl ToolEntry {
         }
     }
 
-    pub(crate) fn spec(&self) -> &ToolSpec {
-        &self.spec
-    }
-
     async fn execute(&self, args: Value) -> ToolOutcome {
         (self.call)(args).await
+    }
+}
+
+/// The registered toolset — the fluent registration surface and the
+/// runtime's execution registry. Built with `ToolSet::new().tool(a).tool(b)`,
+/// extended by merging a family's set, driven by the generation loop.
+/// Registration order is the spec order the model sees; a duplicate name is
+/// an authoring bug and fails loudly at wiring time.
+#[derive(Clone, Default)]
+pub struct ToolSet {
+    entries: Vec<ToolEntry>,
+}
+
+impl ToolSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers one typed tool.
+    pub fn tool<T: Tool>(mut self, tool: T) -> Self {
+        self.insert(ToolEntry::new(tool));
+        self
+    }
+
+    /// Extends with another set — a family constructor's output.
+    pub fn merge(mut self, other: ToolSet) -> Self {
+        for entry in other.entries {
+            self.insert(entry);
+        }
+        self
+    }
+
+    fn insert(&mut self, entry: ToolEntry) {
+        assert!(
+            !self
+                .entries
+                .iter()
+                .any(|existing| existing.name == entry.name),
+            "duplicate tool `{}`",
+            entry.name
+        );
+        self.entries.push(entry);
+    }
+
+    /// The spec slice the model sees, collected from the precomputed
+    /// per-entry specs.
+    pub(crate) fn specs(&self) -> Vec<ToolSpec> {
+        self.entries
+            .iter()
+            .map(|entry| entry.spec.clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spec(&self, name: &str) -> Option<&ToolSpec> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .map(|entry| &entry.spec)
+    }
+
+    /// Degrades everything that can go wrong in a call — unknown name,
+    /// malformed argument JSON, tool failure — into an error-string tool
+    /// message, so a misbehaving model or a broken tool can never crash
+    /// the loop.
+    pub(crate) async fn execute(&self, call: &ToolCall) -> ToolOutcome {
+        debug!(tool = %call.name, args = %call.arguments, "tool call");
+        let Some(entry) = self.entries.iter().find(|entry| entry.name == call.name) else {
+            warn!(tool = %call.name, "unknown tool requested");
+            return ToolOutcome {
+                content: format!("error: unknown tool `{}`", call.name),
+                ok: false,
+            };
+        };
+        let args = if call.arguments.trim().is_empty() {
+            Value::Object(serde_json::Map::new())
+        } else {
+            match serde_json::from_str(&call.arguments) {
+                Ok(args) => args,
+                Err(err) => {
+                    warn!(tool = %call.name, %err, "invalid tool arguments");
+                    return ToolOutcome {
+                        content: format!("error: invalid arguments: {err}"),
+                        ok: false,
+                    };
+                }
+            }
+        };
+        let result = entry.execute(args).await;
+        debug!(tool = %call.name, result = %result.content, "tool result");
+        result
     }
 }
 
@@ -141,37 +227,6 @@ async fn call_typed<T: Tool>(tool: &T, args: Value) -> ToolOutcome {
             }
         }
     }
-}
-
-/// Degrades everything that can go wrong in a call — unknown name, malformed
-/// argument JSON, tool failure — into an error-string tool message, so a
-/// misbehaving model or a broken tool can never crash the loop.
-pub(crate) async fn execute_tool(tools: &[ToolEntry], call: &ToolCall) -> ToolOutcome {
-    debug!(tool = %call.name, args = %call.arguments, "tool call");
-    let Some(entry) = tools.iter().find(|entry| entry.name == call.name) else {
-        warn!(tool = %call.name, "unknown tool requested");
-        return ToolOutcome {
-            content: format!("error: unknown tool `{}`", call.name),
-            ok: false,
-        };
-    };
-    let args = if call.arguments.trim().is_empty() {
-        Value::Object(serde_json::Map::new())
-    } else {
-        match serde_json::from_str(&call.arguments) {
-            Ok(args) => args,
-            Err(err) => {
-                warn!(tool = %call.name, %err, "invalid tool arguments");
-                return ToolOutcome {
-                    content: format!("error: invalid arguments: {err}"),
-                    ok: false,
-                };
-            }
-        }
-    };
-    let result = entry.execute(args).await;
-    debug!(tool = %call.name, result = %result.content, "tool result");
-    result
 }
 
 #[cfg(test)]
@@ -241,94 +296,86 @@ mod tests {
         }
     }
 
-    fn registry() -> Vec<ToolEntry> {
-        vec![
-            ToolEntry::new(Add),
-            ToolEntry::new(Failing),
-            ToolEntry::new(Ping),
-        ]
+    fn registry() -> ToolSet {
+        ToolSet::new().tool(Add).tool(Failing).tool(Ping)
     }
 
     #[test]
-    fn typed_tool_joins_the_specs() {
-        let entries = registry();
-        let add = entries.iter().find(|entry| entry.name == "add").unwrap();
-        assert_eq!(add.spec().description, "Add x and y together");
-        assert_eq!(add.spec().parameters, params_schema::<AddArgs>());
-        assert_eq!(entries.len(), 3);
+    fn registered_tools_join_the_specs() {
+        let tools = registry();
+        let add = tools.spec("add").unwrap();
+        assert_eq!(add.description, "Add x and y together");
+        assert_eq!(add.parameters, params_schema::<AddArgs>());
+        assert_eq!(tools.specs().len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate tool `add`")]
+    fn duplicate_names_fail_at_registration() {
+        ToolSet::new().tool(Add).tool(Add);
     }
 
     #[tokio::test]
     async fn typed_tool_renders_output_as_content() {
-        let outcome = execute_tool(
-            &registry(),
-            &ToolCall {
+        let outcome = registry()
+            .execute(&ToolCall {
                 id: "1".into(),
                 name: "add".into(),
                 arguments: r#"{"x": 1, "y": 2}"#.into(),
-            },
-        )
-        .await;
+            })
+            .await;
         assert_eq!(outcome.content, "3");
         assert!(outcome.ok);
     }
 
     #[tokio::test]
     async fn failing_tool_degrades_to_error_content_with_follow_up() {
-        let outcome = execute_tool(
-            &registry(),
-            &ToolCall {
+        let outcome = registry()
+            .execute(&ToolCall {
                 id: "1".into(),
                 name: "fail".into(),
                 arguments: r#"{"x": 1, "y": 2}"#.into(),
-            },
-        )
-        .await;
+            })
+            .await;
         assert_eq!(outcome.content, "error: boom");
         assert!(!outcome.ok);
     }
 
     #[tokio::test]
     async fn malformed_typed_arguments_degrade_with_follow_up() {
-        let outcome = execute_tool(
-            &registry(),
-            &ToolCall {
+        let outcome = registry()
+            .execute(&ToolCall {
                 id: "1".into(),
                 name: "add".into(),
                 arguments: r#"{"x": 1}"#.into(),
-            },
-        )
-        .await;
+            })
+            .await;
         assert!(outcome.content.starts_with("error: invalid arguments"));
         assert!(!outcome.ok);
     }
 
     #[tokio::test]
     async fn empty_arguments_reach_a_no_arg_tool() {
-        let outcome = execute_tool(
-            &registry(),
-            &ToolCall {
+        let outcome = registry()
+            .execute(&ToolCall {
                 id: "1".into(),
                 name: "ping".into(),
                 arguments: String::new(),
-            },
-        )
-        .await;
+            })
+            .await;
         assert_eq!(outcome.content, "pong");
         assert!(outcome.ok);
     }
 
     #[tokio::test]
     async fn unknown_name_degrades_with_follow_up() {
-        let outcome = execute_tool(
-            &registry(),
-            &ToolCall {
+        let outcome = registry()
+            .execute(&ToolCall {
                 id: "1".into(),
                 name: "nope".into(),
                 arguments: "{}".into(),
-            },
-        )
-        .await;
+            })
+            .await;
         assert_eq!(outcome.content, "error: unknown tool `nope`");
         assert!(!outcome.ok);
     }

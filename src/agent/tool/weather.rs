@@ -150,7 +150,7 @@ fn weather_text(code: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::tool::ToolEntry;
+    use crate::agent::tool::ToolSet;
     use serde_json::json;
 
     #[test]
@@ -210,7 +210,11 @@ mod tests {
 
     #[test]
     fn spec_schema_matches_type() {
-        let spec = ToolEntry::new(GetWeather::new()).spec().clone();
+        let spec = ToolSet::new()
+            .tool(GetWeather::new())
+            .spec("get_weather")
+            .unwrap()
+            .clone();
         assert_eq!(spec.parameters["type"], "object");
         assert_eq!(spec.parameters["properties"]["city"]["type"], "string");
         assert_eq!(spec.parameters["required"], json!(["city"]));

@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use super::llm::{
     ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice, ToolSpec,
 };
-use super::tool::{ToolEntry, execute_tool};
+use super::tool::ToolSet;
 
 /// Cap on LLM rounds per generation. A model stuck requesting tools would
 /// otherwise loop (and bill) forever; hitting the cap fails the stream.
@@ -77,7 +77,7 @@ enum Phase<'a> {
 
 struct Loop<'a> {
     llm: &'a dyn Llm,
-    tools: &'a [ToolEntry],
+    tools: &'a ToolSet,
     specs: Vec<ToolSpec>,
     tool_choice: Option<ToolChoice<'a>>,
     reasoning: Option<ReasoningEffort>,
@@ -96,8 +96,9 @@ struct Loop<'a> {
 
 /// The single argument of [`stream_text`] and [`generate_text`] — one
 /// generation call's parameters. `llm` goes positionally into
-/// [`StreamTextParams::builder`]; the rest is optional — `messages` (empty),
-/// `tools` (none: no tools are advertised), `tool_choice`
+/// [`StreamTextParams::builder`]; `tools` is the call's [`ToolSet`] — an
+/// empty one advertises no tools. The rest is optional — `messages` (empty),
+/// `tool_choice`
 /// (none: the model decides — the wire field is omitted; `Auto` sends `auto`
 /// explicitly, `Required` forces some tool call, `Named(&str)` exactly that
 /// tool; it rides every round's request and is ignored when no tools are
@@ -112,8 +113,7 @@ pub struct StreamTextParams<'a> {
     pub llm: &'a dyn Llm,
     #[builder(default)]
     pub messages: Vec<ChatItem>,
-    #[builder(default = &[])]
-    pub tools: &'a [ToolEntry],
+    pub tools: &'a ToolSet,
     pub tool_choice: Option<ToolChoice<'a>>,
     pub reasoning: Option<ReasoningEffort>,
     #[builder(default)]
@@ -143,7 +143,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
     } = params;
     // The registry is fixed for the whole call — the spec slice is collected
     // once here, not per round.
-    let specs: Vec<ToolSpec> = tools.iter().map(|entry| entry.spec().clone()).collect();
+    let specs = tools.specs();
     let state = Loop {
         llm,
         tools,
@@ -250,7 +250,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             state.phase = Phase::AfterTools;
                             continue;
                         };
-                        let outcome = execute_tool(state.tools, &call).await;
+                        let outcome = state.tools.execute(&call).await;
                         state.round_ok &= outcome.ok;
                         let item = ChatItem::tool(call.id.clone(), outcome.content);
                         state.items.push(item.clone());
@@ -316,7 +316,7 @@ mod tests {
     use serde::Deserialize;
 
     use crate::agent::ToolSpec;
-    use crate::agent::tool::{Tool, ToolEntry};
+    use crate::agent::tool::{Tool, ToolSet};
 
     /// Serves one scripted round per `chat` call; a call beyond the script
     /// fails loudly, so a runaway loop can never pass a test silently.
@@ -442,8 +442,8 @@ mod tests {
         }
     }
 
-    fn typed_tools() -> Vec<ToolEntry> {
-        vec![ToolEntry::new(Add), ToolEntry::new(Failing)]
+    fn typed_tools() -> ToolSet {
+        ToolSet::new().tool(Add).tool(Failing)
     }
 
     /// The [`ScriptedLlm`] behavior plus a record of the `tool_choice` and
@@ -516,9 +516,11 @@ mod tests {
     #[tokio::test]
     async fn text_only_turn_streams_deltas_then_done() {
         let llm = ScriptedLlm::new(vec![vec![delta("你"), delta("好"), done()]]);
+        let tools = ToolSet::new();
         let mut events = stream_text(
             StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
+                .tools(&tools)
                 .build(),
         );
         match events.next().await {
@@ -743,6 +745,7 @@ mod tests {
         let seen = drain(&mut stream_text(
             StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
+                .tools(&ToolSet::new())
                 .cancel(cancel)
                 .build(),
         ))
@@ -753,9 +756,11 @@ mod tests {
     #[tokio::test]
     async fn cancelled_mid_stream_ends_silently() {
         let cancel = CancellationToken::new();
+        let tools = ToolSet::new();
         let mut events = stream_text(
             StreamTextParams::builder(&HangingLlm)
                 .messages(vec![ChatItem::user("hi")])
+                .tools(&tools)
                 .cancel(cancel.clone())
                 .build(),
         );
@@ -773,6 +778,7 @@ mod tests {
         let seen = drain(&mut stream_text(
             StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
+                .tools(&ToolSet::new())
                 .build(),
         ))
         .await;
@@ -872,6 +878,7 @@ mod tests {
         let llm = RecordingLlm::new(vec![vec![delta("好"), done()]]);
         drain(&mut stream_text(
             StreamTextParams::builder(&llm)
+                .tools(&ToolSet::new())
                 .messages(vec![ChatItem::user("hi")])
                 .build(),
         ))
@@ -993,9 +1000,11 @@ mod tests {
     #[tokio::test]
     async fn text_only_round_never_consults_conditions() {
         let llm = ScriptedLlm::new(vec![vec![delta("你"), delta("好"), done()]]);
+        let tools = ToolSet::new();
         let mut events = stream_text(
             StreamTextParams::builder(&llm)
                 .messages(vec![ChatItem::user("hi")])
+                .tools(&tools)
                 .stop_when(vec![Box::new(|_steps: &[StepResult]| true)])
                 .build(),
         );

@@ -20,7 +20,7 @@ use tower::ServiceExt;
 pub type TestApp = tower_http::normalize_path::NormalizePath<axum::Router>;
 
 use dashachun::agent::{
-    AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner,
+    AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner, ToolSet,
 };
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
@@ -101,7 +101,7 @@ fn test_state_with_registry_inner(
     devices: DeviceStore,
 ) -> ServerState {
     let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
-    let tools = Vec::new();
+    let tools = ToolSet::new();
     let factory = AgentFactory::assemble(
         &registry,
         &ProviderSpec::stub(),

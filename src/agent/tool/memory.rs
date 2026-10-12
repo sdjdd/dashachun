@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::agent::generate::{StepResult, StopCondition};
 use crate::agent::memory::{AddError, EntryMemory, EntryOp, EntryOpResult, MAX_ENTRIES, entry_id};
 
-use super::{Tool, ToolEntry};
+use super::{Tool, ToolSet};
 
 const MAX_CONTENT_CHARS: usize = 512;
 
@@ -168,12 +168,11 @@ impl Tool for MemoryDelete {
 /// scope's entry memory, so the prompt reads what the tools write. The
 /// family's registration, its tool-name list and its stop condition all
 /// live in this file — adding a memory tool is one-file work.
-pub fn memory_tools(entries: &Arc<dyn EntryMemory>) -> [ToolEntry; 3] {
-    [
-        ToolEntry::new(MemoryAdd::new(Arc::clone(entries))),
-        ToolEntry::new(MemoryUpdate::new(Arc::clone(entries))),
-        ToolEntry::new(MemoryDelete::new(Arc::clone(entries))),
-    ]
+pub fn memory_tools(entries: &Arc<dyn EntryMemory>) -> ToolSet {
+    ToolSet::new()
+        .tool(MemoryAdd::new(Arc::clone(entries)))
+        .tool(MemoryUpdate::new(Arc::clone(entries)))
+        .tool(MemoryDelete::new(Arc::clone(entries)))
 }
 
 const MEMORY_TOOLS: [&str; 3] = [MemoryAdd::NAME, MemoryUpdate::NAME, MemoryDelete::NAME];
@@ -335,7 +334,6 @@ mod tests {
     use super::*;
     use crate::agent::ToolCall;
     use crate::agent::memory::{InMemEntryMemory, MemoryEntry};
-    use crate::agent::tool::ToolEntry;
 
     fn memory() -> Arc<dyn EntryMemory> {
         Arc::new(InMemEntryMemory::default())
@@ -466,12 +464,9 @@ mod tests {
 
     #[test]
     fn specs_declare_closed_object_parameters() {
-        for entry in [
-            ToolEntry::new(MemoryAdd::new(memory())),
-            ToolEntry::new(MemoryUpdate::new(memory())),
-            ToolEntry::new(MemoryDelete::new(memory())),
-        ] {
-            let spec = entry.spec();
+        let tools = memory_tools(&memory());
+        for name in [MemoryAdd::NAME, MemoryUpdate::NAME, MemoryDelete::NAME] {
+            let spec = tools.spec(name).unwrap();
             assert!(spec.name.starts_with("memory_"));
             assert_eq!(spec.parameters["type"], "object");
             assert_eq!(spec.parameters["additionalProperties"], false);
