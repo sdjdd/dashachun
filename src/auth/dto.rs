@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use garde::Validate;
 
+use super::Role;
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct RegisterArgs {
     #[garde(pattern(r"^[A-Za-z0-9_-]{3,32}$"))]
@@ -48,4 +50,5 @@ impl std::fmt::Debug for ChangePasswordArgs {
 pub struct UserResponse {
     pub id: i64,
     pub username: String,
+    pub role: Role,
 }

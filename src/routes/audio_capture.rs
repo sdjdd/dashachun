@@ -5,7 +5,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::agent::AudioStorage;
-use crate::auth::extract::AuthUser;
+use crate::auth::extract::AdminUser;
 use crate::auth::state::AuthState;
 use crate::config::OssConfig;
 use crate::error::AppError;
@@ -39,7 +39,7 @@ pub fn routes() -> Router<AudioCaptureState> {
 
 async fn get_capture(
     State(auth): State<AuthState>,
-    _user: AuthUser,
+    _user: AdminUser,
 ) -> Result<Json<AudioCaptureSettings>, AppError> {
     let capture = settings::load_audio_capture(&auth.pool)
         .await
@@ -55,7 +55,7 @@ async fn get_capture(
 async fn put_capture(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
-    _user: AuthUser,
+    _user: AdminUser,
     Json(capture): Json<AudioCaptureSettings>,
 ) -> Result<Json<AudioCaptureSettings>, AppError> {
     let bucket = capture.bucket.trim().to_owned();

@@ -30,6 +30,29 @@ const STUB_LLM: &str = r#"{"type":"llm","name":"chat","kind":"stub","config":{"r
 
 #[sqlx::test]
 #[ignore]
+async fn the_provider_surface_is_admin_only(pool: PgPool) {
+    let (app, _) = app_with_state(pool.clone());
+    let (admin_cookie, _) = register(&app, &pool).await;
+    let (user_cookie, _) = register(&app, &pool).await;
+
+    for (method, path, body) in [
+        ("GET", "/api/providers", None),
+        ("POST", "/api/providers", Some(STUB_LLM)),
+    ] {
+        let res = send(&app, request(method, path, body, Some(&user_cookie))).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{method} {path}");
+    }
+
+    let res = send(
+        &app,
+        request("GET", "/api/providers", None, Some(&admin_cookie)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+#[ignore]
 async fn create_without_kind_resolves_the_sole_registered_kind(pool: PgPool) {
     let (app, _) = app_with_state(pool.clone());
     let (cookie, _) = register(&app, &pool).await;

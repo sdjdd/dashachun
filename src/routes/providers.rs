@@ -7,7 +7,7 @@ use axum::{Json, Router};
 use sqlx::PgPool;
 
 use crate::agent::{AgentFactory, AgentStore};
-use crate::auth::extract::AuthUser;
+use crate::auth::extract::AdminUser;
 use crate::auth::state::AuthState;
 use crate::error::AppError;
 use crate::extract::Validated;
@@ -52,7 +52,7 @@ pub fn routes() -> Router<ProvidersState> {
 
 async fn list_providers(
     State(auth): State<AuthState>,
-    _user: AuthUser,
+    _user: AdminUser,
 ) -> Result<Json<Vec<ProviderResponse>>, AppError> {
     let selections = provider_selections(&auth.pool).await?;
     let rows = ProviderStore::new(auth.pool.clone()).list().await?;
@@ -68,7 +68,7 @@ async fn list_providers(
 
 async fn get_provider(
     State(auth): State<AuthState>,
-    _user: AuthUser,
+    _user: AdminUser,
     Path(id): Path<i64>,
 ) -> Result<Json<ProviderResponse>, AppError> {
     let store = ProviderStore::new(auth.pool.clone());
@@ -83,7 +83,7 @@ async fn get_provider(
 async fn create_provider(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
-    _user: AuthUser,
+    _user: AdminUser,
     Validated(args): Validated<CreateProviderArgs>,
 ) -> Result<(StatusCode, Json<ProviderResponse>), AppError> {
     // An omitted kind resolves to the type's sole registered implementation
@@ -114,7 +114,7 @@ async fn create_provider(
 async fn update_provider(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
-    _user: AuthUser,
+    _user: AdminUser,
     Path(id): Path<i64>,
     Validated(args): Validated<UpdateProviderArgs>,
 ) -> Result<Json<ProviderResponse>, AppError> {
@@ -157,7 +157,7 @@ async fn update_provider(
 
 async fn delete_provider(
     State(auth): State<AuthState>,
-    _user: AuthUser,
+    _user: AdminUser,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, AppError> {
     let store = ProviderStore::new(auth.pool.clone());
@@ -179,7 +179,7 @@ async fn delete_provider(
 async fn activate_provider(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
-    _user: AuthUser,
+    _user: AdminUser,
     Path(id): Path<i64>,
 ) -> Result<Json<ProviderResponse>, AppError> {
     let store = ProviderStore::new(auth.pool.clone());

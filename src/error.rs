@@ -11,6 +11,8 @@ pub enum AppError {
     BadRequest(String),
     #[error("Unauthorized")]
     Unauthorized,
+    #[error("Forbidden")]
+    Forbidden,
     #[error("Too many requests, retry after {0} seconds")]
     TooManyRequests(u64),
     #[error("Conflict: {0}")]
@@ -48,6 +50,7 @@ impl IntoResponse for AppError {
                 StatusCode::BAD_REQUEST
             }
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

@@ -92,6 +92,43 @@ async fn audio_capture_settings_authenticate_and_roundtrip(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
+async fn audio_capture_settings_are_admin_only(pool: PgPool) {
+    let (app, _) = common::app_with_state(pool.clone());
+    let (admin_cookie, _) = register(&app, &pool).await;
+    let (user_cookie, _) = register(&app, &pool).await;
+
+    for (method, body) in [
+        ("GET", None),
+        ("PUT", Some(r#"{"enabled":false,"bucket":""}"#)),
+    ] {
+        let res = send(
+            &app,
+            request(
+                method,
+                "/api/settings/audio-capture",
+                body,
+                Some(&user_cookie),
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{method}");
+    }
+
+    let res = send(
+        &app,
+        request(
+            "GET",
+            "/api/settings/audio-capture",
+            None,
+            Some(&admin_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+#[ignore]
 async fn enabling_validates_the_storage_then_swaps_the_slot(pool: PgPool) {
     std::env::var("S3_ENDPOINT").expect("S3_ENDPOINT must be set (compose rustfs)");
     std::env::var("S3_ACCESS_KEY_ID").expect("S3_ACCESS_KEY_ID must be set (compose rustfs)");

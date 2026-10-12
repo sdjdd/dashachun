@@ -8,8 +8,7 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
-use super::session;
-use super::state::AuthState;
+use super::{Role, session, state::AuthState};
 
 pub struct AuthUser {
     pub id: i64,
@@ -38,6 +37,37 @@ where
         Ok(AuthUser {
             id: user_id,
             session_id,
+        })
+    }
+}
+
+/// The session-authenticated operator: [`AuthUser`]'s session verification
+/// plus one role lookup. Non-admins get 403 before the handler runs. The
+/// operator surface — `/api/providers` and `/api/settings/*` — takes this
+/// extractor instead of [`AuthUser`]; both reads and writes sit behind it,
+/// because provider rows return their config (api keys included) verbatim.
+pub struct AdminUser {
+    pub id: i64,
+    pub session_id: Uuid,
+}
+
+impl<S> FromRequestParts<S> for AdminUser
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        let state = AuthState::from_ref(state);
+        let role = super::user_role(&state.pool, user.id).await?;
+        if role != Role::Admin {
+            return Err(AppError::Forbidden);
+        }
+        Ok(Self {
+            id: user.id,
+            session_id: user.session_id,
         })
     }
 }

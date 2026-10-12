@@ -43,6 +43,7 @@ async fn register_login_me_change_logout(pool: PgPool) {
     let body = body_json(res).await;
     assert_eq!(body["username"], username);
     assert!(body["id"].is_i64());
+    assert_eq!(body["role"], "admin");
 
     let body = expect_json(
         &app,
@@ -51,6 +52,7 @@ async fn register_login_me_change_logout(pool: PgPool) {
     )
     .await;
     assert_eq!(body["username"], username);
+    assert_eq!(body["role"], "admin");
 
     let res = send(
         &app,
@@ -203,4 +205,19 @@ async fn the_rate_limit_is_per_client_ip(pool: PgPool) {
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     let res = send(&app, post_from("/api/auth/login", body, "203.0.113.8")).await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn the_first_registration_is_admin_and_the_rest_are_not(pool: PgPool) {
+    let app = app(pool.clone());
+    let (first, _) = common::register(&app, &pool).await;
+    let (second, _) = common::register(&app, &pool).await;
+
+    let body =
+        body_json(send(&app, request("GET", "/api/auth/me", None, Some(&first))).await).await;
+    assert_eq!(body["role"], "admin");
+    let body =
+        body_json(send(&app, request("GET", "/api/auth/me", None, Some(&second))).await).await;
+    assert_eq!(body["role"], "user");
 }

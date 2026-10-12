@@ -53,11 +53,12 @@ async fn register(
     Validated(args): Validated<RegisterArgs>,
 ) -> Result<(StatusCode, SignedCookieJar, Json<UserResponse>), AppError> {
     enforce(&state, "register", &ip, REGISTER_LIMIT).await?;
-    let user_id = auth::create_user(&state.pool, &args.username, &args.password).await?;
+    let (user_id, role) = auth::create_user(&state.pool, &args.username, &args.password).await?;
     let session_id = session::create(&state.pool, user_id, state.ttl_secs).await?;
     let user = UserResponse {
         id: user_id,
         username: args.username,
+        role,
     };
     Ok((
         StatusCode::CREATED,
@@ -85,6 +86,7 @@ async fn login(
     let response = UserResponse {
         id: user.id,
         username: user.username,
+        role: user.role,
     };
     Ok((jar.add(state.session_cookie(session_id)), Json(response)))
 }
@@ -127,5 +129,6 @@ async fn me(
     Ok(Json(UserResponse {
         id: record.id,
         username: record.username,
+        role: record.role,
     }))
 }
