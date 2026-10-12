@@ -1,5 +1,7 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde_json::json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -41,7 +43,7 @@ impl IntoResponse for AppError {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 [("retry-after", retry_after.to_string())],
-                self.to_string(),
+                Json(json!({ "error": self.to_string() })),
             )
                 .into_response();
         }
@@ -56,6 +58,6 @@ impl IntoResponse for AppError {
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::TooManyRequests(_) => unreachable!(),
         };
-        (status, self.to_string()).into_response()
+        (status, Json(json!({ "error": self.to_string() }))).into_response()
     }
 }
