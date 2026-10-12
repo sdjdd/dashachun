@@ -100,7 +100,10 @@ fn test_state_with_registry_inner(
     registry: ProviderRegistry,
     devices: DeviceStore,
 ) -> ServerState {
-    let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
+    let vad = Arc::new(SileroVadFactory::new(
+        VadConfig::default(),
+        Arc::from(Vec::new()),
+    ));
     let tools = ToolSet::new();
     let factory = AgentFactory::assemble(
         &registry,

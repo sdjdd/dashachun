@@ -124,3 +124,10 @@ Reopen condition: upstream `voice_activity_detector` ships a version
 supporting a newer `ort` (check its `Cargo.toml` first), or dashachun
 replaces/writes its own VAD — at which point bump `ort` + `ndarray`
 together and re-run the model test.
+
+**Update 2026-10**: that condition is met — `voice_activity_detector`
+was removed and replaced by the self-hosted Silero v6 driver in
+`src/vad/` (see `docs/architecture/vad.md`). Everything above stays as
+the record; bumping `ort` is now a routine change: apply the knf-rs
+ndarray 0.16→0.17 shim plus the rc.13 API adaptations listed here, then
+re-run the model tests.

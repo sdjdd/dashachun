@@ -90,7 +90,13 @@ async fn main() {
     let ota = settings.ota.unwrap_or_default();
 
     let registry = Arc::new(ProviderRegistry::with_builtins());
-    let vad = Arc::new(SileroVadFactory::from_env());
+    let vad = match SileroVadFactory::from_env() {
+        Ok(vad) => Arc::new(vad),
+        Err(err) => {
+            tracing::error!(%err, "failed to load the silero vad model");
+            std::process::exit(1);
+        }
+    };
     let tools = ToolSet::new()
         .tool(GetWeather::new())
         .tool(GetDateTime::new(ota.timezone_offset));

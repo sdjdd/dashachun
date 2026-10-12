@@ -21,14 +21,13 @@ knf-rs = "0.3.2"
 minijinja = "3"
 ndarray = "0.16"
 opus = "0.4"
-# pinned: voice_activity_detector 0.2.x only compiles against ort rc.10 —
-# see src/voiceprint/README.md before touching this
+# pinned rc.10; a bump to rc.13+ first needs the voiceprint knf-rs ndarray
+# shim — see src/voiceprint/README.md before touching this
 ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
 rand = "0.9"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "script"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "uuid", "time", "migrate", "macros", "json"] }
-voice_activity_detector = "0.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10"
@@ -49,3 +48,4 @@ bon = "3.10.2"
 
 [dev-dependencies]
 claxon = "0.4"
+hound = "3"

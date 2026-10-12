@@ -1,12 +1,20 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use futures_util::{Stream, StreamExt};
-use voice_activity_detector::VoiceActivityDetector;
+
+mod silero;
+
+use self::silero::Silero;
 
 use crate::audio::AudioStream;
 
 pub const SAMPLE_RATE: u32 = 16000;
+
+pub const MODEL_URL: &str = "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.3/src/silero_vad/data/silero_vad.onnx";
+pub const MODEL_SHA256: &str = "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3";
+pub const DEFAULT_MODEL_PATH: &str = "models/silero_vad.onnx";
 
 pub type VadEvents = Pin<Box<dyn Stream<Item = VadEvent> + Send>>;
 
@@ -105,7 +113,15 @@ pub enum VadError {
     #[error("unsupported vad sample rate: {0}")]
     UnsupportedSampleRate(u32),
     #[error("vad model error: {0}")]
-    Build(#[from] voice_activity_detector::Error),
+    Build(#[from] ort::Error),
+    #[error(
+        "silero vad model file {path}: {source}; download {MODEL_URL} \
+         (sha256 {MODEL_SHA256}) there, or point SILERO_VAD_MODEL at the model file"
+    )]
+    Model {
+        path: String,
+        source: std::io::Error,
+    },
 }
 
 pub trait Vad: Send {
@@ -183,7 +199,7 @@ impl SpeechSegmenter {
 }
 
 pub struct SileroVad {
-    model: VoiceActivityDetector,
+    model: Silero,
     chunk_size: usize,
     buffer: VecDeque<f32>,
     chunk: Vec<f32>,
@@ -193,16 +209,9 @@ pub struct SileroVad {
 }
 
 impl SileroVad {
-    pub fn new(sample_rate: u32, config: VadConfig) -> Result<Self, VadError> {
-        match sample_rate {
-            16000 | 8000 => {}
-            other => return Err(VadError::UnsupportedSampleRate(other)),
-        }
-        let chunk_size = if sample_rate == 8000 { 256 } else { 512 };
-        let model = VoiceActivityDetector::builder()
-            .sample_rate(sample_rate as i64)
-            .chunk_size(chunk_size)
-            .build()?;
+    pub fn new(sample_rate: u32, config: VadConfig, model: Arc<[u8]>) -> Result<Self, VadError> {
+        let model = Silero::new(model, sample_rate)?;
+        let chunk_size = if sample_rate == 16000 { 512 } else { 256 };
         let chunk_ms = (chunk_size as u64 * 1000 / sample_rate as u64) as u32;
         Ok(Self {
             model,
@@ -221,7 +230,7 @@ impl SileroVad {
             for slot in self.chunk.iter_mut() {
                 *slot = self.buffer.pop_front().unwrap();
             }
-            let probability = self.model.predict(self.chunk.iter().copied());
+            let probability = self.model.predict(&self.chunk);
             if let Some(event) = self.segmenter.push(probability) {
                 events.push(event);
             }
@@ -233,7 +242,7 @@ impl SileroVad {
             for slot in self.chunk.iter_mut() {
                 *slot = self.buffer.pop_front().unwrap_or(0.0);
             }
-            let probability = self.model.predict(self.chunk.iter().copied());
+            let probability = self.model.predict(&self.chunk);
             if let Some(event) = self.segmenter.push(probability) {
                 events.push(event);
             }
@@ -294,21 +303,28 @@ impl Vad for SileroVad {
 #[derive(Clone)]
 pub struct SileroVadFactory {
     config: VadConfig,
+    model: Arc<[u8]>,
 }
 
 impl SileroVadFactory {
-    pub fn new(config: VadConfig) -> Self {
-        Self { config }
+    pub fn new(config: VadConfig, model: Arc<[u8]>) -> Self {
+        Self { config, model }
     }
 
-    pub fn from_env() -> Self {
-        Self::new(VadConfig::from_env())
+    pub fn from_env() -> Result<Self, VadError> {
+        let path = std::env::var("SILERO_VAD_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.into());
+        let model = std::fs::read(&path).map_err(|source| VadError::Model {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(Self::new(VadConfig::from_env(), Arc::from(model)))
     }
 }
 
 impl VadFactory for SileroVadFactory {
     fn build(&self, sample_rate: u32) -> Result<Box<dyn Vad>, VadError> {
-        SileroVad::new(sample_rate, self.config).map(|vad| Box::new(vad) as Box<dyn Vad>)
+        SileroVad::new(sample_rate, self.config, self.model.clone())
+            .map(|vad| Box::new(vad) as Box<dyn Vad>)
     }
 }
 
@@ -430,18 +446,50 @@ mod tests {
     #[test]
     fn unsupported_sample_rate() {
         assert!(matches!(
-            SileroVad::new(24000, VadConfig::default()),
+            SileroVad::new(24000, VadConfig::default(), Arc::from(Vec::new())),
             Err(VadError::UnsupportedSampleRate(24000))
         ));
     }
 
     #[tokio::test]
+    #[ignore = "needs the silero model; run `just model`"]
     async fn real_model_silence_produces_no_events() {
-        let factory = SileroVadFactory::new(VadConfig::default());
+        let factory = SileroVadFactory::from_env().unwrap();
         let vad = factory.build(SAMPLE_RATE).unwrap();
         let frames = (0..20).map(|_| vec![0.0f32; 960]).collect();
         let events: Vec<_> = segment(vad, audio_stream(frames)).collect().await;
         assert!(events.is_empty(), "unexpected events: {events:?}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs the silero model (`just model`) and a 16 kHz mono speech wav at models/vad-test.wav (VAD_TEST_WAV overrides)"]
+    async fn real_model_speech_emits_segment() {
+        let wav = std::env::var("VAD_TEST_WAV").unwrap_or_else(|_| "models/vad-test.wav".into());
+        let mut reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.sample_rate, 16000, "fixture must be 16 kHz");
+        assert_eq!(spec.channels, 1, "fixture must be mono");
+        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
+        let samples: Vec<f32> = reader
+            .samples::<i16>()
+            .map(|s| f32::from(s.unwrap()) / i16::MAX as f32)
+            .collect();
+
+        let factory = SileroVadFactory::from_env().unwrap();
+        let vad = factory.build(SAMPLE_RATE).unwrap();
+        let events: Vec<_> = segment(vad, audio_stream(vec![samples])).collect().await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, VadEvent::SpeechStart { .. })),
+            "no SpeechStart: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, VadEvent::SpeechEnd { .. })),
+            "no SpeechEnd: {events:?}"
+        );
     }
 
     fn audio_stream(frames: Vec<Vec<f32>>) -> AudioStream {

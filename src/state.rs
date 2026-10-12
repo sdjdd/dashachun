@@ -117,7 +117,10 @@ mod tests {
     fn stub_parts() -> (Arc<ProviderRegistry>, Arc<dyn VadFactory>, ToolSet) {
         (
             Arc::new(ProviderRegistry::with_stubs()),
-            Arc::new(SileroVadFactory::new(VadConfig::default())),
+            Arc::new(SileroVadFactory::new(
+                VadConfig::default(),
+                Arc::from(Vec::new()),
+            )),
             ToolSet::new(),
         )
     }

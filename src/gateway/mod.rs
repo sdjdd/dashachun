@@ -210,7 +210,10 @@ mod tests {
         // free of Postgres.
         let pool =
             sqlx::PgPool::connect_lazy("postgres://unused@localhost/unused").expect("lazy pool");
-        let vad = Arc::new(SileroVadFactory::new(VadConfig::default()));
+        let vad = Arc::new(SileroVadFactory::new(
+            VadConfig::default(),
+            Arc::from(Vec::new()),
+        ));
         let tools = ToolSet::new();
         let factory = AgentFactory::assemble(
             &ProviderRegistry::with_stubs(),
