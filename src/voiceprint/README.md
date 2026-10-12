@@ -10,7 +10,7 @@ is repeated here.
 - `Voiceprint::load(path)` → `embed(&[i16]) -> Vec<f32>` (192-dim) +
   `cosine(a, b)`. Constants: `MODEL_SHA256`, `EMBEDDING_DIM = 192`,
   `SAMPLE_RATE = 16_000`, `DEFAULT_MODEL_PATH`.
-- `embed` needs `&mut self` (ort rc.10 session API). One ORT session load
+- `embed` needs `&mut self` (the ort session `run` takes `&mut`). One ORT session load
   costs ~100 ms — share one `Voiceprint` (e.g. `Arc<Mutex<_>>`), never
   per-connection. Per-utterance inference is tens of ms on CPU
   (demo: whole process incl. ORT init + 3 embeddings = 0.43 s).
@@ -85,49 +85,52 @@ The ecosystem's proven shape, worth copying or consciously rejecting:
   same speaker 0.6495, cross speakers −0.08 / 0.01. Upstream
   `scripts/3dspeaker/test-onnx.py` is the diff baseline if numbers drift.
 
-## Why `ort`/`ndarray` are pinned (do not bump casually)
+## ort/ndarray history: the rc.10 pin and the rc.13 bump (2026-10)
 
-`ort` is pinned `=2.0.0-rc.10` and `ndarray` `0.16` **because of the VAD
-crate, not because of this module**. Bumping both to `ort 2.0.0-rc.13` +
-`ndarray 0.17` was attempted (2025-10) and reverted; the full picture:
+`ort` ran pinned `=2.0.0-rc.10` + `ndarray 0.16` until 2026-10. Bumping both
+to `ort 2.0.0-rc.13` + `ndarray 0.17` was attempted (2025-10) and reverted —
+the full picture, kept as the record:
 
-- **The actual blocker is `voice_activity_detector`** (our Silero VAD).
-  Its 0.2.0 `ort` requirement is a loose `^2.0.0-rc.9` — cargo resolves it
-  to whatever `ort` we pick (pre-release tuple rule) — while its own code
-  passes ndarray **0.16** views into `ort::inputs!`. On rc.13 (ndarray
-  feature 0.17) the compile breaks **inside its source**, not ours. Upstream
-  0.2.1 responds by hard-locking `=2.0.0-rc.10` (see the comment in its
-  `Cargo.toml`); the repo has no rc.13 follow-up (last commit 2025-08).
-- **A fork patch works and was prototyped**: vendored
+- **The original blocker was `voice_activity_detector`** (then our Silero
+  VAD). Its 0.2.0 `ort` requirement was a loose `^2.0.0-rc.9` — cargo
+  resolved it to whatever `ort` we picked (pre-release tuple rule) — while
+  its own code passed ndarray **0.16** views into `ort::inputs!`. On rc.13
+  (ndarray feature 0.17) the compile broke **inside its source**, not ours.
+  Upstream 0.2.1 responded by hard-locking `=2.0.0-rc.10`; the repo has no
+  rc.13 follow-up (last commit 2025-08).
+- **A fork patch worked and was prototyped**: vendored
   `voice_activity_detector` with `ndarray = "0.17"` + `ort = "=2.0.0-rc.13"`
-  compiles after a trivial Cargo.toml-only diff (its `Tensor::from_array` /
-  `try_extract_array` usage is already rc.10-style), our model test passed.
-  Costs: a `[patch.crates-io]` entry plus the whole crate vendored in-tree —
+  compiles after a trivial Cargo.toml-only diff. Rejected: a
+  `[patch.crates-io]` entry plus the whole crate vendored in-tree —
   including its 2.3 MB `silero_vad.onnx` baked in via `include_bytes!` —
-  and a fork to maintain forever. Judged not worth it.
-- **rc.13-specific API breaks** hit in this module (for whoever retries):
-  `ort::Error` becomes tag-generic `Error<R>` — `#[from] ort::Error` no
-  longer fits, errors must be carried as `Onnx(String)` via `map_err`
-  (its `Display` is message-only anyway); `try_extract_tensor` returns
-  `(&Shape, &[T])` (`.1` still works); `run` rejects a bare `Value` —
-  keep the `ort::inputs![...]` macro; and knf-rs still returns an ndarray
-  0.16 `Array2`, which needs
-  `into_raw_vec_and_offset()` + `Array2::from_shape_vec` to cross into
-  0.17 before `Tensor::from_array`.
-- **Patch footgun**: a `[patch.crates-io]` source whose `[package]`
-  version does not exactly match the version resolved in the graph is
-  **silently unused** ("patch ... was not used in the crate graph") and the
-  registry copy compiles instead — the failure looks like the patch never
-  happened.
+  and a fork to maintain forever.
+- **rc.13 API breaks catalogued** (all now applied): `ort::Error` becomes
+  tag-generic `Error<R>` — `#[from] ort::Error` no longer fits, so both
+  audio modules carry `String` variants (`VoiceprintError::Onnx`,
+  `VadError::Build`) via `map_err` at the call site (its `Display` is
+  message-only anyway); `try_extract_tensor` returns `(&Shape, &[T])`
+  (the `.1` indexing already matched); `run` rejects a bare `Value` — keep
+  the `ort::inputs![...]` macro.
+- **Patch footgun** (still worth knowing): a `[patch.crates-io]` source
+  whose `[package]` version does not exactly match the version resolved in
+  the graph is **silently unused** ("patch ... was not used in the crate
+  graph") and the registry copy compiles instead — the failure looks like
+  the patch never happened.
 
-Reopen condition: upstream `voice_activity_detector` ships a version
-supporting a newer `ort` (check its `Cargo.toml` first), or dashachun
-replaces/writes its own VAD — at which point bump `ort` + `ndarray`
-together and re-run the model test.
+**The bump was completed 2026-10** after the VAD swap removed the blocker:
+`ort =2.0.0-rc.13` (ORT 1.28) + `ndarray 0.17` (the single version in the
+tree — `ort`'s ndarray feature shares it). The knf-rs ndarray-0.16 shim
+that was going to be the remaining constraint became unnecessary: the
+frontend moved from the C++ `knf-rs` binding (which pinned a second
+ndarray 0.16 copy and pulled `eyre`) to the pure-Rust `kaldi-fbank` 0.1.0
+— a faithful port of kaldi-native-fbank with no ndarray dependency at
+all. The frontend contract is two overrides on the crate defaults
+(`dither = 0.0`, `mel_opts.num_bins = 80`); the per-utterance mel-mean
+subtraction moved out of `knf_rs::compute_fbank` into our `embed()`
+explicitly.
 
-**Update 2026-10**: that condition is met — `voice_activity_detector`
-was removed and replaced by the self-hosted Silero v6 driver in
-`src/vad/` (see `docs/architecture/vad.md`). Everything above stays as
-the record; bumping `ort` is now a routine change: apply the knf-rs
-ndarray 0.16→0.17 shim plus the rc.13 API adaptations listed here, then
-re-run the model tests.
+Frontend parity was verified by a throwaway A/B (both extractors compiled,
+same inputs): synthetic sine mixes and a real 16 kHz wav produce equal
+frame counts with max abs diff ≈ 1.6e-4, mean abs diff ≈ 1e-6 — FFT
+rounding level, so the separation baselines below carry over. The model
+test (`embeds_deterministically_at_the_pinned_dimension`) passes on rc.13.

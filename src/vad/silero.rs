@@ -16,6 +16,10 @@ use ort::value::Tensor;
 
 use super::VadError;
 
+fn build<E: std::fmt::Display>(error: E) -> VadError {
+    VadError::Build(error.to_string())
+}
+
 pub(crate) struct Silero {
     session: Session,
     sample_rate: Array1<i64>,
@@ -30,9 +34,12 @@ impl Silero {
             16000 | 8000 => {}
             other => return Err(VadError::UnsupportedSampleRate(other)),
         }
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .commit_from_memory(&model)?;
+        let session = Session::builder()
+            .map_err(build)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(build)?
+            .commit_from_memory(&model)
+            .map_err(build)?;
         let context_size = if sample_rate == 16000 { 64 } else { 32 };
         Ok(Self {
             session,

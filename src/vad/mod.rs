@@ -113,7 +113,7 @@ pub enum VadError {
     #[error("unsupported vad sample rate: {0}")]
     UnsupportedSampleRate(u32),
     #[error("vad model error: {0}")]
-    Build(#[from] ort::Error),
+    Build(String),
     #[error(
         "silero vad model file {path}: {source}; download {MODEL_URL} \
          (sha256 {MODEL_SHA256}) there, or point SILERO_VAD_MODEL at the model file"

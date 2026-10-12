@@ -10,7 +10,8 @@
 
 use std::path::Path;
 
-use ndarray::Axis;
+use kaldi_fbank::FbankOptions;
+use ndarray::Array3;
 use ort::session::Session;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Tensor;
@@ -27,8 +28,8 @@ pub const MODEL_SHA256: &str = "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa2
 /// The default location relative to the working directory.
 pub const DEFAULT_MODEL_PATH: &str = "models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
 
-/// The sample rate the frontend is built for (knf computes at 16 kHz);
-/// anything else must be resampled before [`Voiceprint::embed`].
+/// The sample rate the frontend is built for (the fbank stage computes at
+/// 16 kHz); anything else must be resampled before [`Voiceprint::embed`].
 pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Embedding dimension of the pinned model. A different 3d-speaker export
@@ -38,11 +39,15 @@ pub const EMBEDDING_DIM: usize = 192;
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceprintError {
     #[error("onnx: {0}")]
-    Onnx(#[from] ort::Error),
-    #[error("fbank: {0}")]
-    Fbank(#[from] eyre::Report),
+    Onnx(String),
+    #[error("empty pcm input")]
+    EmptyInput,
     #[error("model has no `embedding` output")]
     MissingOutput,
+}
+
+fn onnx<E: std::fmt::Display>(error: E) -> VoiceprintError {
+    VoiceprintError::Onnx(error.to_string())
 }
 
 pub struct Voiceprint {
@@ -51,27 +56,54 @@ pub struct Voiceprint {
 
 impl Voiceprint {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, VoiceprintError> {
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(2)?
-            .commit_from_file(path.as_ref())?;
+        let session = Session::builder()
+            .map_err(onnx)?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(onnx)?
+            .with_intra_threads(2)
+            .map_err(onnx)?
+            .commit_from_file(path.as_ref())
+            .map_err(onnx)?;
         Ok(Self { session })
     }
 
     /// Embed one utterance of 16 kHz mono s16le PCM. CPU inference is
     /// deterministic — the same samples always produce the same vector.
     pub fn embed(&mut self, pcm: &[i16]) -> Result<Vec<f32>, VoiceprintError> {
-        let mut samples = vec![0.0; pcm.len()];
-        knf_rs::convert_integer_to_float_audio(pcm, &mut samples);
-        let features = knf_rs::compute_fbank(&samples)?.insert_axis(Axis(0));
+        if pcm.is_empty() {
+            return Err(VoiceprintError::EmptyInput);
+        }
+        let samples: Vec<f32> = pcm.iter().map(|s| f32::from(*s) / 32768.0).collect();
+        let mut opts = FbankOptions::default();
+        opts.frame_opts.dither = 0.0;
+        opts.mel_opts.num_bins = 80;
+        let frames = kaldi_fbank::compute_fbank(&opts, &samples);
+        let num_frames = frames.len();
+        let mut mean = [0.0f32; 80];
+        for frame in &frames {
+            for (m, v) in mean.iter_mut().zip(frame) {
+                *m += v;
+            }
+        }
+        for m in &mut mean {
+            *m /= num_frames as f32;
+        }
+        let flat: Vec<f32> = frames
+            .into_iter()
+            .flat_map(|f| f.into_iter().zip(mean.iter()).map(|(v, m)| v - m))
+            .collect();
+        let features = Array3::from_shape_vec((1, num_frames, 80), flat)
+            .expect("flat fbank data matches the frame count");
 
         let outputs = self
             .session
-            .run(ort::inputs!["x" => Tensor::from_array(features)?])?;
+            .run(ort::inputs!["x" => Tensor::from_array(features).map_err(onnx)?])
+            .map_err(onnx)?;
         let out = outputs
             .get("embedding")
             .ok_or(VoiceprintError::MissingOutput)?
-            .try_extract_tensor::<f32>()?;
+            .try_extract_tensor::<f32>()
+            .map_err(onnx)?;
 
         Ok(out.1.to_vec())
     }

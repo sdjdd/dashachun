@@ -12,18 +12,15 @@ aws-sdk-s3 = { version = "1.152", default-features = false, features = ["rt-toki
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie", "cookie-signed"] }
 dotenvy = "0.15.7"
-eyre = "0.6"
 flacenc = { version = "0.5", default-features = false }
 flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 garde = { version = "0.23", features = ["derive", "regex"] }
-knf-rs = "0.3.2"
+kaldi-fbank = "=0.1.0"
 minijinja = "3"
-ndarray = "0.16"
+ndarray = "0.17"
 opus = "0.4"
-# pinned rc.10; a bump to rc.13+ first needs the voiceprint knf-rs ndarray
-# shim — see src/voiceprint/README.md before touching this
-ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
+ort = { version = "=2.0.0-rc.13", features = ["ndarray"] }
 rand = "0.9"
 redis = { version = "1", default-features = false, features = ["tokio-comp", "script"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
