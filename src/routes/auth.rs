@@ -9,7 +9,7 @@ use crate::auth::dto::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse
 use crate::auth::extract::{AuthUser, ClientIp};
 use crate::auth::state::AuthState;
 use crate::auth::{self, password, session};
-use crate::error::AppError;
+use crate::error::{AppError, ErrorResponse};
 use crate::extract::Validated;
 use crate::ratelimit::Decision;
 
@@ -46,7 +46,19 @@ async fn enforce(
     }
 }
 
-async fn register(
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    tag = "auth",
+    request_body = RegisterArgs,
+    responses(
+        (status = 201, body = UserResponse, description = "Account created; session cookie set"),
+        (status = 400, body = ErrorResponse, description = "Invalid payload"),
+        (status = 409, body = ErrorResponse, description = "Username taken"),
+        (status = 429, body = ErrorResponse, description = "Rate limited"),
+    ),
+)]
+pub(crate) async fn register(
     State(state): State<AuthState>,
     ip: ClientIp,
     jar: SignedCookieJar,
@@ -67,7 +79,19 @@ async fn register(
     ))
 }
 
-async fn login(
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "auth",
+    request_body = LoginArgs,
+    responses(
+        (status = 200, body = UserResponse, description = "Session cookie set"),
+        (status = 400, body = ErrorResponse, description = "Invalid payload"),
+        (status = 401, body = ErrorResponse, description = "Wrong credentials"),
+        (status = 429, body = ErrorResponse, description = "Rate limited"),
+    ),
+)]
+pub(crate) async fn login(
     State(state): State<AuthState>,
     ip: ClientIp,
     jar: SignedCookieJar,
@@ -91,7 +115,17 @@ async fn login(
     Ok((jar.add(state.session_cookie(session_id)), Json(response)))
 }
 
-async fn logout(
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    security(("cookieAuth" = [])),
+    responses(
+        (status = 204, description = "Session deleted; cookie removed"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+    ),
+)]
+pub(crate) async fn logout(
     State(state): State<AuthState>,
     user: AuthUser,
     jar: SignedCookieJar,
@@ -100,7 +134,20 @@ async fn logout(
     Ok((StatusCode::NO_CONTENT, jar.remove(state.removal_cookie())))
 }
 
-async fn change_password(
+#[utoipa::path(
+    post,
+    path = "/api/auth/change-password",
+    tag = "auth",
+    security(("cookieAuth" = [])),
+    request_body = ChangePasswordArgs,
+    responses(
+        (status = 204, description = "Password changed; other sessions revoked"),
+        (status = 400, body = ErrorResponse, description = "Invalid payload"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated or wrong current password"),
+        (status = 429, body = ErrorResponse, description = "Rate limited"),
+    ),
+)]
+pub(crate) async fn change_password(
     State(state): State<AuthState>,
     ip: ClientIp,
     user: AuthUser,
@@ -119,7 +166,17 @@ async fn change_password(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn me(
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    tag = "auth",
+    security(("cookieAuth" = [])),
+    responses(
+        (status = 200, body = UserResponse, description = "The authenticated account"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+    ),
+)]
+pub(crate) async fn me(
     State(state): State<AuthState>,
     user: AuthUser,
 ) -> Result<Json<UserResponse>, AppError> {

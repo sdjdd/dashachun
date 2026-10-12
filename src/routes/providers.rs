@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use crate::agent::{AgentFactory, AgentStore};
 use crate::auth::extract::AdminUser;
 use crate::auth::state::AuthState;
-use crate::error::AppError;
+use crate::error::{AppError, ErrorResponse};
 use crate::extract::Validated;
 use crate::provider::ProviderSpec;
 use crate::provider::dto::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
@@ -50,7 +50,18 @@ pub fn routes() -> Router<ProvidersState> {
         .route("/{id}/activate", post(activate_provider))
 }
 
-async fn list_providers(
+#[utoipa::path(
+    get,
+    path = "/api/providers",
+    tag = "providers",
+    security(("cookieAuth" = [])),
+    responses(
+        (status = 200, body = [ProviderResponse], description = "All provider rows with selection state"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+    ),
+)]
+pub(crate) async fn list_providers(
     State(auth): State<AuthState>,
     _user: AdminUser,
 ) -> Result<Json<Vec<ProviderResponse>>, AppError> {
@@ -66,7 +77,20 @@ async fn list_providers(
     ))
 }
 
-async fn get_provider(
+#[utoipa::path(
+    get,
+    path = "/api/providers/{id}",
+    tag = "providers",
+    security(("cookieAuth" = [])),
+    params(("id" = i64, Path, description = "Provider row id")),
+    responses(
+        (status = 200, body = ProviderResponse, description = "The provider row"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+        (status = 404, body = ErrorResponse, description = "Unknown provider id"),
+    ),
+)]
+pub(crate) async fn get_provider(
     State(auth): State<AuthState>,
     _user: AdminUser,
     Path(id): Path<i64>,
@@ -80,7 +104,20 @@ async fn get_provider(
     Ok(Json(ProviderResponse::new(row, selected)))
 }
 
-async fn create_provider(
+#[utoipa::path(
+    post,
+    path = "/api/providers",
+    tag = "providers",
+    security(("cookieAuth" = [])),
+    request_body = CreateProviderArgs,
+    responses(
+        (status = 201, body = ProviderResponse, description = "Provider row created"),
+        (status = 400, body = ErrorResponse, description = "Invalid payload or config rejected by the type"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+    ),
+)]
+pub(crate) async fn create_provider(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
     _user: AdminUser,
@@ -111,7 +148,22 @@ async fn create_provider(
     ))
 }
 
-async fn update_provider(
+#[utoipa::path(
+    put,
+    path = "/api/providers/{id}",
+    tag = "providers",
+    security(("cookieAuth" = [])),
+    params(("id" = i64, Path, description = "Provider row id")),
+    request_body = UpdateProviderArgs,
+    responses(
+        (status = 200, body = ProviderResponse, description = "Provider row updated"),
+        (status = 400, body = ErrorResponse, description = "Invalid payload or config rejected by the type"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+        (status = 404, body = ErrorResponse, description = "Unknown provider id"),
+    ),
+)]
+pub(crate) async fn update_provider(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
     _user: AdminUser,
@@ -155,7 +207,21 @@ async fn update_provider(
     Ok(Json(ProviderResponse::new(row, selected)))
 }
 
-async fn delete_provider(
+#[utoipa::path(
+    delete,
+    path = "/api/providers/{id}",
+    tag = "providers",
+    security(("cookieAuth" = [])),
+    params(("id" = i64, Path, description = "Provider row id")),
+    responses(
+        (status = 204, description = "Provider row deleted"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+        (status = 404, body = ErrorResponse, description = "Unknown provider id"),
+        (status = 409, body = ErrorResponse, description = "Provider is selected for its type"),
+    ),
+)]
+pub(crate) async fn delete_provider(
     State(auth): State<AuthState>,
     _user: AdminUser,
     Path(id): Path<i64>,
@@ -176,7 +242,20 @@ async fn delete_provider(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn activate_provider(
+#[utoipa::path(
+    post,
+    path = "/api/providers/{id}/activate",
+    tag = "providers",
+    security(("cookieAuth" = [])),
+    params(("id" = i64, Path, description = "Provider row id")),
+    responses(
+        (status = 200, body = ProviderResponse, description = "Provider selected and generation hot-applied"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+        (status = 404, body = ErrorResponse, description = "Unknown provider id"),
+    ),
+)]
+pub(crate) async fn activate_provider(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
     _user: AdminUser,

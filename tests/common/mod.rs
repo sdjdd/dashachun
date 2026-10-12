@@ -183,8 +183,6 @@ pub async fn send(app: &TestApp, request: Request<Body>) -> axum::response::Resp
 
 /// Sends the request and asserts the status, returning the parsed JSON body.
 /// A mismatch panics with the body, so the server's error JSON is visible.
-/// Only for handlers that answer with a JSON body — `AppError` responses are
-/// plain text, assert their status on `send` instead.
 pub async fn expect_json(
     app: &TestApp,
     request: Request<Body>,

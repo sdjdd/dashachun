@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use garde::Validate;
 
 use super::Role;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RegisterArgs {
     #[garde(pattern(r"^[A-Za-z0-9_-]{3,32}$"))]
     pub username: String,
@@ -12,7 +13,7 @@ pub struct RegisterArgs {
     pub password: String,
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, ToSchema)]
 pub struct LoginArgs {
     #[garde(pattern(r"^[A-Za-z0-9_-]{3,32}$"))]
     pub username: String,
@@ -29,7 +30,7 @@ impl std::fmt::Debug for LoginArgs {
     }
 }
 
-#[derive(Deserialize, Validate)]
+#[derive(Deserialize, Validate, ToSchema)]
 pub struct ChangePasswordArgs {
     #[garde(skip)]
     pub current_password: String,
@@ -46,7 +47,7 @@ impl std::fmt::Debug for ChangePasswordArgs {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UserResponse {
     pub id: i64,
     pub username: String,

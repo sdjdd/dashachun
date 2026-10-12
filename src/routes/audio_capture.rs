@@ -8,7 +8,7 @@ use crate::agent::AudioStorage;
 use crate::auth::extract::AdminUser;
 use crate::auth::state::AuthState;
 use crate::config::OssConfig;
-use crate::error::AppError;
+use crate::error::{AppError, ErrorResponse};
 use crate::oss::Oss;
 use crate::settings::{self, AudioCaptureSettings};
 use crate::state::ServerState;
@@ -37,7 +37,18 @@ pub fn routes() -> Router<AudioCaptureState> {
     Router::new().route("/", get(get_capture).put(put_capture))
 }
 
-async fn get_capture(
+#[utoipa::path(
+    get,
+    path = "/api/settings/audio-capture",
+    tag = "settings",
+    security(("cookieAuth" = [])),
+    responses(
+        (status = 200, body = AudioCaptureSettings, description = "The standing audio-capture section"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+    ),
+)]
+pub(crate) async fn get_capture(
     State(auth): State<AuthState>,
     _user: AdminUser,
 ) -> Result<Json<AudioCaptureSettings>, AppError> {
@@ -52,7 +63,20 @@ async fn get_capture(
 /// stored — a failed check keeps the current settings standing, exactly
 /// like the provider build path. In-flight sessions keep their storage
 /// clone across the swap.
-async fn put_capture(
+#[utoipa::path(
+    put,
+    path = "/api/settings/audio-capture",
+    tag = "settings",
+    security(("cookieAuth" = [])),
+    request_body = AudioCaptureSettings,
+    responses(
+        (status = 200, body = AudioCaptureSettings, description = "Section stored and hot-applied"),
+        (status = 400, body = ErrorResponse, description = "Invalid section or storage check failed"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 403, body = ErrorResponse, description = "Admins only"),
+    ),
+)]
+pub(crate) async fn put_capture(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
     _user: AdminUser,

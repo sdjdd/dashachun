@@ -296,3 +296,53 @@ async fn bound_device_token(pool: &PgPool) -> String {
 
     devices.rotate_token(uuid).await.unwrap().unwrap()
 }
+
+#[sqlx::test]
+#[ignore]
+async fn openapi_spec_and_scalar_ui_are_served(pool: PgPool) {
+    let app = app(pool);
+
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/scalar")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/html")
+    );
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        html.contains("openapi"),
+        "spec must be inlined into the page"
+    );
+
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/api/openapi.json")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let spec = common::body_json(res).await;
+    assert!(spec["openapi"].as_str().unwrap().starts_with("3.1"));
+    assert!(spec["paths"]["/api/auth/login"].is_object());
+    assert!(
+        spec["paths"]["/api/ota"].is_null(),
+        "device surface stays out"
+    );
+}

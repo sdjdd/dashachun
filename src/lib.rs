@@ -6,6 +6,8 @@ use axum::routing::get;
 use tokio::sync::watch;
 use tower::Layer;
 use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
+use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
 
 use crate::auth::state::AuthState;
 use crate::state::ServerState;
@@ -15,6 +17,7 @@ pub mod audio;
 pub mod auth;
 pub mod config;
 pub mod device;
+pub mod docs;
 pub mod dto;
 pub mod error;
 pub mod extract;
@@ -55,7 +58,9 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
             routes::agents::routes().with_state(auth.clone()),
         )
         .nest("/api/devices", devices)
-        .nest("/api/settings/audio-capture", audio_capture);
+        .nest("/api/settings/audio-capture", audio_capture)
+        .merge(Scalar::with_url("/scalar", docs::ApiDoc::openapi()))
+        .route("/api/openapi.json", get(docs::spec));
 
     NormalizePathLayer::trim_trailing_slash().layer(router)
 }

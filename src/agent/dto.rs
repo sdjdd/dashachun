@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use garde::Validate;
 
 use super::AgentRecord;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateAgentArgs {
     #[garde(length(min = 1, max = 64))]
     pub name: String,
@@ -12,7 +13,7 @@ pub struct CreateAgentArgs {
     pub persona_prompt: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AgentResponse {
     pub id: i64,
     pub name: String,

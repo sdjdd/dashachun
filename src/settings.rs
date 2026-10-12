@@ -4,6 +4,7 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use utoipa::ToSchema;
 
 const ASR_PROVIDER_ID_KEY: &str = "asr_provider_id";
 const LLM_PROVIDER_ID_KEY: &str = "llm_provider_id";
@@ -74,7 +75,7 @@ impl fmt::Debug for SecuritySettings {
 /// operators change at runtime — whether captures are stored and where.
 /// Changes apply hot through `/api/settings/audio-capture` (restart also applies,
 /// boot reads this row).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct AudioCaptureSettings {
     pub enabled: bool,
     pub bucket: String,

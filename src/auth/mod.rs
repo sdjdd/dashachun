@@ -6,6 +6,7 @@ pub mod state;
 
 use serde::Serialize;
 use sqlx::PgPool;
+use utoipa::ToSchema;
 
 use crate::error::AppError;
 
@@ -20,7 +21,7 @@ pub struct UserRecord {
 /// `/api/settings/*`), `user` is everyone else. The first registered account
 /// becomes admin, so a fresh server is configurable without SQL access;
 /// later promotions and demotions are SQL-only — there is no role REST.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, sqlx::Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema, sqlx::Type)]
 #[serde(rename_all = "lowercase")]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 pub enum Role {

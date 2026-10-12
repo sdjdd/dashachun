@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use garde::Validate;
 
 use super::store::ProviderRecord;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateProviderArgs {
     #[garde(length(min = 1))]
     pub r#type: String,
@@ -16,7 +17,7 @@ pub struct CreateProviderArgs {
     pub config: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct UpdateProviderArgs {
     #[garde(length(min = 1, max = 64))]
     pub name: Option<String>,
@@ -26,7 +27,7 @@ pub struct UpdateProviderArgs {
     pub config: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ProviderResponse {
     pub id: i64,
     pub r#type: String,

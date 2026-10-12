@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use garde::Validate;
 
 use super::DeviceRecord;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ActivateDeviceArgs {
     #[garde(pattern(r"^[0-9]{6}$"))]
     pub code: String,
@@ -12,7 +13,7 @@ pub struct ActivateDeviceArgs {
     pub agent_id: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DeviceResponse {
     pub client_id: String,
     pub device_id: Option<String>,

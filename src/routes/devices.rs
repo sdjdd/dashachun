@@ -8,7 +8,7 @@ use crate::auth::state::AuthState;
 use crate::device::BindOutcome;
 use crate::device::DeviceStore;
 use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
-use crate::error::AppError;
+use crate::error::{AppError, ErrorResponse};
 use crate::extract::Validated;
 
 /// The device REST routes need both halves: session auth and the device
@@ -33,7 +33,21 @@ pub fn routes() -> Router<DevicesState> {
         .route("/{client_id}", delete(unbind_device))
 }
 
-async fn activate_device(
+#[utoipa::path(
+    post,
+    path = "/api/devices/activate",
+    tag = "devices",
+    security(("cookieAuth" = [])),
+    request_body = ActivateDeviceArgs,
+    responses(
+        (status = 200, body = DeviceResponse, description = "Device bound to the account"),
+        (status = 400, body = ErrorResponse, description = "Invalid payload"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 404, body = ErrorResponse, description = "Unknown activation code or agent"),
+        (status = 409, body = ErrorResponse, description = "Device already bound"),
+    ),
+)]
+pub(crate) async fn activate_device(
     State(state): State<DevicesState>,
     user: AuthUser,
     Validated(args): Validated<ActivateDeviceArgs>,
@@ -50,7 +64,17 @@ async fn activate_device(
     }
 }
 
-async fn list_devices(
+#[utoipa::path(
+    get,
+    path = "/api/devices",
+    tag = "devices",
+    security(("cookieAuth" = [])),
+    responses(
+        (status = 200, body = [DeviceResponse], description = "The account's bound devices"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+    ),
+)]
+pub(crate) async fn list_devices(
     State(state): State<DevicesState>,
     user: AuthUser,
 ) -> Result<Json<Vec<DeviceResponse>>, AppError> {
@@ -60,7 +84,19 @@ async fn list_devices(
     ))
 }
 
-async fn unbind_device(
+#[utoipa::path(
+    delete,
+    path = "/api/devices/{client_id}",
+    tag = "devices",
+    security(("cookieAuth" = [])),
+    params(("client_id" = String, Path, description = "Client id of the device to unbind")),
+    responses(
+        (status = 204, description = "Device unbound"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 404, body = ErrorResponse, description = "Device not bound to this account"),
+    ),
+)]
+pub(crate) async fn unbind_device(
     State(state): State<DevicesState>,
     user: AuthUser,
     Path(client_id): Path<String>,
