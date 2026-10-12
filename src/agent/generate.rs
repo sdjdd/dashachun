@@ -20,7 +20,7 @@ use futures_util::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::llm::{
-    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice,
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice, ToolSpec,
 };
 use super::tool::{ToolEntry, execute_tool};
 
@@ -78,6 +78,7 @@ enum Phase<'a> {
 struct Loop<'a> {
     llm: &'a dyn Llm,
     tools: &'a [ToolEntry],
+    specs: Vec<ToolSpec>,
     tool_choice: Option<ToolChoice<'a>>,
     reasoning: Option<ReasoningEffort>,
     cancel: CancellationToken,
@@ -140,9 +141,13 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         stop_when,
         cancel,
     } = params;
+    // The registry is fixed for the whole call — the spec slice is collected
+    // once here, not per round.
+    let specs: Vec<ToolSpec> = tools.iter().map(|entry| entry.spec().clone()).collect();
     let state = Loop {
         llm,
         tools,
+        specs,
         tool_choice,
         reasoning,
         cancel,
@@ -175,14 +180,9 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             ));
                         }
                         state.round_text.clear();
-                        let specs = state
-                            .tools
-                            .iter()
-                            .map(|entry| entry.spec().clone())
-                            .collect();
                         let chat = state.llm.chat(
                             state.working.clone(),
-                            specs,
+                            state.specs.clone(),
                             state.tool_choice,
                             state.reasoning,
                             state.cancel.clone(),

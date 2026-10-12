@@ -70,6 +70,7 @@ pub struct Extractor {
     owner: MemoryOwner,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
+    propose: ToolEntry,
     state: Arc<Mutex<ExtractState>>,
     flush_lock: Arc<AsyncMutex<()>>,
 }
@@ -86,13 +87,28 @@ impl Extractor {
         llm: Arc<dyn Llm>,
         entries: Arc<dyn EntryMemory>,
     ) -> Self {
+        let propose = ToolEntry::new(MemoryPropose::new(Arc::clone(&entries)));
         Self {
             pool,
             owner,
             llm,
             entries,
+            propose,
             state: Arc::new(Mutex::new(ExtractState::default())),
             flush_lock: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    /// The state-carrying clone a detached flush task needs; the propose
+    /// tool comes from the entry built once at construction.
+    fn flush_task(&self) -> FlushTask {
+        FlushTask {
+            pool: self.pool.clone(),
+            owner: self.owner.clone(),
+            llm: Arc::clone(&self.llm),
+            entries: Arc::clone(&self.entries),
+            propose: self.propose.clone(),
+            state: Arc::clone(&self.state),
         }
     }
 
@@ -113,13 +129,7 @@ impl Extractor {
         let Ok(guard) = Arc::clone(&self.flush_lock).try_lock_owned() else {
             return;
         };
-        let task = FlushTask {
-            pool: self.pool.clone(),
-            owner: self.owner.clone(),
-            llm: Arc::clone(&self.llm),
-            entries: Arc::clone(&self.entries),
-            state: Arc::clone(&self.state),
-        };
+        let task = self.flush_task();
         let batch = task.take_pending();
         if batch.is_empty() {
             return;
@@ -143,13 +153,7 @@ impl Drop for Extractor {
         if self.state.lock().unwrap().pending.is_empty() {
             return;
         }
-        let task = FlushTask {
-            pool: self.pool.clone(),
-            owner: self.owner.clone(),
-            llm: Arc::clone(&self.llm),
-            entries: Arc::clone(&self.entries),
-            state: Arc::clone(&self.state),
-        };
+        let task = self.flush_task();
         let lock = Arc::clone(&self.flush_lock);
         tokio::spawn(async move {
             // A flush may still be running — wait it out, then take whatever
@@ -174,6 +178,7 @@ struct FlushTask {
     owner: MemoryOwner,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
+    propose: ToolEntry,
     state: Arc<Mutex<ExtractState>>,
 }
 
@@ -243,13 +248,11 @@ async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
     }
     let entries = task.entries.list().await;
     let messages = build_messages(&entries, &dialogue, &days);
-    let tools = [ToolEntry::new(MemoryPropose::new(Arc::clone(
-        &task.entries,
-    )))];
+    let tools = std::slice::from_ref(&task.propose);
     let result = generate_text(
         StreamTextParams::builder(task.llm.as_ref())
             .messages(messages)
-            .tools(&tools)
+            .tools(tools)
             .tool_choice(ToolChoice::Named(MemoryPropose::NAME))
             // A background batch: a little thinking sharpens the distillation
             // and nobody waits on the first token.

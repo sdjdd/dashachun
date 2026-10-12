@@ -18,7 +18,7 @@ mod weather;
 
 pub use datetime::GetDateTime;
 pub use memory::{
-    MemoryAdd, MemoryDelete, MemoryPropose, MemoryUpdate, stop_after_memory_writes,
+    MemoryAdd, MemoryDelete, MemoryPropose, MemoryUpdate, memory_tools, stop_after_memory_writes,
     stop_after_proposal,
 };
 pub use weather::GetWeather;
@@ -129,13 +129,10 @@ async fn call_typed<T: Tool>(tool: &T, args: Value) -> ToolOutcome {
         }
     };
     match tool.call(args).await {
-        Ok(output) => {
-            debug!(tool = T::NAME, output = %output, "tool result");
-            ToolOutcome {
-                content: output.to_string(),
-                ok: true,
-            }
-        }
+        Ok(output) => ToolOutcome {
+            content: output.to_string(),
+            ok: true,
+        },
         Err(err) => {
             warn!(tool = T::NAME, %err, "tool failed");
             ToolOutcome {

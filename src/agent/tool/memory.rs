@@ -6,7 +6,7 @@ use serde::Deserialize;
 use crate::agent::generate::{StepResult, StopCondition};
 use crate::agent::memory::{AddError, EntryMemory, EntryOp, EntryOpResult, MAX_ENTRIES, entry_id};
 
-use super::Tool;
+use super::{Tool, ToolEntry};
 
 const MAX_CONTENT_CHARS: usize = 512;
 
@@ -162,6 +162,18 @@ impl Tool for MemoryDelete {
             Ok(format!("no memory entry [{id}]"))
         }
     }
+}
+
+/// The voice registry's memory family: the three entry tools bound to one
+/// scope's entry memory, so the prompt reads what the tools write. The
+/// family's registration, its tool-name list and its stop condition all
+/// live in this file — adding a memory tool is one-file work.
+pub fn memory_tools(entries: &Arc<dyn EntryMemory>) -> [ToolEntry; 3] {
+    [
+        ToolEntry::new(MemoryAdd::new(Arc::clone(entries))),
+        ToolEntry::new(MemoryUpdate::new(Arc::clone(entries))),
+        ToolEntry::new(MemoryDelete::new(Arc::clone(entries))),
+    ]
 }
 
 const MEMORY_TOOLS: [&str; 3] = [MemoryAdd::NAME, MemoryUpdate::NAME, MemoryDelete::NAME];

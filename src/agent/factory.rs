@@ -6,7 +6,7 @@ use sqlx::PgPool;
 use super::capture::{AudioCapture, AudioStorage};
 use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook, MemoryOwner};
 use super::store::AgentStore;
-use super::tool::{MemoryAdd, MemoryDelete, MemoryUpdate};
+use super::tool::memory_tools;
 use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolEntry, Tts};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
@@ -136,9 +136,7 @@ impl AgentFactory {
         )
         .await?;
         let mut tools = self.tools.clone();
-        tools.push(ToolEntry::new(MemoryAdd::new(entries.clone())));
-        tools.push(ToolEntry::new(MemoryUpdate::new(entries.clone())));
-        tools.push(ToolEntry::new(MemoryDelete::new(entries.clone())));
+        tools.extend(memory_tools(&entries));
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
             llm: self.llm.clone(),
