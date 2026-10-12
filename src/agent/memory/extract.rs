@@ -365,6 +365,7 @@ fn stop_after_proposal() -> StopCondition {
 mod tests {
     use super::*;
     use crate::agent::{InMemEntryMemory, LlmError, LlmEvents, ToolCall, ToolSpec};
+    use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
@@ -488,9 +489,15 @@ mod tests {
     }
 
     /// A pool that never connects — the flush's first query fails, which is
-    /// the failure the restore path has to survive.
+    /// the failure the restore path has to survive. The acquire timeout has
+    /// to be short: against a machine with nothing listening the pool keeps
+    /// retrying the refused connect until the timeout (30s by default),
+    /// longer than any deadline below.
     fn lazy_pool() -> PgPool {
-        PgPool::connect_lazy("postgres://localhost:5432/extractor_test_missing").unwrap()
+        PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(500))
+            .connect_lazy("postgres://localhost:5432/extractor_test_missing")
+            .unwrap()
     }
 
     #[tokio::test]
