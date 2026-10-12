@@ -27,6 +27,7 @@ pub mod settings;
 pub mod state;
 pub mod util;
 pub mod vad;
+pub mod voiceprint;
 
 pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
     let providers = routes::providers::routes().with_state(routes::providers::ProvidersState {

@@ -1,10 +1,16 @@
-# Dev-stack connection defaults (compose.yaml); values already present in the
+# dev-stack connection defaults (compose.yaml); values already present in the
 # environment win.
 export DATABASE_URL := env_var_or_default("DATABASE_URL", "postgres://postgres:dev@localhost:5432/dsc")
 export REDIS_URL := env_var_or_default("REDIS_URL", "redis://localhost:6379")
 export S3_ENDPOINT := env_var_or_default("S3_ENDPOINT", "http://localhost:9000")
 export S3_ACCESS_KEY_ID := env_var_or_default("S3_ACCESS_KEY_ID", "rustfsadmin")
 export S3_SECRET_ACCESS_KEY := env_var_or_default("S3_SECRET_ACCESS_KEY", "rustfsadmin")
+
+# the pinned CAM++ voiceprint model (src/voiceprint/mod.rs holds the same
+# URL + sha; keep the two in sync)
+model_url := "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+model_sha := "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11"
+model_path := env_var_or_default("VOICEPRINT_MODEL", "models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
 
 suites := "api auth devices memory capture agents providers audio_capture settings oss"
 
@@ -34,6 +40,12 @@ ci:
 # run the server against the dev stack (it reads .env itself)
 run: up
     cargo run
+
+# download the pinned voiceprint model (sha256-verified) into models/
+model:
+    mkdir -p "$(dirname {{model_path}})"
+    curl -fL --retry 3 -o {{model_path}} {{model_url}}
+    echo "{{model_sha}}  {{model_path}}" | sha256sum -c -
 
 # psql shell in the dev postgres
 psql:

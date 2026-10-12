@@ -1,0 +1,126 @@
+//! Speaker embeddings (voiceprint) — a standalone capability module, not an
+//! agent-stage provider (there is no `Asr`-style trait here yet). 16 kHz mono
+//! s16le PCM in, CAM++ embedding out. The ONNX graph carries only the
+//! network; the Kaldi fbank frontend (80 mel bins, 25 ms frames / 10 ms
+//! shift, dither 0) and the per-utterance mel-mean normalization live here,
+//! matching the sherpa-onnx `3d-speaker` export contract. Not wired into the
+//! agent yet — the embedding consumer (enrollment, identification, prompt
+//! injection) comes later — the integration notes live in this directory's
+//! README.md.
+
+use std::path::Path;
+
+use ndarray::Axis;
+use ort::session::Session;
+use ort::session::builder::GraphOptimizationLevel;
+use ort::value::Tensor;
+
+/// Where the pinned model is fetched from (`just model` writes it to
+/// `models/`): the sherpa-onnx export of ModelScope's
+/// `iic/speech_campplus_sv_zh-cn_16k-common`.
+pub const MODEL_URL: &str = "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
+
+/// sha256 of the pinned model — the `just model` recipe verifies it, so a
+/// silently rewritten file on the hosting repo cannot reach the server.
+pub const MODEL_SHA256: &str = "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11";
+
+/// The default location relative to the working directory.
+pub const DEFAULT_MODEL_PATH: &str = "models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
+
+/// The sample rate the frontend is built for (knf computes at 16 kHz);
+/// anything else must be resampled before [`Voiceprint::embed`].
+pub const SAMPLE_RATE: u32 = 16_000;
+
+/// Embedding dimension of the pinned model. A different 3d-speaker export
+/// may differ — the ignored model test asserts this constant.
+pub const EMBEDDING_DIM: usize = 192;
+
+#[derive(Debug, thiserror::Error)]
+pub enum VoiceprintError {
+    #[error("onnx: {0}")]
+    Onnx(#[from] ort::Error),
+    #[error("fbank: {0}")]
+    Fbank(#[from] eyre::Report),
+    #[error("model has no `embedding` output")]
+    MissingOutput,
+}
+
+pub struct Voiceprint {
+    session: Session,
+}
+
+impl Voiceprint {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, VoiceprintError> {
+        let session = Session::builder()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(2)?
+            .commit_from_file(path.as_ref())?;
+        Ok(Self { session })
+    }
+
+    /// Embed one utterance of 16 kHz mono s16le PCM. CPU inference is
+    /// deterministic — the same samples always produce the same vector.
+    pub fn embed(&mut self, pcm: &[i16]) -> Result<Vec<f32>, VoiceprintError> {
+        let mut samples = vec![0.0; pcm.len()];
+        knf_rs::convert_integer_to_float_audio(pcm, &mut samples);
+        let features = knf_rs::compute_fbank(&samples)?.insert_axis(Axis(0));
+
+        let outputs = self
+            .session
+            .run(ort::inputs!["x" => Tensor::from_array(features)?])?;
+        let out = outputs
+            .get("embedding")
+            .ok_or(VoiceprintError::MissingOutput)?
+            .try_extract_tensor::<f32>()?;
+
+        Ok(out.1.to_vec())
+    }
+}
+
+/// Cosine similarity — the identity score between two embeddings. Two
+/// utterances of the same speaker land around 0.65–0.8, different speakers
+/// around 0; the voiceprint threshold is 0.4.
+pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let denom = na * nb;
+    if denom == 0.0 { 0.0 } else { dot / denom }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_basics() {
+        assert!((cosine(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+        assert!((cosine(&[1.0, 0.0], &[-1.0, 0.0]) + 1.0).abs() < 1e-6);
+        assert_eq!(cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    #[ignore] // needs the model on disk first: `just model`
+    fn embeds_deterministically_at_the_pinned_dimension() {
+        let path =
+            std::env::var("VOICEPRINT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string());
+        let mut voiceprint = Voiceprint::load(&path).expect("model loads");
+
+        let pcm: Vec<i16> = (0..SAMPLE_RATE as usize)
+            .map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                ((t * 220.0).sin() * 8000.0
+                    + (t * 440.0).sin() * 4000.0
+                    + (t * 660.0).sin() * 2000.0) as i16
+            })
+            .collect();
+
+        let first = voiceprint.embed(&pcm).expect("embeds");
+        let second = voiceprint.embed(&pcm).expect("embeds again");
+
+        assert_eq!(first.len(), EMBEDDING_DIM);
+        assert!(first.iter().all(|v| v.is_finite()));
+        assert!(cosine(&first, &second) > 0.999);
+    }
+}
