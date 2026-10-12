@@ -25,6 +25,7 @@ pub mod ratelimit;
 pub mod routes;
 pub mod settings;
 pub mod state;
+pub mod util;
 pub mod vad;
 
 pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {

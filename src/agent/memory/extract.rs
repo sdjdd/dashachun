@@ -16,10 +16,9 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::{debug, warn};
 
-use crate::agent::tool::{MemoryPropose, ToolEntry};
+use crate::agent::tool::{MemoryPropose, ToolEntry, stop_after_proposal};
 use crate::agent::{
-    AgentSession, ChatItem, Llm, ReasoningEffort, StepResult, StopCondition, StreamTextParams,
-    Tool, ToolChoice, generate_text,
+    AgentSession, ChatItem, Llm, ReasoningEffort, StreamTextParams, Tool, ToolChoice, generate_text,
 };
 
 use super::{EntryMemory, MAX_ENTRIES, MemoryEntry, MemoryHook, MemoryOwner, entry_id};
@@ -344,27 +343,10 @@ fn render_extract(name: &str, ctx: Value) -> String {
         .expect("valid extractor template")
 }
 
-/// The flush's stop condition: the first round whose proposal executed
-/// successfully ends it — the decision is in. A degraded call (malformed
-/// arguments, a failed store) keeps the loop running for a corrected
-/// re-proposal.
-fn stop_after_proposal() -> StopCondition {
-    Box::new(|steps: &[StepResult]| {
-        steps.last().is_some_and(|step| {
-            step.ok
-                && !step.tool_calls.is_empty()
-                && step
-                    .tool_calls
-                    .iter()
-                    .all(|call| call.name == MemoryPropose::NAME)
-        })
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{InMemEntryMemory, LlmError, LlmEvents, ToolCall, ToolSpec};
+    use crate::agent::{InMemEntryMemory, LlmError, LlmEvents, StepResult, ToolCall, ToolSpec};
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;

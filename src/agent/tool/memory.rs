@@ -301,6 +301,23 @@ pub fn stop_after_memory_writes() -> StopCondition {
     })
 }
 
+/// The proposal flush's stop condition: the first round whose
+/// `memory_propose` call executed successfully ends it — the decision is
+/// in. A degraded call (malformed arguments, a failed store) keeps the
+/// loop running for a corrected re-proposal.
+pub fn stop_after_proposal() -> StopCondition {
+    Box::new(|steps: &[StepResult]| {
+        steps.last().is_some_and(|step| {
+            step.ok
+                && !step.tool_calls.is_empty()
+                && step
+                    .tool_calls
+                    .iter()
+                    .all(|call| call.name == MemoryPropose::NAME)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

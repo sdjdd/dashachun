@@ -222,9 +222,7 @@ impl Llm for OpenAiLlm {
             Ok(request) => request,
             Err(err) => {
                 let _ = tx.send(Err(err));
-                return Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-                    rx.recv().await.map(|event| (event, rx))
-                }));
+                return crate::util::recv_unbounded_stream(rx);
             }
         };
         let client = self.client.clone();
@@ -233,9 +231,7 @@ impl Llm for OpenAiLlm {
                 let _ = tx.send(Err(err));
             }
         });
-        Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        }))
+        crate::util::recv_unbounded_stream(rx)
     }
 }
 

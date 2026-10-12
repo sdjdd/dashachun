@@ -17,7 +17,10 @@ mod memory;
 mod weather;
 
 pub use datetime::GetDateTime;
-pub use memory::{MemoryAdd, MemoryDelete, MemoryPropose, MemoryUpdate, stop_after_memory_writes};
+pub use memory::{
+    MemoryAdd, MemoryDelete, MemoryPropose, MemoryUpdate, stop_after_memory_writes,
+    stop_after_proposal,
+};
 pub use weather::GetWeather;
 
 pub(crate) fn params_schema<T: JsonSchema>() -> Value {

@@ -93,15 +93,6 @@ struct Loop<'a> {
     phase: Phase<'a>,
 }
 
-/// Runs the tool loop over `messages` (the caller owns the prompt, including
-/// any leading system item) and streams every round's text deltas as they
-/// arrive. When the model stops requesting tools — or a round that already
-/// spoke was followed only by silent tools — the stream ends with
-/// [`StreamEvent::Done`] carrying [`StreamResult`]. `stop_when` adds
-/// caller-supplied early stops: after each tool round every condition sees
-/// the completed steps so far, and any condition returning `true` ends the
-/// stream the same way. An empty array never stops early; the step cap stays
-/// a hard failure guard on top.
 /// The single argument of [`stream_text`] and [`generate_text`] — one
 /// generation call's parameters. `llm` goes positionally into
 /// [`StreamTextParams::builder`]; the rest is optional — `messages` (empty),
@@ -136,9 +127,8 @@ pub struct StreamTextParams<'a> {
 /// every earlier end: after each tool round every condition sees the
 /// completed steps so far — each step's calls, whether its calls succeeded
 /// and the round's assistant text (empty when it only requested tools) — and
-/// any condition returning `true` ends the
-/// stream the same way. An empty array never stops early; the step cap stays
-/// a hard failure guard on top.
+/// any condition returning `true` ends the stream the same way. An empty
+/// array never stops early; the step cap stays a hard failure guard on top.
 pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
     let StreamTextParams {
         llm,

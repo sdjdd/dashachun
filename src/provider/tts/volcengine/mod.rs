@@ -189,9 +189,7 @@ impl Tts for VolcTts {
                 let _ = tx.send(Err(err));
             }
         });
-        Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        }))
+        crate::util::recv_unbounded_stream(rx)
     }
 
     async fn shutdown(&self) {
@@ -648,9 +646,7 @@ mod tests {
 
     fn text_stream() -> (mpsc::Sender<String>, TextStream) {
         let (tx, rx) = mpsc::channel::<String>(4);
-        let stream: TextStream = Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|chunk| (chunk, rx))
-        }));
+        let stream: TextStream = crate::util::recv_stream(rx);
         (tx, stream)
     }
 

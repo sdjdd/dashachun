@@ -149,9 +149,7 @@ impl Asr for VolcAsr {
                 let _ = tx.send(Err(err));
             }
         });
-        Box::pin(futures_util::stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|event| (event, rx))
-        }))
+        crate::util::recv_unbounded_stream(rx)
     }
 }
 

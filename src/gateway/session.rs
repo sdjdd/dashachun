@@ -142,10 +142,7 @@ impl Session {
 
     fn start_agent(&mut self, session: AgentSession, encoder: OpusEncoder) {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentInput>(AGENT_CHANNEL_CAPACITY);
-        let input: crate::agent::AgentInputStream = Box::pin(futures_util::stream::unfold(
-            agent_rx,
-            |mut rx| async move { rx.recv().await.map(|item| (item, rx)) },
-        ));
+        let input: crate::agent::AgentInputStream = crate::util::recv_stream(agent_rx);
         let session_id = session.id.clone();
         let output = self.agent.run(session, input);
         let tx = self.tx.clone();
