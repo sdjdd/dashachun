@@ -43,7 +43,7 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
             server: server.clone(),
         });
     let router = Router::new()
-        .route("/", get(async || "Hello, world!"))
+        .route("/", get(async || "王老师，你看我鞋好看不"))
         .nest("/gateway", routes::gateway::routes())
         .nest("/api/ota", routes::ota::routes())
         .with_state(server)
