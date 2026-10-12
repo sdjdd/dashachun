@@ -111,7 +111,8 @@ pub struct StreamTextParams<'a> {
     pub llm: &'a dyn Llm,
     #[builder(default)]
     pub messages: Vec<ChatItem>,
-    pub tools: Option<&'a [ToolEntry]>,
+    #[builder(default = &[])]
+    pub tools: &'a [ToolEntry],
     pub tool_choice: Option<ToolChoice<'a>>,
     pub reasoning: Option<ReasoningEffort>,
     #[builder(default)]
@@ -139,7 +140,6 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         stop_when,
         cancel,
     } = params;
-    let tools: &[ToolEntry] = tools.unwrap_or(&[]);
     let state = Loop {
         llm,
         tools,
