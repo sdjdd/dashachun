@@ -18,7 +18,7 @@ use ort::value::Tensor;
 /// Where the pinned model is fetched from (`just model` writes it to
 /// `models/`): the sherpa-onnx export of ModelScope's
 /// `iic/speech_campplus_sv_zh-cn_16k-common`.
-pub const MODEL_URL: &str = "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
+pub const MODEL_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx";
 
 /// sha256 of the pinned model — the `just model` recipe verifies it, so a
 /// silently rewritten file on the hosting repo cannot reach the server.

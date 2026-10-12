@@ -8,7 +8,7 @@ export S3_SECRET_ACCESS_KEY := env_var_or_default("S3_SECRET_ACCESS_KEY", "rustf
 
 # the pinned CAM++ voiceprint model (src/voiceprint/mod.rs holds the same
 # URL + sha; keep the two in sync)
-model_url := "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+model_url := "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
 model_sha := "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11"
 model_path := env_var_or_default("VOICEPRINT_MODEL", "models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx")
 
