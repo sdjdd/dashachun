@@ -16,7 +16,7 @@ use tracing::{debug, info, warn};
 use super::{ASR_CHANNEL_CAPACITY, Cancellable, CompositeAgent, ListenEvent};
 use crate::agent::{
     AgentInput, AgentInputStream, AgentOutput, AgentSession, Asr, AsrEvent, AudioStream, Capture,
-    Memory, Speaker, UtteranceCapture,
+    Memory, UtteranceCapture,
 };
 use crate::util::recv_stream;
 use crate::vad::{Vad, VadEvent};
@@ -35,8 +35,6 @@ const SPEAKER_WAIT: Duration = Duration::from_millis(250);
 type PendingSpeaker = oneshot::Receiver<Option<Identification>>;
 
 /// What the prompt renders for an utterance that identified no one.
-const UNKNOWN: &str = "未知";
-
 enum AsrUpdate {
     Partial { epoch: u64, text: String },
     Final { epoch: u64, text: String },
@@ -387,12 +385,12 @@ async fn run_asr(
 }
 
 /// Resolves the tap's identification at the utterance's ASR final: the
-/// speaker's name and description, 未知 when the session runs
-/// identification and this utterance matched nothing (or the identification
-/// failed or was not ready in time), `None` only when the session runs no
-/// identification at all — then the turn's prompt carries no speaker
-/// section.
-async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> Option<Speaker> {
+/// matched speaker's voiceprint row id, marking that roster entry as the
+/// turn's current speaker. `None` when this utterance matched nothing (or
+/// the identification failed or was not ready in time) — the roster still
+/// renders, unmarked — and when the session runs no identification at all,
+/// where the turn's prompt carries no roster either.
+async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> Option<i64> {
     if !configured {
         return None;
     }
@@ -405,16 +403,7 @@ async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> O
             .filter(|identification| identification.matched),
         None => None,
     };
-    Some(identified.map_or_else(
-        || Speaker {
-            name: UNKNOWN.into(),
-            description: String::new(),
-        },
-        |identification| Speaker {
-            name: identification.label,
-            description: identification.description,
-        },
-    ))
+    identified.map(|identification| identification.id)
 }
 
 #[cfg(test)]
@@ -427,53 +416,45 @@ mod tests {
         rx
     }
 
-    fn identification(label: &str, description: &str, matched: bool) -> Option<Identification> {
+    fn identification(id: i64, label: &str, matched: bool) -> Option<Identification> {
         Some(Identification {
+            id,
             label: label.into(),
-            description: description.into(),
+            description: "同事".into(),
             similarity: 0.9,
             matched,
         })
     }
 
     #[tokio::test]
-    async fn a_matched_identification_resolves_to_name_and_description() {
-        let speaker = resolve_speaker(Some(pending(identification("张三", "同事", true))), true)
-            .await
-            .unwrap();
-        assert_eq!(speaker.name, "张三");
-        assert_eq!(speaker.description, "同事");
+    async fn a_matched_identification_resolves_to_the_speaker_id() {
+        assert_eq!(
+            resolve_speaker(Some(pending(identification(7, "张三", true))), true).await,
+            Some(7)
+        );
     }
 
     #[tokio::test]
-    async fn an_unmatched_identification_resolves_to_unknown() {
-        let speaker = resolve_speaker(Some(pending(identification("张三", "同事", false))), true)
-            .await
-            .unwrap();
-        assert_eq!(speaker.name, UNKNOWN);
-        assert_eq!(speaker.description, "");
-    }
-
-    #[tokio::test]
-    async fn a_failed_or_unresolved_identification_resolves_to_unknown() {
+    async fn below_threshold_or_failed_identifications_stay_unmarked() {
+        assert_eq!(
+            resolve_speaker(Some(pending(identification(7, "张三", false))), true).await,
+            None
+        );
         // The identification failed: the sender dropped without a value.
         let (tx, rx) = oneshot::channel();
         drop(tx);
-        let speaker = resolve_speaker(Some(rx), true).await.unwrap();
-        assert_eq!(speaker.name, UNKNOWN);
+        assert_eq!(resolve_speaker(Some(rx), true).await, None);
 
         // The result never arrived in time: the wait expires.
         let (_tx, rx) = oneshot::channel::<Option<Identification>>();
-        let speaker = resolve_speaker(Some(rx), true).await.unwrap();
-        assert_eq!(speaker.name, UNKNOWN);
+        assert_eq!(resolve_speaker(Some(rx), true).await, None);
     }
 
     #[tokio::test]
-    async fn a_configured_session_without_a_result_resolves_to_unknown() {
+    async fn a_configured_session_without_a_result_stays_unmarked() {
         // The ASR final landed before the segment closed — no pending tap
         // result, but the session runs identification.
-        let speaker = resolve_speaker(None, true).await.unwrap();
-        assert_eq!(speaker.name, UNKNOWN);
+        assert_eq!(resolve_speaker(None, true).await, None);
     }
 
     #[tokio::test]

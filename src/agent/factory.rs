@@ -8,7 +8,9 @@ use super::capture::{AudioCapture, AudioStorage};
 use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook};
 use super::store::AgentStore;
 use super::tool::memory_tools;
-use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolSet, Tts};
+use super::{
+    Agent, Asr, Capture, CompositeAgent, Llm, Memory, Speaker, SystemPrompt, ToolSet, Tts,
+};
 use crate::device::DeviceRecord;
 use crate::error::AppError;
 use crate::provider::{ProviderRegistry, ProviderSpec};
@@ -138,14 +140,25 @@ impl AgentFactory {
         let tools = self.tools.clone().merge(memory_tools(&entries));
         // The voiceprint feature plugs in here like the audio capture: the
         // model is the boot slot, the agent's enrolled voiceprints are read
-        // once per session. An agent without enrollments — or without the
-        // model — gets no matcher and runs no identification pipeline at
-        // all; enrollments made later join at the next session.
-        let speaker_matcher = match &self.voiceprint {
+        // once per session — as the matcher's candidates and, from the same
+        // snapshot, as the prompt's known-speakers roster (a roster entry
+        // exists exactly when the matcher can identify it). An agent
+        // without enrollments — or without the model — gets neither and
+        // runs no identification pipeline at all; enrollments made later
+        // join at the next session.
+        let (speaker_matcher, speakers) = match &self.voiceprint {
             Some(model) => {
                 let voiceprints = VoiceprintStore::new(self.pool.clone())
                     .embeddings_for_agent(agent_id)
                     .await?;
+                let speakers = voiceprints
+                    .iter()
+                    .map(|voiceprint| Speaker {
+                        id: voiceprint.id,
+                        name: voiceprint.label.clone(),
+                        description: voiceprint.description.clone(),
+                    })
+                    .collect();
                 if !voiceprints.is_empty() {
                     tracing::info!(
                         agent_id,
@@ -153,9 +166,12 @@ impl AgentFactory {
                         "voiceprint identification enabled"
                     );
                 }
-                SpeakerMatcher::new(model.clone(), voiceprints).map(Arc::new)
+                (
+                    SpeakerMatcher::new(model.clone(), voiceprints).map(Arc::new),
+                    speakers,
+                )
             }
-            None => None,
+            None => (None, Vec::new()),
         };
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
@@ -168,6 +184,7 @@ impl AgentFactory {
             system_prompt: SystemPrompt::new(&agent.persona_prompt),
             capture: Some(audio as Arc<dyn Capture>),
             speaker_matcher,
+            speakers,
         }))
     }
 

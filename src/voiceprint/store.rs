@@ -32,11 +32,13 @@ pub struct VoiceprintRecord {
     pub updated_at: time::OffsetDateTime,
 }
 
-/// The identification read shape: one enrolled label with its description
-/// and embedding vector — the vector the REST surface deliberately never
-/// carries.
+/// The identification read shape: one enrolled label with its row id (the
+/// stable speaker id the prompt derives `user_001`-style ids from), its
+/// description and embedding vector — the vector the REST surface
+/// deliberately never carries.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EnrolledEmbedding {
+    pub id: i64,
     pub label: String,
     pub description: String,
     pub embedding: Vec<f32>,
@@ -166,7 +168,7 @@ impl VoiceprintStore {
         agent_id: i64,
     ) -> Result<Vec<EnrolledEmbedding>, AppError> {
         let rows = sqlx::query_as::<_, EnrolledEmbedding>(
-            "SELECT label, description, embedding FROM voiceprints \
+            "SELECT id, label, description, embedding FROM voiceprints \
              WHERE agent_id = $1 ORDER BY id",
         )
         .bind(agent_id)

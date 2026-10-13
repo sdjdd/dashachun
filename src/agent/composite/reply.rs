@@ -241,7 +241,10 @@ pub(super) async fn reply_stage(
                             .append(vec![ChatItem::user(text)])
                             .await;
                         let entries = agent.entries.list().await;
-                        let prompt = agent.system_prompt.for_turn(&entries, speaker.as_ref());
+                        let prompt =
+                            agent
+                                .system_prompt
+                                .for_turn(&entries, &agent.speakers, speaker);
                         let history = agent.memory.history().await;
                         turn_id += 1;
                         reply.turn = Some(spawn_turn(

@@ -107,11 +107,12 @@ impl SpeakerMatcher {
     }
 }
 
-/// The outcome of one identification: the best-scoring label, its
-/// description, its cosine similarity and whether it cleared the match
-/// threshold.
+/// The outcome of one identification: the best-scoring candidate's row id
+/// (the stable speaker id), its label, its description, its cosine
+/// similarity and whether it cleared the match threshold.
 #[derive(Debug)]
 pub struct Identification {
+    pub id: i64,
     pub label: String,
     pub description: String,
     pub similarity: f32,
@@ -151,18 +152,20 @@ fn score(candidates: &[EnrolledEmbedding], embedding: &[f32]) -> Identification 
         .iter()
         .map(|candidate| {
             (
+                candidate.id,
                 candidate.label.clone(),
                 candidate.description.clone(),
                 cosine(embedding, &candidate.embedding),
             )
         })
-        .max_by(|a, b| a.2.total_cmp(&b.2))
+        .max_by(|a, b| a.3.total_cmp(&b.3))
         .expect("a matcher is only built with at least one candidate");
     Identification {
-        label: best.0,
-        description: best.1,
-        similarity: best.2,
-        matched: best.2 >= MATCH_THRESHOLD,
+        id: best.0,
+        label: best.1,
+        description: best.2,
+        similarity: best.3,
+        matched: best.3 >= MATCH_THRESHOLD,
     }
 }
 
@@ -182,11 +185,13 @@ mod tests {
     fn candidates() -> Vec<EnrolledEmbedding> {
         vec![
             EnrolledEmbedding {
+                id: 1,
                 label: "a".into(),
                 description: "desc a".into(),
                 embedding: vec![1.0, 0.0],
             },
             EnrolledEmbedding {
+                id: 2,
                 label: "b".into(),
                 description: String::new(),
                 embedding: vec![0.0, 1.0],
@@ -197,6 +202,7 @@ mod tests {
     #[test]
     fn scores_the_best_candidate_over_the_threshold() {
         let identification = score(&candidates(), &[0.9, 0.1]);
+        assert_eq!(identification.id, 1);
         assert_eq!(identification.label, "a");
         assert_eq!(identification.description, "desc a");
         assert!(identification.matched);
@@ -248,11 +254,13 @@ mod tests {
         // normalized sums.
         let candidates = vec![
             EnrolledEmbedding {
+                id: 1,
                 label: "张三".into(),
                 description: "同事".into(),
                 embedding: speech_embedding,
             },
             EnrolledEmbedding {
+                id: 2,
                 label: "李四".into(),
                 description: String::new(),
                 embedding: noise_embedding,
@@ -285,6 +293,7 @@ mod tests {
         let matcher = SpeakerMatcher::new(
             model,
             vec![EnrolledEmbedding {
+                id: 1,
                 label: "张三".into(),
                 description: "同事".into(),
                 embedding: speech_embedding,

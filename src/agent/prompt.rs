@@ -1,6 +1,5 @@
 use std::sync::LazyLock;
 
-use minijinja::value::Serde;
 use minijinja::{Environment, Value, context, syntax::SyntaxConfig};
 use serde::Serialize;
 
@@ -9,8 +8,9 @@ use crate::agent::memory::{MAX_ENTRIES, MemoryEntry, entry_id};
 
 /// The whole system prompt in one template: the fixed voice and output
 /// rules, then — each only when its data is present — the persona block,
-/// the speaker attribution and the User Memory block. Rust only supplies
-/// the data; every layout and conditional lives here.
+/// the known-speakers roster (with the turn's current marker) and the User
+/// Memory block. Rust only supplies the data; every layout and conditional
+/// lives here.
 const PROMPT_TEMPLATE: &str = r#"你是一位通过智能设备与用户交谈的语音助手，设备会用语音合成把你的回复朗读出来。用用户的语言回复，每次回复都保持简短、口语化。
 
 ## 情绪表达
@@ -27,12 +27,17 @@ const PROMPT_TEMPLATE: &str = r#"你是一位通过智能设备与用户交谈�
 {{ persona }}
 </persona>
 {% endif %}
-{% if speaker %}
+{% if speakers %}
 
-## 当前说话人
-
-{{ speaker.name }}{% if speaker.description %}：{{ speaker.description }}{% endif %}
-
+<known_speakers>
+{% for speaker in speakers %}
+  <speaker id="{{ speaker.id }}" name="{{ speaker.name }}"{% if speaker.current %} current="true"{% endif %}>
+{% if speaker.description %}
+    <description>{{ speaker.description }}</description>
+{% endif %}
+  </speaker>
+{% endfor %}
+</known_speakers>
 {% endif %}
 {% if entries %}
 
@@ -72,10 +77,15 @@ fn render(ctx: Value) -> String {
         .expect("valid prompt template")
 }
 
-/// Renders the whole prompt from its data: the persona, the per-turn
-/// speaker attribution and the scope's memory entries. Absent data renders
-/// the corresponding section away.
-fn render_prompt(persona: &str, entries: &[MemoryEntry], speaker: Option<&Speaker>) -> String {
+/// Renders the whole prompt from its data: the persona, the agent's known
+/// speakers with this turn's current marker, and the scope's memory
+/// entries. Absent data renders the corresponding section away.
+fn render_prompt(
+    persona: &str,
+    entries: &[MemoryEntry],
+    speakers: &[Speaker],
+    current: Option<i64>,
+) -> String {
     let entries = entries
         .iter()
         .map(|entry| {
@@ -85,20 +95,32 @@ fn render_prompt(persona: &str, entries: &[MemoryEntry], speaker: Option<&Speake
             }
         })
         .collect::<Value>();
+    let speakers = speakers
+        .iter()
+        .map(|speaker| {
+            context! {
+                id => format!("user_{:03}", speaker.id),
+                name => &speaker.name,
+                description => &speaker.description,
+                current => current.is_some_and(|id| id == speaker.id),
+            }
+        })
+        .collect::<Value>();
     render(context! {
         persona,
-        speaker => Serde(speaker),
+        speakers,
         entries,
         max_entries => MAX_ENTRIES,
     })
 }
 
-/// The per-turn speaker attribution: the confirmed speaker's enrolled name
-/// and description, or 未知 when the utterance identified no one. The
-/// listening stage builds it; the prompt renders the name plus the
-/// description when one exists.
+/// One speaker the agent knows: an enrolled voiceprint — its row id as the
+/// stable speaker id (rendered `user_001`-style), its label as the name and
+/// its description. The session's roster is snapshotted once per connection
+/// by the factory; the reply turn marks the identified one as current.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Speaker {
+    pub id: i64,
     pub name: String,
     pub description: String,
 }
@@ -108,9 +130,9 @@ pub struct Speaker {
 ///
 /// Rendered whole from the one prompt template — the fixed voice and output
 /// rules plus the optional persona block (from the device's bound agent in
-/// the DB), the per-turn speaker attribution and the scope's User Memory
-/// block. The `Default` value carries no prompt at all (no system message);
-/// use [`Self::new`] for a real prompt.
+/// the DB), the known-speakers roster with the per-turn current marker and
+/// the scope's User Memory block. The `Default` value carries no prompt at
+/// all (no system message); use [`Self::new`] for a real prompt.
 #[derive(Clone, Debug, Default)]
 pub struct SystemPrompt {
     persona: Option<String>,
@@ -122,23 +144,30 @@ impl SystemPrompt {
         let persona = persona.trim();
         Self {
             persona: Some(persona.to_string()),
-            rendered: render_prompt(persona, &[], None),
+            rendered: render_prompt(persona, &[], &[], None),
         }
     }
 
     /// The prompt for one turn: the whole template rendered with this
     /// turn's data — the scope's User Memory entries (reloaded every turn so
-    /// they always reflect what the tools have mutated) and the current
-    /// speaker's name and description when the session runs identification
-    /// (未知 included). Without entries and speaker the render is exactly
-    /// the base prompt; `Default` (no prompt configured) stays empty.
-    pub fn for_turn(&self, entries: &[MemoryEntry], speaker: Option<&Speaker>) -> Self {
+    /// they always reflect what the tools have mutated) and the agent's
+    /// known speakers with this turn's current marker (`current` — the
+    /// matched speaker's voiceprint row id; `None` marks nobody, so the
+    /// model sees the roster and knows this utterance identified no one).
+    /// Without entries and speakers the render is exactly the base prompt;
+    /// `Default` (no prompt configured) stays empty.
+    pub fn for_turn(
+        &self,
+        entries: &[MemoryEntry],
+        speakers: &[Speaker],
+        current: Option<i64>,
+    ) -> Self {
         let Some(persona) = self.persona.as_deref() else {
             return Self::default();
         };
         Self {
             persona: Some(persona.to_string()),
-            rendered: render_prompt(persona, entries, speaker),
+            rendered: render_prompt(persona, entries, speakers, current),
         }
     }
 
@@ -217,7 +246,11 @@ mod tests {
     #[test]
     fn the_memory_section_lists_entries_and_guidance() {
         let prompt = SystemPrompt::new("认真回答。");
-        let turn = prompt.for_turn(&[entry(1, "用 Rust 写后端"), entry(12, "喜欢喝茶")], None);
+        let turn = prompt.for_turn(
+            &[entry(1, "用 Rust 写后端"), entry(12, "喜欢喝茶")],
+            &[],
+            None,
+        );
         let turn = turn.as_str();
         assert!(turn.contains("\n\n[mem_01] 用 Rust 写后端\n[mem_12] 喜欢喝茶\n\n"));
         assert!(turn.contains("memory_add、memory_update、memory_delete"));
@@ -226,16 +259,16 @@ mod tests {
     }
 
     #[test]
-    fn without_entries_or_speaker_the_turn_prompt_is_the_base_untouched() {
+    fn without_entries_or_speakers_the_turn_prompt_is_the_base_untouched() {
         let prompt = SystemPrompt::new("认真回答。");
-        assert_eq!(prompt.for_turn(&[], None).as_str(), prompt.as_str());
-        assert!(SystemPrompt::default().for_turn(&[], None).is_empty());
+        assert_eq!(prompt.for_turn(&[], &[], None).as_str(), prompt.as_str());
+        assert!(SystemPrompt::default().for_turn(&[], &[], None).is_empty());
     }
 
     #[test]
     fn for_turn_appends_the_memory_block_to_the_base() {
         let prompt = SystemPrompt::new("认真回答。");
-        let turn = prompt.for_turn(&[entry(3, "喜欢喝茶")], None);
+        let turn = prompt.for_turn(&[entry(3, "喜欢喝茶")], &[], None);
         let turn = turn.as_str();
         assert!(turn.starts_with(prompt.as_str()));
         assert!(turn.contains("\n\n## 用户记忆"));
@@ -245,7 +278,7 @@ mod tests {
     #[test]
     fn a_persona_less_base_still_carries_the_rules_and_the_memory() {
         let prompt = SystemPrompt::new("  ");
-        let turn = prompt.for_turn(&[entry(1, "喜欢喝茶")], None);
+        let turn = prompt.for_turn(&[entry(1, "喜欢喝茶")], &[], None);
         let turn = turn.as_str();
         assert!(turn.starts_with("你是一位通过智能设备与用户交谈的语音助手"));
         assert!(!turn.contains("<persona>"));
@@ -254,62 +287,93 @@ mod tests {
 
     #[test]
     fn the_default_prompt_stays_empty_even_with_sections() {
-        let speaker = Speaker {
-            name: "张三".into(),
-            description: String::new(),
-        };
+        let speakers = vec![speaker(1, "张三", "同事")];
         assert!(
             SystemPrompt::default()
-                .for_turn(&[entry(1, "喜欢喝茶")], None)
+                .for_turn(&[entry(1, "喜欢喝茶")], &speakers, Some(1))
                 .is_empty()
         );
         assert!(
             SystemPrompt::default()
-                .for_turn(&[], Some(&speaker))
+                .for_turn(&[], &speakers, None)
                 .is_empty()
         );
     }
 
+    fn speaker(id: i64, name: &str, description: &str) -> Speaker {
+        Speaker {
+            id,
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
     #[test]
-    fn for_turn_carries_the_speaker_name_and_description() {
+    fn the_known_speakers_block_lists_the_roster_and_marks_the_current() {
         let prompt = SystemPrompt::new("认真回答。");
-        let speaker = Speaker {
-            name: "张三".into(),
-            description: "同事，喜欢喝茶".into(),
-        };
-        let turn = prompt.for_turn(&[], Some(&speaker));
-        let turn = turn.as_str();
+        let speakers = vec![
+            speaker(1, "张三", "同事，喜欢喝茶"),
+            speaker(12, "小红", ""),
+        ];
+        let turn = prompt
+            .for_turn(&[], &speakers, Some(1))
+            .as_str()
+            .to_string();
         assert!(turn.starts_with(prompt.as_str()));
-        assert!(turn.contains("\n\n## 当前说话人\n\n"));
-        assert!(turn.contains("张三：同事，喜欢喝茶"));
-        assert!(!turn.contains("声纹"));
+        assert!(turn.contains(
+            "\n\n<known_speakers>\n  \
+             <speaker id=\"user_001\" name=\"张三\" current=\"true\">\n    \
+             <description>同事，喜欢喝茶</description>\n  </speaker>\n  \
+             <speaker id=\"user_012\" name=\"小红\">\n  </speaker>\n\
+             </known_speakers>\n"
+        ));
         assert!(!turn.contains("## 用户记忆"));
     }
 
     #[test]
-    fn a_speaker_without_description_carries_the_name_only() {
+    fn a_multiline_description_renders_verbatim() {
         let prompt = SystemPrompt::new("认真回答。");
-        let speaker = Speaker {
-            name: "张三".into(),
-            description: String::new(),
-        };
-        let turn = prompt.for_turn(&[], Some(&speaker));
-        assert!(turn.as_str().contains("## 当前说话人\n\n张三"));
+        let description = "一位喜欢编程的用户。\n目前正在学习 Rust。";
+        let turn = prompt
+            .for_turn(&[], &[speaker(7, "小明", description)], Some(7))
+            .as_str()
+            .to_string();
+        assert!(turn.contains(&format!(
+            "<speaker id=\"user_007\" name=\"小明\" current=\"true\">\n    \
+             <description>{description}</description>\n  </speaker>"
+        )));
     }
 
     #[test]
-    fn for_turn_orders_the_speaker_before_the_memory() {
+    fn a_turn_without_a_match_still_lists_the_roster_unmarked() {
         let prompt = SystemPrompt::new("认真回答。");
-        let speaker = Speaker {
-            name: "张三".into(),
-            description: String::new(),
-        };
-        let turn = prompt.for_turn(&[entry(3, "喜欢喝茶")], Some(&speaker));
-        let turn = turn.as_str();
-        let speaker = turn.find("## 当前说话人").unwrap();
+        let turn = prompt
+            .for_turn(&[], &[speaker(3, "张三", "同事")], None)
+            .as_str()
+            .to_string();
+        assert!(turn.contains("<known_speakers>"));
+        assert!(turn.contains("<speaker id=\"user_003\" name=\"张三\">"));
+        assert!(!turn.contains("current="));
+    }
+
+    #[test]
+    fn an_empty_roster_renders_no_block() {
+        let prompt = SystemPrompt::new("认真回答。");
+        let turn = prompt.for_turn(&[], &[], Some(1)).as_str().to_string();
+        assert!(!turn.contains("known_speakers"));
+    }
+
+    #[test]
+    fn for_turn_orders_the_speakers_before_the_memory() {
+        let prompt = SystemPrompt::new("认真回答。");
+        let turn = prompt
+            .for_turn(&[entry(3, "喜欢喝茶")], &[speaker(1, "张三", "")], Some(1))
+            .as_str()
+            .to_string();
+        let speakers = turn.find("<known_speakers>").unwrap();
         let memory = turn.find("## 用户记忆").unwrap();
-        assert!(speaker < memory);
-        assert!(turn.contains("张三\n\n## 用户记忆"));
+        assert!(speakers < memory);
+        assert!(turn.contains("</known_speakers>\n\n## 用户记忆"));
         assert!(turn.contains("[mem_03] 喜欢喝茶"));
     }
 }

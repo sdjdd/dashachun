@@ -41,6 +41,11 @@ pub struct CompositeAgent {
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
     pub speaker_matcher: Option<Arc<SpeakerMatcher>>,
+    /// The roster behind the matcher: the agent's enrolled voiceprints as
+    /// they were when the device connected, as prompt data. Both derive
+    /// from the same factory snapshot — a roster entry exists exactly when
+    /// the matcher can identify it.
+    pub speakers: Vec<Speaker>,
 }
 
 impl Agent for CompositeAgent {
@@ -62,14 +67,14 @@ impl Agent for CompositeAgent {
 /// What the listening side hands to the reply side. Each utterance carries
 /// its own cancellation token: the listener keeps the authority to kill the
 /// in-flight reply the moment new speech or an interrupt arrives, the reply
-/// side only observes it. The speaker is the utterance's attribution — name
-/// and description, 未知 when the session runs identification and this
-/// utterance matched nothing, `None` when it runs none; the reply stage
-/// never sees a voiceprint type.
+/// side only observes it. The speaker is the matched speaker's voiceprint
+/// row id for the turn's current marker — `None` when this utterance
+/// identified no one (below threshold, failed, or not ready in time); the
+/// reply stage never sees a voiceprint type.
 enum ListenEvent {
     Utterance {
         text: String,
-        speaker: Option<Speaker>,
+        speaker: Option<i64>,
         turn: CancellationToken,
     },
     Interrupt,
