@@ -18,7 +18,7 @@ flate2 = "1.1"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 garde = { version = "0.23", features = ["derive", "regex"] }
 kaldi-fbank = "=0.1.0"
-minijinja = "3"
+minijinja = { version = "3", features = ["serde"] }
 ndarray = "0.17"
 opus = "0.4"
 ort = { version = "=2.0.0-rc.13", features = ["ndarray"] }
