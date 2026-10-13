@@ -3,10 +3,12 @@
 //! s16le PCM in, CAM++ embedding out. The ONNX graph carries only the
 //! network; the Kaldi fbank frontend (80 mel bins, 25 ms frames / 10 ms
 //! shift, dither 0) and the per-utterance mel-mean normalization live here,
-//! matching the sherpa-onnx `3d-speaker` export contract. Not wired into the
-//! agent yet — the embedding consumer (enrollment, identification, prompt
-//! injection) comes later — the integration notes live in this directory's
-//! README.md.
+//! matching the sherpa-onnx `3d-speaker` export contract. The first
+//! consumer — enrollment over captured conversation audio (`store.rs`,
+//! `enroll.rs`, the `/api/agents/{agent_id}/voiceprints` REST, the model
+//! slot `main.rs` fills at boot) — is live; per-turn identification and
+//! prompt injection come later — the integration notes live in this
+//! directory's README.md.
 
 mod store;
 
