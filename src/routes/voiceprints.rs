@@ -12,6 +12,7 @@ use crate::routes::agents::AgentsState;
 use crate::state::ServerState;
 use crate::voiceprint::VoiceprintStore;
 use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, VoiceprintResponse};
+use crate::voiceprint::enroll;
 
 pub fn routes() -> Router<AgentsState> {
     Router::new()
@@ -59,12 +60,12 @@ pub(crate) async fn list_voiceprints(
     ))
 }
 
-/// Enrollment reads the OSS-captured audio of the given message ids, embeds
-/// it with the boot-loaded CAM++ model, and appends into the per-label
-/// vector sum. The model and the audio storage are both hard requirements:
-/// a missing model is 503 (the feature is off — the slot is only filled when
-/// the model file loaded at boot), disabled audio capture is 400 (this
-/// request can never be fulfilled — there is no audio to read).
+/// Enrollment: the audio of the named user messages (captured by the audio
+/// feature) is fetched from the storage, decoded, embedded, and appended
+/// into the label's vector sum. Guards escalate with specificity —
+/// ownership 404, disabled audio capture 400, rejected messages 400 with
+/// per-message reasons, missing model 503 — so request-side problems are
+/// reported even while the feature is off.
 #[utoipa::path(
     post,
     path = "/api/agents/{agent_id}/voiceprints",
@@ -81,20 +82,30 @@ pub(crate) async fn list_voiceprints(
     ),
 )]
 pub(crate) async fn create_voiceprint(
+    State(auth): State<AuthState>,
     State(server): State<ServerState>,
-    _user: AuthUser,
-    Path(_agent_id): Path<i64>,
-    Validated(_args): Validated<CreateVoiceprintArgs>,
+    user: AuthUser,
+    Path(agent_id): Path<i64>,
+    Validated(args): Validated<CreateVoiceprintArgs>,
 ) -> Result<(StatusCode, Json<VoiceprintResponse>), AppError> {
-    server
-        .voiceprint()
-        .ok_or_else(|| AppError::ServiceUnavailable("voiceprint model is not loaded".into()))?;
-    server
-        .audio_storage()
-        .ok_or_else(|| AppError::BadRequest("audio capture is not enabled".into()))?;
-    Err(AppError::Internal(
-        "voiceprint enrollment is not implemented yet".into(),
-    ))
+    if !AgentStore::new(auth.pool.clone())
+        .owns(agent_id, user.id)
+        .await?
+    {
+        return Err(AppError::NotFound);
+    }
+    let record = enroll(
+        &auth.pool,
+        server.audio_storage(),
+        server.voiceprint(),
+        agent_id,
+        user.id,
+        &args.label,
+        args.description.as_deref(),
+        &args.message_ids,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(record.into())))
 }
 
 #[utoipa::path(

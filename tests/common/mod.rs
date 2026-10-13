@@ -30,6 +30,7 @@ use dashachun::ratelimit::RedisLimiter;
 use dashachun::settings::OtaSettings;
 use dashachun::state::ServerState;
 use dashachun::vad::{SileroVadFactory, VadConfig};
+use dashachun::voiceprint::Voiceprint;
 
 // REST app
 
@@ -82,7 +83,13 @@ pub fn test_state_with_devices(
     websocket_url: Option<String>,
     devices: DeviceStore,
 ) -> ServerState {
-    test_state_with_registry_inner(pool, websocket_url, ProviderRegistry::with_stubs(), devices)
+    test_state_with_registry_inner(
+        pool,
+        websocket_url,
+        ProviderRegistry::with_stubs(),
+        devices,
+        None,
+    )
 }
 
 pub fn test_state_with_registry(
@@ -91,7 +98,25 @@ pub fn test_state_with_registry(
     registry: ProviderRegistry,
 ) -> ServerState {
     let (devices, _) = test_device_store(pool.clone());
-    test_state_with_registry_inner(pool, websocket_url, registry, devices)
+    test_state_with_registry_inner(pool, websocket_url, registry, devices, None)
+}
+
+/// Like [`test_state`], but with the voiceprint enrollment model in its
+/// boot slot — the happy-path enrollment tests load the pinned model and
+/// hand it in here.
+pub fn test_state_with_voiceprint(
+    pool: PgPool,
+    websocket_url: Option<String>,
+    voiceprint: Arc<tokio::sync::Mutex<Voiceprint>>,
+) -> ServerState {
+    let (devices, _) = test_device_store(pool.clone());
+    test_state_with_registry_inner(
+        pool,
+        websocket_url,
+        ProviderRegistry::with_stubs(),
+        devices,
+        Some(voiceprint),
+    )
 }
 
 fn test_state_with_registry_inner(
@@ -99,6 +124,7 @@ fn test_state_with_registry_inner(
     websocket_url: Option<String>,
     registry: ProviderRegistry,
     devices: DeviceStore,
+    voiceprint: Option<Arc<tokio::sync::Mutex<Voiceprint>>>,
 ) -> ServerState {
     let vad = Arc::new(SileroVadFactory::new(
         VadConfig::default(),
@@ -137,7 +163,7 @@ fn test_state_with_registry_inner(
         None,
         Arc::new(ArcSwapOption::from_pointee(factory)),
         devices,
-        None,
+        voiceprint,
     )
 }
 
@@ -145,6 +171,17 @@ fn test_state_with_registry_inner(
 /// assertions on the published agent generation.
 pub fn app_with_state(pool: PgPool) -> (TestApp, ServerState) {
     app_with_registry(pool, ProviderRegistry::with_stubs())
+}
+
+/// Like [`app_with_state`], but with the voiceprint enrollment model loaded
+/// into the boot slot.
+pub fn app_with_voiceprint(
+    pool: PgPool,
+    voiceprint: Arc<tokio::sync::Mutex<Voiceprint>>,
+) -> (TestApp, ServerState) {
+    let state = test_state_with_voiceprint(pool.clone(), None, voiceprint);
+    let auth = auth_state(pool);
+    (dashachun::app(state.clone(), auth), state)
 }
 
 /// Like [`app_with_state`], but with a caller-supplied provider registry

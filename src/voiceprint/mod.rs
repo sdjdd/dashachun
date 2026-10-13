@@ -11,7 +11,9 @@
 mod store;
 
 pub mod dto;
+mod enroll;
 
+pub use enroll::enroll;
 pub use store::{VoiceprintRecord, VoiceprintStore};
 
 use std::path::Path;

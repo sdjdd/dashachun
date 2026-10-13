@@ -11,6 +11,7 @@ async-trait = "0.1"
 aws-sdk-s3 = { version = "1.152", default-features = false, features = ["rt-tokio", "http-1x", "default-https-client"] }
 axum = { version = "0.8.9", features = ["ws", "macros"] }
 axum-extra = { version = "0.10", features = ["cookie", "cookie-signed"] }
+claxon = "0.4"
 dotenvy = "0.15.7"
 flacenc = { version = "0.5", default-features = false }
 flate2 = "1.1"
@@ -46,5 +47,4 @@ unicode-segmentation = "1.13.3"
 bon = "3.10.2"
 
 [dev-dependencies]
-claxon = "0.4"
 hound = "3"
