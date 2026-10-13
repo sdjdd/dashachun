@@ -8,6 +8,10 @@
 //! injection) comes later — the integration notes live in this directory's
 //! README.md.
 
+mod store;
+
+pub use store::{VoiceprintRecord, VoiceprintStore};
+
 use std::path::Path;
 
 use kaldi_fbank::FbankOptions;
