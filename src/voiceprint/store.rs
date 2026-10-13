@@ -33,9 +33,9 @@ pub struct VoiceprintRecord {
 }
 
 /// The identification read shape: one enrolled label with its row id (the
-/// stable speaker id the prompt derives `user_001`-style ids from), its
-/// description and embedding vector — the vector the REST surface
-/// deliberately never carries.
+/// stable speaker id the prompt renders, in the roster and in the
+/// context's message labels), its description and embedding vector — the
+/// vector the REST surface deliberately never carries.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EnrolledEmbedding {
     pub id: i64,

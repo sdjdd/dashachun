@@ -34,7 +34,8 @@ const SPEAKER_WAIT: Duration = Duration::from_millis(250);
 /// ASR final.
 type PendingSpeaker = oneshot::Receiver<Option<Identification>>;
 
-/// What the prompt renders for an utterance that identified no one.
+/// What one per-utterance ASR task reports back to the listening stage,
+/// tagged with its epoch so superseded results are dropped.
 enum AsrUpdate {
     Partial { epoch: u64, text: String },
     Final { epoch: u64, text: String },
@@ -385,11 +386,11 @@ async fn run_asr(
 }
 
 /// Resolves the tap's identification at the utterance's ASR final: the
-/// matched speaker's voiceprint row id, marking that roster entry as the
-/// turn's current speaker. `None` when this utterance matched nothing (or
-/// the identification failed or was not ready in time) — the roster still
-/// renders, unmarked — and when the session runs no identification at all,
-/// where the turn's prompt carries no roster either.
+/// matched speaker's voiceprint row id, the label the reply stage prefixes
+/// the context's user message with. `None` when this utterance matched
+/// nothing (or the identification failed or was not ready in time) — the
+/// context marks the message `unknown` — and when the session runs no
+/// identification at all, where the turn's prompt carries no roster either.
 async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> Option<i64> {
     if !configured {
         return None;

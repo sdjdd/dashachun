@@ -15,7 +15,7 @@ use crate::agent::tool::stop_after_memory_writes;
 use crate::agent::{
     AgentOutput, AgentSession, Capture, ChatItem, Llm, Memory, ReasoningEffort, ReplyCapture,
     StreamEvent, StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolSet, Tts, TtsEvent,
-    emotion, stream_text,
+    emotion, labelled_utterance, stream_text,
 };
 use crate::util::recv_stream;
 
@@ -238,13 +238,14 @@ pub(super) async fn reply_stage(
                         }
                         agent
                             .memory
-                            .append(vec![ChatItem::user(text)])
+                            .append(vec![ChatItem::user(labelled_utterance(
+                                text,
+                                speaker,
+                                &agent.speakers,
+                            ))])
                             .await;
                         let entries = agent.entries.list().await;
-                        let prompt =
-                            agent
-                                .system_prompt
-                                .for_turn(&entries, &agent.speakers, speaker);
+                        let prompt = agent.system_prompt.for_turn(&entries, &agent.speakers);
                         let history = agent.memory.history().await;
                         turn_id += 1;
                         reply.turn = Some(spawn_turn(

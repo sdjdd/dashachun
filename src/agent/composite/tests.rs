@@ -6,8 +6,8 @@ use crate::agent::memory::HISTORY_LIMIT;
 use crate::agent::tool::MemoryAdd;
 use crate::agent::{
     AgentInput, Asr, AsrError, AsrEvent, AsrEvents, AudioStream, Capture, ChatItem, EntryMemory,
-    Llm, LlmEvent, LlmEvents, ReasoningEffort, ReplyCapture, Subtitle, TextStream, ToolCall, Tts,
-    TtsError, TtsEvent, TtsEvents, UtteranceCapture,
+    Llm, LlmEvent, LlmEvents, ReasoningEffort, ReplyCapture, Speaker, Subtitle, TextStream,
+    ToolCall, Tts, TtsError, TtsEvent, TtsEvents, UtteranceCapture,
 };
 use crate::provider::asr::StubAsr;
 use crate::provider::llm::StubLlm;
@@ -742,6 +742,50 @@ async fn llm_receives_history_and_reply_accumulates() {
             ChatItem::user("hello"),
             ChatItem::assistant("hi"),
             ChatItem::user("hello"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_rostered_session_labels_every_utterance_in_context() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let agent = CompositeAgent {
+        llm: Arc::new(ScriptedLlm {
+            reply: "hi".into(),
+            calls: calls.clone(),
+        }),
+        speakers: vec![Speaker {
+            id: 3,
+            name: "张三".into(),
+            description: String::new(),
+        }],
+        vad: Arc::new(ScriptedVadFactory::utterances(&[&[], &[]])),
+        ..stub_agent()
+    };
+    let (tx, _output) = run(agent);
+
+    tx.send(AgentInput::ListenStart { mode: None })
+        .await
+        .unwrap();
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+    // A rostered session labels its utterances even when nothing was
+    // identified (the matcher is absent here; below-threshold and
+    // non-16 kHz in production): the context marks them unknown, and the
+    // label rides the warm history into later turns.
+    let first = wait_for_calls(&calls, 1).await;
+    assert_eq!(first[0], vec![ChatItem::user("[speaker_id=unknown] hello")]);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+
+    let second = wait_for_calls(&calls, 2).await;
+    assert_eq!(
+        second[1],
+        vec![
+            ChatItem::user("[speaker_id=unknown] hello"),
+            ChatItem::assistant("hi"),
+            ChatItem::user("[speaker_id=unknown] hello"),
         ]
     );
 }

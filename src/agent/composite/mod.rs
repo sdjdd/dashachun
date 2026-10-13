@@ -68,9 +68,9 @@ impl Agent for CompositeAgent {
 /// its own cancellation token: the listener keeps the authority to kill the
 /// in-flight reply the moment new speech or an interrupt arrives, the reply
 /// side only observes it. The speaker is the matched speaker's voiceprint
-/// row id for the turn's current marker — `None` when this utterance
-/// identified no one (below threshold, failed, or not ready in time); the
-/// reply stage never sees a voiceprint type.
+/// row id — `None` when this utterance identified no one (below threshold,
+/// failed, or not ready in time); the reply stage labels the context's
+/// user message with it and never sees a voiceprint type.
 enum ListenEvent {
     Utterance {
         text: String,
