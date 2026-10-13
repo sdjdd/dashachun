@@ -1,23 +1,41 @@
 //! The listening leg: the device input, the VAD and the per-utterance ASR
 //! tasks for the whole session. Forwards `Stt`/`Mcp`/`Error` directly and
 //! hands every final utterance to the reply stage together with a fresh
-//! turn token, cancelling the previous one first.
+//! turn token and the utterance's voiceprint attribution, cancelling the
+//! previous one first.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::{ASR_CHANNEL_CAPACITY, Cancellable, CompositeAgent, ListenEvent};
 use crate::agent::{
     AgentInput, AgentInputStream, AgentOutput, AgentSession, Asr, AsrEvent, AudioStream, Capture,
-    Memory, UtteranceCapture,
+    Memory, Speaker, UtteranceCapture,
 };
 use crate::util::recv_stream;
 use crate::vad::{Vad, VadEvent};
-use crate::voiceprint::{SAMPLE_RATE, SpeakerMatcher};
+use crate::voiceprint::{Identification, SAMPLE_RATE, SpeakerMatcher, SpeakerTap};
+
+/// How long the ASR final waits for the tap's identification before the
+/// turn starts unlabeled. The tap finishes at `SpeechEnd` and the embed
+/// takes tens of milliseconds, so the result is usually already resolved
+/// when the final arrives — the wait only bounds a rare tail (a long
+/// segment, the model mutex held by an enrollment); an expiry starts the
+/// turn without attribution, which still logs.
+const SPEAKER_WAIT: Duration = Duration::from_millis(250);
+
+/// The identification outcome of the utterance between `SpeechEnd` and its
+/// ASR final.
+type PendingSpeaker = oneshot::Receiver<Option<Identification>>;
+
+/// What the prompt renders for an utterance that identified no one.
+const UNKNOWN: &str = "未知";
 
 enum AsrUpdate {
     Partial { epoch: u64, text: String },
@@ -37,6 +55,7 @@ pub(super) async fn listen_stage(
     let mut slot: Option<AsrSlot> = None;
     let mut epoch: u64 = 0;
     let mut live_turn: Option<CancellationToken> = None;
+    let mut pending_speaker: Option<PendingSpeaker> = None;
     // The identification pipeline is a per-session capability: the matcher
     // exists only when the agent has enrolled voiceprints and the model
     // loaded, and the frontend only speaks 16 kHz — anything else runs
@@ -65,6 +84,7 @@ pub(super) async fn listen_stage(
                         if let Some(turn) = live_turn.take() {
                             turn.cancel();
                         }
+                        pending_speaker = None;
                         if utterances.send(ListenEvent::Reset).await.is_err() {
                             break;
                         }
@@ -85,6 +105,7 @@ pub(super) async fn listen_stage(
                                 listen_deps(&session, &agent, &asr_tx, speaker),
                                 &mut epoch,
                                 &mut slot,
+                                &mut pending_speaker,
                             )
                             .await;
                         }
@@ -98,6 +119,7 @@ pub(super) async fn listen_stage(
                             listen_deps(&session, &agent, &asr_tx, speaker),
                             &mut epoch,
                             &mut slot,
+                            &mut pending_speaker,
                         )
                         .await;
                     }
@@ -110,6 +132,7 @@ pub(super) async fn listen_stage(
                         if let Some(turn) = live_turn.take() {
                             turn.cancel();
                         }
+                        pending_speaker = None;
                         if utterances.send(ListenEvent::Interrupt).await.is_err() {
                             break;
                         }
@@ -158,12 +181,18 @@ pub(super) async fn listen_stage(
                         if text.is_empty() {
                             continue;
                         }
+                        let speaker =
+                            resolve_speaker(pending_speaker.take(), speaker.is_some()).await;
                         let turn = CancellationToken::new();
                         if let Some(previous) = live_turn.replace(turn.clone()) {
                             previous.cancel();
                         }
                         if utterances
-                            .send(ListenEvent::Utterance { text, turn })
+                            .send(ListenEvent::Utterance {
+                                text,
+                                speaker,
+                                turn,
+                            })
                             .await
                             .is_err()
                         {
@@ -219,12 +248,16 @@ async fn handle_vad_events(
     deps: ListenDeps<'_>,
     epoch: &mut u64,
     slot: &mut Option<AsrSlot>,
+    pending_speaker: &mut Option<PendingSpeaker>,
 ) {
     for event in events {
         match event {
             VadEvent::SpeechStart { at_ms } => {
                 info!(session_id = %deps.session.id, at_ms, "speech start");
                 *epoch += 1;
+                // The previous utterance is superseded: whatever its tap
+                // produced is no longer reachable by an ASR final.
+                *pending_speaker = None;
                 let capture = deps
                     .capture
                     .map(|capture| capture.start_utterance(deps.session));
@@ -246,7 +279,7 @@ async fn handle_vad_events(
             }
             VadEvent::SpeechEnd { .. } => {
                 if let Some(current) = slot.take() {
-                    current.detach();
+                    *pending_speaker = current.detach();
                 }
             }
         }
@@ -259,19 +292,19 @@ struct AsrSlot {
     tx: mpsc::Sender<Vec<f32>>,
     task: Cancellable,
     capture: Option<UtteranceCapture>,
-    tap: Option<UtteranceCapture>,
+    tap: Option<SpeakerTap>,
 }
 
 impl AsrSlot {
     /// Lets the task run to its final on its own and closes the utterance:
     /// the capture finishes inside the task (it learns its message id
     /// there), the voiceprint tap finishes here — the speech segment is
-    /// complete, identification does not wait for the ASR final.
-    fn detach(mut self) {
+    /// complete, identification does not wait for the ASR final — and the
+    /// tap's result channel returns to the stage, which resolves it when
+    /// this utterance's final turns into a turn.
+    fn detach(mut self) -> Option<PendingSpeaker> {
         self.task.detach();
-        if let Some(tap) = self.tap.take() {
-            tap.finish();
-        }
+        self.tap.take().map(SpeakerTap::finish)
     }
 
     fn cancel(self) {
@@ -283,7 +316,7 @@ fn spawn_asr(
     deps: &ListenDeps<'_>,
     epoch: u64,
     capture: Option<UtteranceCapture>,
-    tap: Option<UtteranceCapture>,
+    tap: Option<SpeakerTap>,
 ) -> AsrSlot {
     let (tx, rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
     let audio: AudioStream = recv_stream(rx);
@@ -350,5 +383,101 @@ async fn run_asr(
             debug!(session_id = %session.id, "asr output closed");
             return;
         }
+    }
+}
+
+/// Resolves the tap's identification at the utterance's ASR final: the
+/// speaker's name and description, 未知 when the session runs
+/// identification and this utterance matched nothing (or the identification
+/// failed or was not ready in time), `None` only when the session runs no
+/// identification at all — then the turn's prompt carries no speaker
+/// section.
+async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> Option<Speaker> {
+    if !configured {
+        return None;
+    }
+    let identified = match pending {
+        Some(result) => tokio::time::timeout(SPEAKER_WAIT, result)
+            .await
+            .ok()
+            .and_then(|resolved| resolved.ok())
+            .flatten()
+            .filter(|identification| identification.matched),
+        None => None,
+    };
+    Some(identified.map_or_else(
+        || Speaker {
+            name: UNKNOWN.into(),
+            description: String::new(),
+        },
+        |identification| Speaker {
+            name: identification.label,
+            description: identification.description,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending(value: Option<Identification>) -> PendingSpeaker {
+        let (tx, rx) = oneshot::channel();
+        tx.send(value).unwrap();
+        rx
+    }
+
+    fn identification(label: &str, description: &str, matched: bool) -> Option<Identification> {
+        Some(Identification {
+            label: label.into(),
+            description: description.into(),
+            similarity: 0.9,
+            matched,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_matched_identification_resolves_to_name_and_description() {
+        let speaker = resolve_speaker(Some(pending(identification("张三", "同事", true))), true)
+            .await
+            .unwrap();
+        assert_eq!(speaker.name, "张三");
+        assert_eq!(speaker.description, "同事");
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_identification_resolves_to_unknown() {
+        let speaker = resolve_speaker(Some(pending(identification("张三", "同事", false))), true)
+            .await
+            .unwrap();
+        assert_eq!(speaker.name, UNKNOWN);
+        assert_eq!(speaker.description, "");
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_unresolved_identification_resolves_to_unknown() {
+        // The identification failed: the sender dropped without a value.
+        let (tx, rx) = oneshot::channel();
+        drop(tx);
+        let speaker = resolve_speaker(Some(rx), true).await.unwrap();
+        assert_eq!(speaker.name, UNKNOWN);
+
+        // The result never arrived in time: the wait expires.
+        let (_tx, rx) = oneshot::channel::<Option<Identification>>();
+        let speaker = resolve_speaker(Some(rx), true).await.unwrap();
+        assert_eq!(speaker.name, UNKNOWN);
+    }
+
+    #[tokio::test]
+    async fn a_configured_session_without_a_result_resolves_to_unknown() {
+        // The ASR final landed before the segment closed — no pending tap
+        // result, but the session runs identification.
+        let speaker = resolve_speaker(None, true).await.unwrap();
+        assert_eq!(speaker.name, UNKNOWN);
+    }
+
+    #[tokio::test]
+    async fn without_identification_the_turn_carries_no_speaker() {
+        assert_eq!(resolve_speaker(None, false).await, None);
     }
 }

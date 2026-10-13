@@ -29,7 +29,7 @@ pub use memory::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor,
     InMemEntryMemory, InMemMemory, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, MemoryOwner,
 };
-pub use prompt::SystemPrompt;
+pub use prompt::{Speaker, SystemPrompt};
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{NoArgs, Tool, ToolOutcome, ToolSet};
 pub use tts::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};

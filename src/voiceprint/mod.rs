@@ -6,9 +6,10 @@
 //! sherpa-onnx `3d-speaker` export contract. Two consumers are live:
 //! enrollment over captured conversation audio (`store.rs`, `enroll.rs`,
 //! the `/api/agents/{agent_id}/voiceprints` REST) and session-side
-//! identification (`identify.rs` — a debug-log attribution per utterance);
-//! prompt injection comes later — the integration notes live in this
-//! directory's README.md.
+//! identification (`identify.rs` — a per-utterance attribution whose matched
+//! label the listening stage resolves into the reply turn's system prompt,
+//! alongside the debug log line); a threshold setting comes later — the
+//! integration notes live in this directory's README.md.
 
 mod store;
 
@@ -17,7 +18,7 @@ mod enroll;
 mod identify;
 
 pub use enroll::enroll;
-pub use identify::{Identification, SpeakerMatcher};
+pub use identify::{Identification, SpeakerMatcher, SpeakerTap};
 pub use store::{EnrolledEmbedding, VoiceprintRecord, VoiceprintStore};
 
 use std::path::Path;

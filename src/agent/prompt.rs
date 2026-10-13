@@ -39,11 +39,23 @@ const MEMORY_SECTION_TEMPLATE: &str = r#"## 用户记忆
 
 这份记忆是你自己的——像一个人对朋友的记忆那样——而不是替用户代管的笔记服务。这些工具是静默的后台操作，永远不要让它们成为聊天话题：绝口不提条目、记录或保存了什么。像普通人那样对待记忆——你只是记得用户的一些事情——对刚了解到的事实本身做出反应，而不是对保存这个动作做出反应。"#;
 
-/// The turn layout: the trimmed base and the memory section joined by one
-/// blank line.
+/// The turn layout: the trimmed base and the optional speaker and memory
+/// sections joined by one blank line each.
 const TURN_TEMPLATE: &str = r#"{{ base|trim }}
+{% if speaker %}
 
-{{ section }}"#;
+{{ speaker }}
+{% endif %}
+{% if section %}
+
+{{ section }}
+{% endif %}"#;
+
+/// The per-turn speaker block: the speaker's name and, when the enrolled
+/// voiceprint carries one, its description — nothing else.
+const SPEAKER_SECTION_TEMPLATE: &str = r#"## 当前说话人
+
+{{ name }}{% if description %}：{{ description }}{% endif %}"#;
 
 static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
     let mut env = Environment::new();
@@ -58,6 +70,8 @@ static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
         .expect("valid base template");
     env.add_template("memory_section", MEMORY_SECTION_TEMPLATE)
         .expect("valid memory section template");
+    env.add_template("speaker_section", SPEAKER_SECTION_TEMPLATE)
+        .expect("valid speaker section template");
     env.add_template("turn", TURN_TEMPLATE)
         .expect("valid turn template");
     env
@@ -98,6 +112,24 @@ fn memory_section(entries: &[MemoryEntry]) -> String {
     )
 }
 
+/// The per-turn speaker attribution: the confirmed speaker's enrolled name
+/// and description, or 未知 when the utterance identified no one. The
+/// listening stage builds it; the prompt renders the name plus the
+/// description when one exists.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Speaker {
+    pub name: String,
+    pub description: String,
+}
+
+/// The per-turn speaker block, rendered from its template.
+fn speaker_section(speaker: &Speaker) -> String {
+    render(
+        "speaker_section",
+        context! { name => &speaker.name, description => &speaker.description },
+    )
+}
+
 impl SystemPrompt {
     pub fn new(persona: &str) -> Self {
         Self(render("base", context! { persona => persona.trim() }))
@@ -105,19 +137,17 @@ impl SystemPrompt {
 
     /// The prompt for one turn: the fixed base plus the scope's User Memory
     /// block, reloaded every turn so it always reflects what the tools have
-    /// mutated. Without entries the base prompt is returned untouched.
-    pub fn for_turn(&self, entries: &[MemoryEntry]) -> Self {
-        if entries.is_empty() {
+    /// mutated, plus the current speaker's name and description when the
+    /// session runs identification (未知 included). Without entries and
+    /// speaker the base prompt is returned untouched.
+    pub fn for_turn(&self, entries: &[MemoryEntry], speaker: Option<&Speaker>) -> Self {
+        if entries.is_empty() && speaker.is_none() {
             return self.clone();
         }
-        let section = memory_section(entries);
-        if self.0.is_empty() {
-            return Self(section);
-        }
-        Self(render(
-            "turn",
-            context! { base => &self.0, section => section },
-        ))
+        let speaker = speaker.map(speaker_section);
+        let section = (!entries.is_empty()).then(|| memory_section(entries));
+        let rendered = render("turn", context! { base => &self.0, speaker, section });
+        Self(rendered.trim().to_string())
     }
 
     pub fn as_str(&self) -> &str {
@@ -204,16 +234,16 @@ mod tests {
     }
 
     #[test]
-    fn without_entries_the_turn_prompt_is_the_base_untouched() {
+    fn without_entries_or_speaker_the_turn_prompt_is_the_base_untouched() {
         let prompt = SystemPrompt::new("认真回答。");
-        assert_eq!(prompt.for_turn(&[]).as_str(), prompt.as_str());
-        assert!(SystemPrompt::default().for_turn(&[]).is_empty());
+        assert_eq!(prompt.for_turn(&[], None).as_str(), prompt.as_str());
+        assert!(SystemPrompt::default().for_turn(&[], None).is_empty());
     }
 
     #[test]
     fn for_turn_appends_the_memory_block_to_the_base() {
         let prompt = SystemPrompt::new("认真回答。");
-        let turn = prompt.for_turn(&[entry(3, "喜欢喝茶")]);
+        let turn = prompt.for_turn(&[entry(3, "喜欢喝茶")], None);
         let turn = turn.as_str();
         assert!(turn.starts_with(prompt.as_str()));
         assert!(turn.contains("\n\n## 用户记忆"));
@@ -222,8 +252,61 @@ mod tests {
 
     #[test]
     fn for_turn_on_an_empty_base_carries_only_the_memory() {
-        let turn = SystemPrompt::default().for_turn(&[entry(1, "喜欢喝茶")]);
+        let turn = SystemPrompt::default().for_turn(&[entry(1, "喜欢喝茶")], None);
         assert!(turn.as_str().starts_with("## 用户记忆"));
+        assert!(turn.chat_item().is_some());
+    }
+
+    #[test]
+    fn for_turn_carries_the_speaker_name_and_description() {
+        let prompt = SystemPrompt::new("认真回答。");
+        let speaker = Speaker {
+            name: "张三".into(),
+            description: "同事，喜欢喝茶".into(),
+        };
+        let turn = prompt.for_turn(&[], Some(&speaker));
+        let turn = turn.as_str();
+        assert!(turn.starts_with(prompt.as_str()));
+        assert!(turn.contains("\n\n## 当前说话人\n\n"));
+        assert!(turn.contains("张三：同事，喜欢喝茶"));
+        assert!(!turn.contains("声纹"));
+        assert!(!turn.contains("## 用户记忆"));
+    }
+
+    #[test]
+    fn a_speaker_without_description_carries_the_name_only() {
+        let prompt = SystemPrompt::new("认真回答。");
+        let speaker = Speaker {
+            name: "张三".into(),
+            description: String::new(),
+        };
+        let turn = prompt.for_turn(&[], Some(&speaker));
+        assert!(turn.as_str().contains("## 当前说话人\n\n张三"));
+    }
+
+    #[test]
+    fn for_turn_orders_the_speaker_before_the_memory() {
+        let prompt = SystemPrompt::new("认真回答。");
+        let speaker = Speaker {
+            name: "张三".into(),
+            description: String::new(),
+        };
+        let turn = prompt.for_turn(&[entry(3, "喜欢喝茶")], Some(&speaker));
+        let turn = turn.as_str();
+        let speaker = turn.find("## 当前说话人").unwrap();
+        let memory = turn.find("## 用户记忆").unwrap();
+        assert!(speaker < memory);
+        assert!(turn.contains("[mem_03] 喜欢喝茶"));
+    }
+
+    #[test]
+    fn for_turn_on_an_empty_base_carries_the_speaker_alone() {
+        let speaker = Speaker {
+            name: "未知".into(),
+            description: String::new(),
+        };
+        let turn = SystemPrompt::default().for_turn(&[], Some(&speaker));
+        assert!(turn.as_str().starts_with("## 当前说话人\n\n未知"));
         assert!(turn.chat_item().is_some());
     }
 }

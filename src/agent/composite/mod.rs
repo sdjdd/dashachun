@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::agent::{
     Agent, AgentInputStream, AgentOutput, AgentOutputStream, AgentSession, Asr, Capture,
-    EntryMemory, Llm, Memory, SystemPrompt, ToolSet, Tts,
+    EntryMemory, Llm, Memory, Speaker, SystemPrompt, ToolSet, Tts,
 };
 use crate::util::recv_stream;
 use crate::vad::VadFactory;
@@ -62,10 +62,14 @@ impl Agent for CompositeAgent {
 /// What the listening side hands to the reply side. Each utterance carries
 /// its own cancellation token: the listener keeps the authority to kill the
 /// in-flight reply the moment new speech or an interrupt arrives, the reply
-/// side only observes it.
+/// side only observes it. The speaker is the utterance's attribution — name
+/// and description, 未知 when the session runs identification and this
+/// utterance matched nothing, `None` when it runs none; the reply stage
+/// never sees a voiceprint type.
 enum ListenEvent {
     Utterance {
         text: String,
+        speaker: Option<Speaker>,
         turn: CancellationToken,
     },
     Interrupt,
