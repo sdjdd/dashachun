@@ -10,7 +10,8 @@ use axum::http::StatusCode;
 use sqlx::PgPool;
 
 use common::{
-    MemoryStorage, app, app_with_state, app_with_voiceprint, expect_json, register, request, send,
+    MemoryStorage, app, app_with_state, app_with_voiceprint, device_session, expect_json, register,
+    request, send,
 };
 
 use dashachun::agent::{AgentStore, AudioStorage};
@@ -72,33 +73,29 @@ fn tone(freqs: &[f32], seconds: usize) -> Vec<i16> {
         .collect()
 }
 
-async fn message_row(pool: &PgPool, user_id: i64, agent_id: i64, role: &str) -> i64 {
+async fn message_row(pool: &PgPool, agent_id: i64, role: &str) -> i64 {
+    let session_id = format!("sess-{}", uuid::Uuid::new_v4().simple());
+    device_session(pool, &session_id, 1, agent_id).await;
     let message = serde_json::json!({"role": role, "content": "你好"});
-    sqlx::query_scalar(
-        "INSERT INTO messages (session_id, user_id, agent_id, client_id, device_id, message) \
-         VALUES ('sess', $1, $2, $3, NULL, $4) RETURNING id",
-    )
-    .bind(user_id)
-    .bind(agent_id)
-    .bind(uuid::Uuid::new_v4())
-    .bind(message)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+    sqlx::query_scalar("INSERT INTO messages (session_id, message) VALUES ($1, $2) RETURNING id")
+        .bind(&session_id)
+        .bind(message)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 /// Inserts a user message row plus its capture row, and puts the FLAC
 /// object into the test storage under the recorded key.
 async fn captured_message(
     pool: &PgPool,
-    user_id: i64,
     agent_id: i64,
     storage: &MemoryStorage,
     sample_rate: u32,
     channels: usize,
     samples: &[i16],
 ) -> i64 {
-    let id = message_row(pool, user_id, agent_id, "user").await;
+    let id = message_row(pool, agent_id, "user").await;
     let key = format!("audios/test/{}.flac", uuid::Uuid::new_v4().simple());
     storage
         .put(&key, flac_bytes(sample_rate, channels, samples))
@@ -405,10 +402,10 @@ async fn create_400s_on_out_of_scope_and_uncaptured_messages(pool: PgPool) {
     let (other_cookie, other_user) = register(&app, &pool).await;
     let foreign_agent = owned_agent(&pool, other_user, "theirs").await;
 
-    let uncaptured = message_row(&pool, user_id, agent, "user").await;
-    let assistant = message_row(&pool, user_id, agent, "assistant").await;
-    let cross_agent = message_row(&pool, user_id, other_agent, "user").await;
-    let foreign = message_row(&pool, other_user, foreign_agent, "user").await;
+    let uncaptured = message_row(&pool, agent, "user").await;
+    let assistant = message_row(&pool, agent, "assistant").await;
+    let cross_agent = message_row(&pool, other_agent, "user").await;
+    let foreign = message_row(&pool, foreign_agent, "user").await;
 
     let body = expect_json(
         &app,
@@ -452,9 +449,9 @@ async fn create_400s_on_missing_objects_and_undecodable_audio(pool: PgPool) {
     let agent = owned_agent(&pool, user_id, "a").await;
     let path = format!("/api/agents/{agent}/voiceprints");
 
-    let missing = message_row(&pool, user_id, agent, "user").await;
+    let missing = message_row(&pool, agent, "user").await;
     audio_row(&pool, missing, "bucket", "never-stored.flac").await;
-    let broken = message_row(&pool, user_id, agent, "user").await;
+    let broken = message_row(&pool, agent, "user").await;
     audio_row(&pool, broken, "bucket", "broken.flac").await;
     storage.put("broken.flac", vec![0u8; 64]).await.unwrap();
 
@@ -487,7 +484,6 @@ async fn create_503s_when_the_audio_is_valid_but_the_model_is_absent(pool: PgPoo
     let agent = owned_agent(&pool, user_id, "a").await;
     let id = captured_message(
         &pool,
-        user_id,
         agent,
         &storage,
         16000,
@@ -527,8 +523,8 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
 
     let first = tone(&[220.0, 440.0, 660.0], 1);
     let second = tone(&[300.0, 900.0], 1);
-    let m1 = captured_message(&pool, user_id, agent, &storage, 16000, 1, &first).await;
-    let m2 = captured_message(&pool, user_id, agent, &storage, 16000, 1, &second).await;
+    let m1 = captured_message(&pool, agent, &storage, 16000, 1, &first).await;
+    let m2 = captured_message(&pool, agent, &storage, 16000, 1, &second).await;
 
     let body = expect_json(
         &app,

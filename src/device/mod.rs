@@ -10,6 +10,7 @@ use crate::agent::AgentStore;
 use crate::error::AppError;
 
 pub mod dto;
+pub mod session;
 
 const MAX_CODE_ATTEMPTS: u32 = 8;
 
@@ -51,6 +52,12 @@ impl DeviceStore {
             conn: Arc::new(OnceCell::new()),
             prefix: Arc::from(prefix),
         }
+    }
+
+    /// The shared pool, for module-adjacent persistence that is not a
+    /// device-row operation (the gateway session rows).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 
     /// Activation codes are correctness state, unlike the rate limiter:

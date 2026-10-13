@@ -7,6 +7,7 @@ use axum::routing::get;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::device::{self};
 use crate::gateway::Gateway;
 use crate::state::ServerState;
 
@@ -54,6 +55,10 @@ async fn handle_device_connect(
         );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let Some(agent_id) = record.agent_id else {
+        warn!(client_id, "gateway rejected: device has no assigned agent");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let agent = match factory.build(&record, state.audio_storage()).await {
         Ok(agent) => agent,
         Err(err) => {
@@ -61,8 +66,27 @@ async fn handle_device_connect(
             return err.into_response();
         }
     };
+
+    // The session row is the ownership anchor for everything the connection
+    // writes, so a failure to record it rejects the upgrade. The id is
+    // assigned here — the same value the hello ack announces and every
+    // message row carries.
+    let session_id = Uuid::new_v4().to_string();
+    if let Err(err) =
+        device::session::create(state.devices.pool(), &session_id, record.id, agent_id).await
+    {
+        warn!(client_id, %err, "gateway rejected: session could not be recorded");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
     let shutdown = state.shutdown_signal();
-    ws.on_upgrade(move |socket| Gateway::new(state, agent, shutdown).run(socket))
+    let pool = state.devices.pool().clone();
+    ws.on_upgrade(move |socket| async move {
+        Gateway::new(state, agent, shutdown, session_id.clone())
+            .run(socket)
+            .await;
+        device::session::end(&pool, &session_id).await;
+    })
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

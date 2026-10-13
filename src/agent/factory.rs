@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use super::capture::{AudioCapture, AudioStorage};
-use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook, MemoryOwner};
+use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook};
 use super::store::AgentStore;
 use super::tool::memory_tools;
 use super::{Agent, Asr, Capture, CompositeAgent, Llm, Memory, SystemPrompt, ToolSet, Tts};
@@ -101,12 +101,6 @@ impl AgentFactory {
             .find(agent_id)
             .await?
             .ok_or_else(|| AppError::Internal(format!("agent {agent_id} not found")))?;
-        let owner = MemoryOwner {
-            user_id,
-            agent_id,
-            client_id: record.client_id,
-            device_id: record.device_id.clone(),
-        };
         // The entry memory is scope-bound per connection; the memory tools
         // hold the same instance, so the prompt reads what they write. The
         // base registry is generation-shared — each connection extends a
@@ -130,19 +124,17 @@ impl AgentFactory {
         // reads.
         let extractor = Extractor::new(
             self.pool.clone(),
-            owner.clone(),
+            agent_id,
             Arc::clone(&self.llm),
             Arc::clone(&entries),
         );
-        let memory = DbMemory::load(
+        let memory = DbMemory::new(
             self.pool.clone(),
-            owner,
             vec![
                 audio.clone() as Arc<dyn MemoryHook>,
                 Arc::new(extractor) as Arc<dyn MemoryHook>,
             ],
-        )
-        .await?;
+        );
         let tools = self.tools.clone().merge(memory_tools(&entries));
         // The voiceprint feature plugs in here like the audio capture: the
         // model is the boot slot, the agent's enrolled voiceprints are read

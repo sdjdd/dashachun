@@ -10,7 +10,6 @@ mod extract;
 mod inmem;
 
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use crate::agent::AgentSession;
 use crate::agent::ChatItem;
@@ -22,16 +21,6 @@ pub use entries::{
 };
 pub use extract::Extractor;
 pub use inmem::InMemMemory;
-
-/// Device-side identity stamped onto every message row, taken from the
-/// verified device record at gateway upgrade.
-#[derive(Debug, Clone)]
-pub struct MemoryOwner {
-    pub user_id: i64,
-    pub agent_id: i64,
-    pub client_id: Uuid,
-    pub device_id: Option<String>,
-}
 
 /// Observes committed message rows. Called synchronously on the store's
 /// task right after the insert commits: implementations must be cheap and
@@ -47,10 +36,10 @@ pub trait MemoryHook: Send + Sync {
 }
 
 /// The text side of one session's conversation store. A fresh instance is
-/// built per connection; how messages are retained is the implementation's
-/// policy — the durable one preloads a recent window, the in-memory one
-/// starts empty. The system prompt is not part of the stored history: the
-/// agent prepends its own prompt every turn.
+/// built per connection and starts empty — the context lives only in this
+/// window for the session's lifetime; the durable `messages` log is a
+/// record, never reloaded. The system prompt is not part of the stored
+/// history: the agent prepends its own prompt every turn.
 #[async_trait]
 pub trait Memory: Send + Sync {
     /// The conversation so far, oldest first.
@@ -86,9 +75,7 @@ pub trait Memory: Send + Sync {
 /// when it would start inside a tool exchange: a `Tool` item without its
 /// owning assistant tool-call message is an invalid request for
 /// OpenAI-compatible APIs, so one oversized tool turn may exceed the cap but
-/// an exchange is never split. The preload query uses the same limit in
-/// rows — a row is exactly one message, so the loaded window fills the cap
-/// before trimming.
+/// an exchange is never split.
 pub(crate) const HISTORY_LIMIT: usize = 20;
 
 /// Drops the oldest items past the cap, widening the window backwards over

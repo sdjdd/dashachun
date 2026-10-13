@@ -8,10 +8,10 @@ use crate::agent::ChatItem;
 use super::{Memory, trim};
 
 /// Keeps the conversation in process memory, starting empty; its state dies
-/// with the session. Test helper — production sessions preload a recent
-/// window from the durable log ([`super::DbMemory`]). Mirrors the durable
-/// semantics: empty utterances, empty turns and empty partials store
-/// nothing; the store calls are recorded for assertions.
+/// with the session. Test helper — mirrors the durable semantics (the
+/// production [`super::DbMemory`] adds the Postgres writes): empty
+/// utterances, empty turns and empty partials store nothing; the store
+/// calls are recorded for assertions.
 #[derive(Default)]
 pub struct InMemMemory {
     messages: Mutex<Vec<ChatItem>>,

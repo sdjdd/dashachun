@@ -19,9 +19,7 @@ use tower::ServiceExt;
 
 pub type TestApp = tower_http::normalize_path::NormalizePath<axum::Router>;
 
-use dashachun::agent::{
-    AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, MemoryOwner, ToolSet,
-};
+use dashachun::agent::{AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, ToolSet};
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
@@ -273,17 +271,17 @@ pub fn session(id: &str) -> AgentSession {
     }
 }
 
-pub fn owner(user_id: i64, agent_id: i64) -> MemoryOwner {
-    owner_with_client(user_id, agent_id, uuid::Uuid::new_v4())
-}
-
-pub fn owner_with_client(user_id: i64, agent_id: i64, client_id: uuid::Uuid) -> MemoryOwner {
-    MemoryOwner {
-        user_id,
-        agent_id,
-        client_id,
-        device_id: Some("aa:bb:cc:dd:ee:ff".into()),
-    }
+/// The `device_sessions` row a stored message hangs off: the store queries
+/// scope rows by joining the session's agent snapshot, so every session id
+/// used in a test needs one of these.
+pub async fn device_session(pool: &PgPool, id: &str, device_id: i64, agent_id: i64) {
+    sqlx::query("INSERT INTO device_sessions (id, device_id, agent_id) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(device_id)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 /// Records the message ids the memory announces, for hook assertions.

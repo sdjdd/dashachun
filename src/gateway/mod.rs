@@ -23,16 +23,23 @@ pub struct Gateway {
     state: ServerState,
     agent: Arc<dyn Agent>,
     shutdown: watch::Receiver<bool>,
+    session_id: String,
     ping_interval: Duration,
     peer_idle_timeout: Duration,
 }
 
 impl Gateway {
-    pub fn new(state: ServerState, agent: Arc<dyn Agent>, shutdown: watch::Receiver<bool>) -> Self {
+    pub fn new(
+        state: ServerState,
+        agent: Arc<dyn Agent>,
+        shutdown: watch::Receiver<bool>,
+        session_id: String,
+    ) -> Self {
         Self {
             state,
             agent,
             shutdown,
+            session_id,
             ping_interval: PING_INTERVAL,
             peer_idle_timeout: PEER_IDLE_TIMEOUT,
         }
@@ -43,6 +50,7 @@ impl Gateway {
         state: ServerState,
         agent: Arc<dyn Agent>,
         shutdown: watch::Receiver<bool>,
+        session_id: String,
         ping_interval: Duration,
         peer_idle_timeout: Duration,
     ) -> Self {
@@ -50,6 +58,7 @@ impl Gateway {
             state,
             agent,
             shutdown,
+            session_id,
             ping_interval,
             peer_idle_timeout,
         }
@@ -60,6 +69,7 @@ impl Gateway {
             state,
             agent,
             shutdown,
+            session_id,
             ping_interval,
             peer_idle_timeout,
         } = self;
@@ -92,8 +102,12 @@ impl Gateway {
             }
         });
 
-        let mut session =
-            Session::new(tx.clone(), agent, state.config.server.playback_prebuffer_ms);
+        let mut session = Session::new(
+            tx.clone(),
+            agent,
+            state.config.server.playback_prebuffer_ms,
+            session_id,
+        );
         let grace = Duration::from_millis(state.config.server.shutdown_grace_ms);
         let mut shutdown = shutdown;
 
@@ -277,6 +291,7 @@ mod tests {
                             state,
                             agent,
                             shutdown,
+                            "test-session".to_string(),
                             ping_interval,
                             peer_idle_timeout,
                         )

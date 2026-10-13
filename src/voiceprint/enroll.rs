@@ -30,7 +30,6 @@ const MAX_SEGMENT_SAMPLES: usize = 60 * SAMPLE_RATE as usize;
 #[derive(sqlx::FromRow)]
 struct MessageRow {
     id: i64,
-    agent_id: i64,
     role: Option<String>,
     bucket: Option<String>,
     object_key: Option<String>,
@@ -64,12 +63,14 @@ pub async fn enroll(
     }
 
     let rows = sqlx::query_as::<_, MessageRow>(
-        "SELECT m.id, m.agent_id, m.message->>'role' AS role, ma.bucket, ma.object_key \
-         FROM messages m LEFT JOIN message_audios ma ON ma.message_id = m.id \
-         WHERE m.user_id = $1 AND m.id = ANY($2) \
+        "SELECT m.id, m.message->>'role' AS role, ma.bucket, ma.object_key \
+         FROM messages m \
+         JOIN device_sessions ds ON ds.id = m.session_id \
+         LEFT JOIN message_audios ma ON ma.message_id = m.id \
+         WHERE ds.agent_id = $1 AND m.id = ANY($2) \
          ORDER BY m.id, ma.id",
     )
-    .bind(user_id)
+    .bind(agent_id)
     .bind(&ids)
     .fetch_all(pool)
     .await?;
@@ -84,9 +85,7 @@ pub async fn enroll(
         match found.get(&id) {
             None => problems.push(format!("{id}: not in scope")),
             Some(row) => {
-                if row.agent_id != agent_id {
-                    problems.push(format!("{id}: not in scope"));
-                } else if row.role.as_deref() != Some("user") {
+                if row.role.as_deref() != Some("user") {
                     problems.push(format!("{id}: not a user message"));
                 } else {
                     match (&row.bucket, &row.object_key) {

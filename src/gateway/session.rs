@@ -6,7 +6,6 @@ use axum::extract::ws::Message;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
 use crate::audio::{DOWNLINK, OpusDecoder, OpusEncoder};
@@ -21,7 +20,8 @@ use super::send_json;
 const AGENT_CHANNEL_CAPACITY: usize = 64;
 
 pub(super) struct Session {
-    id: Option<String>,
+    session_id: String,
+    helloed: bool,
     tx: mpsc::Sender<Message>,
     decoder: Option<OpusDecoder>,
     agent: Arc<dyn Agent>,
@@ -36,9 +36,11 @@ impl Session {
         tx: mpsc::Sender<Message>,
         agent: Arc<dyn Agent>,
         playback_prebuffer_ms: u32,
+        session_id: String,
     ) -> Self {
         Self {
-            id: None,
+            session_id,
+            helloed: false,
             tx,
             decoder: None,
             agent,
@@ -78,12 +80,12 @@ impl Session {
     }
 
     async fn on_hello(&mut self, hello: ClientHello) -> ControlFlow<()> {
-        if self.id.is_some() {
+        if self.helloed {
             warn!("duplicate hello, ignoring");
             return ControlFlow::Continue(());
         }
 
-        let id = Uuid::new_v4().to_string();
+        let id = self.session_id.clone();
         let audio_params = hello.audio_params.unwrap_or_default();
         info!(
             session_id = %id,
@@ -129,7 +131,7 @@ impl Session {
         };
         self.decoder = Some(decoder);
         send_json(&self.tx, &ServerHello::new(id.clone(), DOWNLINK.into())).await;
-        self.id = Some(id.clone());
+        self.helloed = true;
         let session = AgentSession {
             id,
             sample_rate: audio_params.sample_rate,
@@ -160,10 +162,11 @@ impl Session {
     }
 
     async fn on_listen(&mut self, listen: Listen) {
-        let Some(session_id) = self.id.clone() else {
+        if !self.helloed {
             warn!("listen message before hello, ignoring");
             return;
-        };
+        }
+        let session_id = self.session_id.clone();
 
         match listen.state.as_str() {
             "start" => {
@@ -182,7 +185,7 @@ impl Session {
 
     async fn on_abort(&mut self, abort: Abort) {
         let reason = abort.reason;
-        info!(session_id = ?self.id, reason = ?reason, "abort requested");
+        info!(session_id = %self.session_id, reason = ?reason, "abort requested");
         if let Some(player) = self.player.as_ref() {
             player.abort().await;
         }
@@ -190,7 +193,7 @@ impl Session {
     }
 
     async fn on_mcp(&mut self, mcp: Mcp) {
-        debug!(session_id = ?self.id, payload = %mcp.payload, "mcp message");
+        debug!(session_id = %self.session_id, payload = %mcp.payload, "mcp message");
         self.send_agent(AgentInput::Mcp(mcp.payload)).await;
     }
 

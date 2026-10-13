@@ -8,7 +8,7 @@ mod common;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use common::{RecordingHook, owner, session};
+use common::{RecordingHook, device_session, session};
 use dashachun::agent::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor, Llm,
     LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ReasoningEffort,
@@ -81,11 +81,8 @@ async fn entry_memory_enforces_the_cap(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
-async fn history_preloads_the_full_tool_exchange_across_sessions(pool: PgPool) {
-    let owner = owner(7, 3);
-    let memory = DbMemory::load(pool.clone(), owner.clone(), vec![])
-        .await
-        .unwrap();
+async fn a_new_session_starts_with_an_empty_window(pool: PgPool) {
+    let memory = DbMemory::new(pool.clone(), vec![]);
     memory
         .store_utterance(&session("s1"), "hello")
         .await
@@ -104,77 +101,26 @@ async fn history_preloads_the_full_tool_exchange_across_sessions(pool: PgPool) {
     );
     common::wait_for_count(&pool, "messages", 4).await;
 
-    // A brand-new session (s2) of the same user + agent picks the rows up:
-    // `load` has no session filter, `session_id` is provenance only.
-    let reloaded = DbMemory::load(pool.clone(), owner, vec![]).await.unwrap();
-    assert_eq!(
-        reloaded.history().await,
-        vec![
-            ChatItem::user("hello"),
-            ChatItem::assistant_tool_calls(vec![ToolCall {
-                id: "call_a".into(),
-                name: "get_weather".into(),
-                arguments: "{\"city\":\"hangzhou\"}".into(),
-            }]),
-            ChatItem::tool("call_a", "sunny 26 degrees"),
-            ChatItem::assistant("sunny today"),
-        ]
-    );
+    // The rows are durable, but the context lives only in the session's
+    // window: a brand-new session starts empty and never reloads them.
+    let fresh = DbMemory::new(pool, vec![]);
+    assert!(fresh.history().await.is_empty());
 }
 
 #[sqlx::test]
 #[ignore]
-async fn history_is_scoped_to_the_owner(pool: PgPool) {
-    let alice = owner(7, 3);
-    let bob = owner(8, 4);
-    let alice_memory = DbMemory::load(pool.clone(), alice.clone(), vec![])
-        .await
-        .unwrap();
-    let bob_memory = DbMemory::load(pool.clone(), bob.clone(), vec![])
-        .await
-        .unwrap();
-    alice_memory
-        .store_utterance(&session("s1"), "from alice")
-        .await
-        .unwrap();
-    bob_memory
-        .store_utterance(&session("s1"), "from bob")
-        .await
-        .unwrap();
-
-    // The warm caches only see their own appends; a fresh load reads the
-    // durable rows, where each owner sees exactly its own utterance.
-    let reloaded_alice = DbMemory::load(pool.clone(), alice, vec![]).await.unwrap();
-    assert_eq!(
-        reloaded_alice.history().await,
-        vec![ChatItem::user("from alice")]
-    );
-    let reloaded_bob = DbMemory::load(pool, bob, vec![]).await.unwrap();
-    assert_eq!(
-        reloaded_bob.history().await,
-        vec![ChatItem::user("from bob")]
-    );
-}
-
-#[sqlx::test]
-#[ignore]
-async fn history_caps_at_the_window_limit(pool: PgPool) {
+async fn the_window_caps_at_the_limit(pool: PgPool) {
     // Mirrors the agent's HISTORY_LIMIT (pub(crate) there).
     const HISTORY_LIMIT: usize = 20;
 
-    let owner = owner(7, 3);
-    let memory = DbMemory::load(pool.clone(), owner.clone(), vec![])
-        .await
-        .unwrap();
+    let memory = DbMemory::new(pool, vec![]);
     for turn in 1..=(HISTORY_LIMIT + 5) {
         memory
-            .store_utterance(&session("s1"), &format!("u{turn}"))
-            .await
-            .unwrap();
+            .append(vec![ChatItem::user(format!("u{turn}"))])
+            .await;
     }
 
-    let reloaded = DbMemory::load(pool, owner, vec![]).await.unwrap();
-    let history = reloaded.history().await;
+    let history = memory.history().await;
     assert_eq!(history.len(), HISTORY_LIMIT);
     assert_eq!(history.first(), Some(&ChatItem::user("u6")));
     assert_eq!(
@@ -185,39 +131,12 @@ async fn history_caps_at_the_window_limit(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
-async fn loaded_history_keeps_appending_under_the_cap(pool: PgPool) {
-    // Mirrors the agent's HISTORY_LIMIT (pub(crate) there).
-    const HISTORY_LIMIT: usize = 20;
-
-    let owner = owner(7, 3);
-    let memory = DbMemory::load(pool, owner, vec![]).await.unwrap();
-    for turn in 1..=25 {
-        memory
-            .append(vec![
-                ChatItem::user(format!("u{turn}")),
-                ChatItem::assistant(format!("a{turn}")),
-            ])
-            .await;
-    }
-
-    let history = memory.history().await;
-    assert_eq!(history.len(), HISTORY_LIMIT);
-    assert_eq!(history.first(), Some(&ChatItem::user("u16")));
-    assert_eq!(history.last(), Some(&ChatItem::assistant("a25")));
-}
-
-#[sqlx::test]
-#[ignore]
 async fn utterance_row_is_written_and_announced(pool: PgPool) {
-    let owner = owner(7, 3);
     let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::load(
+    let memory = DbMemory::new(
         pool.clone(),
-        owner.clone(),
         vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
+    );
 
     memory
         .store_utterance(&session("sess-1"), "hello there")
@@ -258,15 +177,11 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
-    let owner = owner(7, 3);
     let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::load(
+    let memory = DbMemory::new(
         pool.clone(),
-        owner,
         vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
+    );
 
     memory.log_items(
         &session("sess-2"),
@@ -315,8 +230,7 @@ async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn multi_round_tool_exchange_stores_one_row_per_message(pool: PgPool) {
-    let owner = owner(7, 3);
-    let memory = DbMemory::load(pool.clone(), owner, vec![]).await.unwrap();
+    let memory = DbMemory::new(pool.clone(), vec![]);
     memory.log_items(
         &session("sess-9"),
         vec![
@@ -358,15 +272,11 @@ async fn multi_round_tool_exchange_stores_one_row_per_message(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn tool_only_turn_stores_rows_without_content(pool: PgPool) {
-    let owner = owner(7, 3);
     let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::load(
+    let memory = DbMemory::new(
         pool.clone(),
-        owner,
         vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
+    );
 
     memory.log_items(
         &session("sess-10"),
@@ -405,15 +315,11 @@ async fn tool_only_turn_stores_rows_without_content(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn turns_without_storable_content_write_nothing(pool: PgPool) {
-    let owner = owner(7, 3);
     let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::load(
+    let memory = DbMemory::new(
         pool.clone(),
-        owner,
         vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
+    );
 
     memory.log_items(&session("sess-3"), vec![ChatItem::system("system prompt")]);
     memory.log_items(&session("sess-3"), vec![]);
@@ -430,15 +336,11 @@ async fn turns_without_storable_content_write_nothing(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
-    let owner = owner(7, 3);
     let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::load(
+    let memory = DbMemory::new(
         pool.clone(),
-        owner,
         vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
+    );
 
     memory.store_partial_reply(&session("sess-4"), "partially spoke");
     memory.log_items(&session("sess-4"), vec![ChatItem::assistant("ok")]);
@@ -579,7 +481,7 @@ async fn extractor_flushes_a_full_batch_into_entries(pool: PgPool) {
     // Mirrors the extractor's BATCH_ROWS.
     const BATCH_ROWS: usize = 12;
 
-    let owner = owner(7, 3);
+    device_session(&pool, "s1", 1, 3).await;
     let entries: Arc<dyn EntryMemory> = Arc::new(DbEntryMemory::new(pool.clone(), 7, 3));
     let llm = Arc::new(ProposeLlm::new(vec![vec![
         propose_call(
@@ -591,17 +493,11 @@ async fn extractor_flushes_a_full_batch_into_entries(pool: PgPool) {
     ]]));
     let extractor = Arc::new(Extractor::new(
         pool.clone(),
-        owner.clone(),
+        3,
         llm.clone(),
         entries.clone(),
     ));
-    let memory = DbMemory::load(
-        pool.clone(),
-        owner,
-        vec![extractor.clone() as Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
+    let memory = DbMemory::new(pool.clone(), vec![extractor.clone() as Arc<dyn MemoryHook>]);
 
     for turn in 1..=(BATCH_ROWS - 1) {
         memory
@@ -658,7 +554,7 @@ async fn extractor_flushes_a_full_batch_into_entries(pool: PgPool) {
 async fn a_failed_flush_stays_pending_and_retries_on_the_next_batch(pool: PgPool) {
     const BATCH_ROWS: usize = 12;
 
-    let owner = owner(7, 3);
+    device_session(&pool, "s1", 1, 3).await;
     let entries: Arc<dyn EntryMemory> = Arc::new(DbEntryMemory::new(pool.clone(), 7, 3));
     let llm = Arc::new(ProposeLlm::new(vec![
         vec![Err(LlmError::Failed("provider down".into()))],
@@ -669,13 +565,11 @@ async fn a_failed_flush_stays_pending_and_retries_on_the_next_batch(pool: PgPool
     ]));
     let extractor = Arc::new(Extractor::new(
         pool.clone(),
-        owner.clone(),
+        3,
         llm.clone(),
         entries.clone(),
     ));
-    let memory = DbMemory::load(pool.clone(), owner, vec![extractor as Arc<dyn MemoryHook>])
-        .await
-        .unwrap();
+    let memory = DbMemory::new(pool.clone(), vec![extractor as Arc<dyn MemoryHook>]);
 
     for turn in 1..=BATCH_ROWS {
         memory
@@ -723,7 +617,7 @@ async fn a_failed_flush_stays_pending_and_retries_on_the_next_batch(pool: PgPool
 #[sqlx::test]
 #[ignore]
 async fn teardown_flushes_the_remaining_rows(pool: PgPool) {
-    let owner = owner(7, 3);
+    device_session(&pool, "s1", 1, 3).await;
     let entries: Arc<dyn EntryMemory> = Arc::new(DbEntryMemory::new(pool.clone(), 7, 3));
     let llm = Arc::new(ProposeLlm::new(vec![vec![
         propose_call(r#"{"memories":[{"action":"add","content":"用户养了一只猫"}]}"#),
@@ -731,18 +625,12 @@ async fn teardown_flushes_the_remaining_rows(pool: PgPool) {
     ]]));
     let extractor = Arc::new(Extractor::new(
         pool.clone(),
-        owner.clone(),
+        3,
         llm.clone(),
         entries.clone(),
     ));
     {
-        let memory = DbMemory::load(
-            pool.clone(),
-            owner,
-            vec![extractor.clone() as Arc<dyn MemoryHook>],
-        )
-        .await
-        .unwrap();
+        let memory = DbMemory::new(pool.clone(), vec![extractor.clone() as Arc<dyn MemoryHook>]);
         for turn in 1..=3 {
             memory
                 .store_utterance(&session("s1"), &format!("turn {turn}"))

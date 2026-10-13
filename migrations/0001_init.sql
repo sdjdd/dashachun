@@ -9,15 +9,16 @@ CREATE TABLE users (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE sessions (
-    id           UUID PRIMARY KEY,
-    user_id      BIGINT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at   TIMESTAMPTZ NOT NULL,
-    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+-- Login sessions: the bearer tokens / cookies issued by /api/auth,
+-- validated on every authenticated request by absolute expiry.
+CREATE TABLE auth_sessions (
+    id         UUID PRIMARY KEY,
+    user_id    BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL
 );
 
-CREATE INDEX sessions_user_id_idx ON sessions (user_id);
+CREATE INDEX auth_sessions_user_id_idx ON auth_sessions (user_id);
 
 CREATE TABLE agents (
     id              BIGSERIAL PRIMARY KEY,
@@ -47,25 +48,37 @@ CREATE TABLE devices (
 CREATE INDEX devices_user_id_idx ON devices (user_id);
 CREATE INDEX devices_agent_id_idx ON devices (agent_id);
 
+-- Device conversation sessions: one row per accepted gateway connection —
+-- created by the upgrade route with the server-assigned `session_id` (the
+-- wire id echoed by the device), closed when the device goes offline.
+-- `ended_at` stays NULL only when the server dies mid-session. `device_id`
+-- and `agent_id` are the binding snapshot at hello: ownership of a session
+-- never drifts when the device is re-bound afterwards. Integrity is
+-- enforced in the app layer; no foreign keys.
+CREATE TABLE device_sessions (
+    id         TEXT PRIMARY KEY,
+    device_id  BIGINT NOT NULL,
+    agent_id   BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ended_at   TIMESTAMPTZ
+);
+
+CREATE INDEX device_sessions_device_id_idx ON device_sessions (device_id);
+
 -- The durable conversation log: one row per message, the JSON form of the
 -- agent's `ChatItem` in the AI SDK ModelMessage shape (`role` as the serde
 -- tag; user rows carry the utterance, assistant rows text and/or tool-call
 -- requests, tool rows one result each — `ORDER BY id` rebuilds the
 -- conversation). `System` messages are never stored (the agent prepends its
--- prompt every turn). Integrity is enforced in the app layer; no foreign
--- keys.
+-- prompt every turn). Ownership derives through `device_sessions`; no
+-- foreign keys.
 CREATE TABLE messages (
-    id           BIGSERIAL PRIMARY KEY,
-    session_id   TEXT NOT NULL,
-    user_id      BIGINT NOT NULL,
-    agent_id     BIGINT NOT NULL,
-    client_id    UUID NOT NULL,
-    device_id    TEXT,
-    message      JSONB NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    id         BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    message    JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX messages_user_id_idx ON messages (user_id, created_at);
 CREATE INDEX messages_session_id_idx ON messages (session_id, created_at);
 
 -- FLAC capture (16-bit PCM, metadata blocks + frames) stored as one S3

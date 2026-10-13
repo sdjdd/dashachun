@@ -21,7 +21,7 @@ use crate::agent::{
     AgentSession, ChatItem, Llm, ReasoningEffort, StreamTextParams, Tool, ToolChoice, generate_text,
 };
 
-use super::{EntryMemory, MAX_ENTRIES, MemoryEntry, MemoryHook, MemoryOwner, entry_id};
+use super::{EntryMemory, MAX_ENTRIES, MemoryEntry, MemoryHook, entry_id};
 
 /// Flushes once this many of the connection's own rows are pending — about
 /// six turns of dialogue per extraction call.
@@ -67,7 +67,7 @@ static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
 
 pub struct Extractor {
     pool: PgPool,
-    owner: MemoryOwner,
+    agent_id: i64,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
     propose: ToolSet,
@@ -83,14 +83,14 @@ struct ExtractState {
 impl Extractor {
     pub fn new(
         pool: PgPool,
-        owner: MemoryOwner,
+        agent_id: i64,
         llm: Arc<dyn Llm>,
         entries: Arc<dyn EntryMemory>,
     ) -> Self {
         let propose = ToolSet::new().tool(MemoryPropose::new(Arc::clone(&entries)));
         Self {
             pool,
-            owner,
+            agent_id,
             llm,
             entries,
             propose,
@@ -104,7 +104,7 @@ impl Extractor {
     fn flush_task(&self) -> FlushTask {
         FlushTask {
             pool: self.pool.clone(),
-            owner: self.owner.clone(),
+            agent_id: self.agent_id,
             llm: Arc::clone(&self.llm),
             entries: Arc::clone(&self.entries),
             propose: self.propose.clone(),
@@ -175,7 +175,7 @@ impl Drop for Extractor {
 /// batches and restore them on failure.
 struct FlushTask {
     pool: PgPool,
-    owner: MemoryOwner,
+    agent_id: i64,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
     propose: ToolSet,
@@ -222,12 +222,12 @@ impl FlushTask {
 /// them.
 async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
     let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
-        "SELECT message, to_char(created_at, 'YYYY-MM-DD') FROM messages \
-         WHERE id = ANY($1) AND user_id = $2 AND agent_id = $3 ORDER BY id",
+        "SELECT m.message, to_char(m.created_at, 'YYYY-MM-DD') FROM messages m \
+         JOIN device_sessions ds ON ds.id = m.session_id \
+         WHERE m.id = ANY($1) AND ds.agent_id = $2 ORDER BY m.id",
     )
     .bind(ids.to_vec())
-    .bind(task.owner.user_id)
-    .bind(task.owner.agent_id)
+    .bind(task.agent_id)
     .fetch_all(&task.pool)
     .await
     .map_err(|err| err.to_string())?;
@@ -352,7 +352,6 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
-    use uuid::Uuid;
 
     #[test]
     fn dialogue_keeps_utterances_and_spoken_replies_only() {
@@ -463,15 +462,6 @@ mod tests {
         }
     }
 
-    fn owner() -> MemoryOwner {
-        MemoryOwner {
-            user_id: 1,
-            agent_id: 2,
-            client_id: Uuid::new_v4(),
-            device_id: None,
-        }
-    }
-
     /// A pool that never connects — the flush's first query fails, which is
     /// the failure the restore path has to survive. The acquire timeout has
     /// to be short: against a machine with nothing listening the pool keeps
@@ -488,7 +478,7 @@ mod tests {
     async fn pokes_below_the_threshold_only_buffer() {
         let extractor = Extractor::new(
             lazy_pool(),
-            owner(),
+            2,
             Arc::new(FailLlm),
             Arc::new(InMemEntryMemory::default()),
         );
@@ -502,7 +492,7 @@ mod tests {
     async fn a_failed_flush_restores_the_pending_rows() {
         let extractor = Extractor::new(
             lazy_pool(),
-            owner(),
+            2,
             Arc::new(FailLlm),
             Arc::new(InMemEntryMemory::default()),
         );

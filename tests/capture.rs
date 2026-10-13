@@ -11,23 +11,17 @@ use dashachun::agent::{ChatItem, ToolCall};
 use common::MemoryStorage;
 
 /// A memory wired with the audio capture as its hook — the production
-/// assembly under test. The client id is shared between the owner and the
-/// capture exactly as `AgentFactory::build` does; the storage doubles as the
-/// port, and `None` disables storage entirely.
+/// assembly under test. The client id is generated here and handed to the
+/// capture exactly as `AgentFactory::build` does; the storage doubles as
+/// the port, and `None` disables storage entirely.
 async fn wired_memory(
     pool: &PgPool,
     audio_storage: Option<Arc<dyn AudioStorage>>,
-) -> (DbMemory, Arc<AudioCapture>) {
+) -> (DbMemory, Arc<AudioCapture>, uuid::Uuid) {
     let client_id = uuid::Uuid::new_v4();
     let audio = Arc::new(AudioCapture::new(pool.clone(), client_id, audio_storage));
-    let memory = DbMemory::load(
-        pool.clone(),
-        common::owner_with_client(7, 3, client_id),
-        vec![audio.clone() as Arc<dyn MemoryHook>],
-    )
-    .await
-    .unwrap();
-    (memory, audio)
+    let memory = DbMemory::new(pool.clone(), vec![audio.clone() as Arc<dyn MemoryHook>]);
+    (memory, audio, client_id)
 }
 
 /// The capture key's day prefix, `audios/{YYYYMMDD}/`.
@@ -45,7 +39,7 @@ fn date_prefix() -> String {
 #[ignore]
 async fn utterance_audio_attaches_to_the_user_row_through_the_hook(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
-    let (memory, audio) = wired_memory(&pool, Some(audio_storage.clone())).await;
+    let (memory, audio, client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
     let recording = audio.start_utterance(&common::session("sess-1"));
     recording.push(&[0.5; 960]);
@@ -65,11 +59,10 @@ async fn utterance_audio_attaches_to_the_user_row_through_the_hook(pool: PgPool)
         .fetch_one(&pool)
         .await
         .unwrap();
-    let (row_id, role, client_id): (i64, String, uuid::Uuid) =
-        sqlx::query_as("SELECT id, message->>'role', client_id FROM messages")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let (row_id, role): (i64, String) = sqlx::query_as("SELECT id, message->>'role' FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(role, "user");
     assert_eq!(message_id, row_id);
     assert_eq!(sample_rate, 16000);
@@ -87,7 +80,7 @@ async fn utterance_audio_attaches_to_the_user_row_through_the_hook(pool: PgPool)
 #[ignore]
 async fn reply_audio_attaches_to_the_final_reply_row_through_the_hook(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
-    let (memory, audio) = wired_memory(&pool, Some(audio_storage.clone())).await;
+    let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
     let recording = audio.start_reply(&common::session("sess-2"));
     recording.push(&[0.25; 960]);
@@ -130,7 +123,7 @@ async fn reply_audio_attaches_to_the_final_reply_row_through_the_hook(pool: PgPo
 #[ignore]
 async fn partial_reply_audio_attaches_to_the_truncated_row(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
-    let (memory, audio) = wired_memory(&pool, Some(audio_storage.clone())).await;
+    let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
     let recording = audio.start_reply(&common::session("sess-3"));
     recording.push(&[0.25; 960]);
@@ -158,7 +151,7 @@ async fn partial_reply_audio_attaches_to_the_truncated_row(pool: PgPool) {
 #[ignore]
 async fn dropped_captures_store_no_audio(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
-    let (memory, audio) = wired_memory(&pool, Some(audio_storage.clone())).await;
+    let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
     let utterance = audio.start_utterance(&common::session("sess-4"));
     utterance.push(&[0.5; 960]);
@@ -192,7 +185,7 @@ async fn dropped_captures_store_no_audio(pool: PgPool) {
 #[ignore]
 async fn utterance_without_text_stores_no_row_and_no_audio(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
-    let (memory, audio) = wired_memory(&pool, Some(audio_storage.clone())).await;
+    let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
     let recording = audio.start_utterance(&common::session("sess-5"));
     recording.push(&[0.5; 960]);
@@ -220,7 +213,7 @@ async fn utterance_without_text_stores_no_row_and_no_audio(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn no_sink_stores_no_audio_rows(pool: PgPool) {
-    let (memory, audio) = wired_memory(&pool, None).await;
+    let (memory, audio, _client_id) = wired_memory(&pool, None).await;
 
     let recording = audio.start_utterance(&common::session("sess-6"));
     recording.push(&[0.5; 960]);
