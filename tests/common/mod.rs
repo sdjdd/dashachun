@@ -288,6 +288,18 @@ impl AudioStorage for MemoryStorage {
         self.objects.lock().unwrap().insert(key.to_owned(), bytes);
         Ok(self.bucket.clone())
     }
+
+    async fn get(&self, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        if bucket != self.bucket {
+            return Err(format!("get {bucket}/{key}: no such bucket"));
+        }
+        self.objects
+            .lock()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| format!("get {bucket}/{key}: no such object"))
+    }
 }
 
 impl MemoryStorage {

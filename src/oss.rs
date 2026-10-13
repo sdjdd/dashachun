@@ -57,25 +57,6 @@ impl Oss {
             }
         }
     }
-
-    /// Reads one object back. Not on the capture path — diagnostics and the
-    /// real-storage test suite verify roundtrips through it.
-    pub async fn get(&self, key: &str) -> Result<Vec<u8>, String> {
-        let object = self
-            .client
-            .get_object()
-            .bucket(&self.bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(|err| format!("get {key}: {err}"))?;
-        let data = object
-            .body
-            .collect()
-            .await
-            .map_err(|err| format!("read {key}: {err}"))?;
-        Ok(data.into_bytes().to_vec())
-    }
 }
 
 #[async_trait::async_trait]
@@ -93,5 +74,25 @@ impl AudioStorage for Oss {
             .await
             .map_err(|err| format!("put {key}: {err}"))?;
         Ok(self.bucket.clone())
+    }
+
+    /// Reads one object back from the given bucket. Callers pass the bucket
+    /// their row recorded — it may predate a bucket switch, so the current
+    /// bucket is never assumed.
+    async fn get(&self, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
+        let object = self
+            .client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| format!("get {bucket}/{key}: {err}"))?;
+        let data = object
+            .body
+            .collect()
+            .await
+            .map_err(|err| format!("read {bucket}/{key}: {err}"))?;
+        Ok(data.into_bytes().to_vec())
     }
 }

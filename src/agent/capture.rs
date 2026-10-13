@@ -26,10 +26,12 @@ const BITS_PER_SAMPLE: usize = 16;
 /// One put per capture under a fresh object key; a failed put discards that
 /// audio while the message row stays the primary record. `put` returns the
 /// bucket the object landed in — the inserted row records bucket and key,
-/// so a later bucket switch can never orphan a reference.
+/// so a later bucket switch can never orphan a reference, and `get` reads
+/// back through the bucket a row recorded, never the current one.
 #[async_trait::async_trait]
 pub trait AudioStorage: Send + Sync {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<String, String>;
+    async fn get(&self, bucket: &str, key: &str) -> Result<Vec<u8>, String>;
 }
 
 /// The audio-storage feature: captures the device's uplink and the
