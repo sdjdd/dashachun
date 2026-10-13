@@ -18,4 +18,5 @@ jobs:
           components: rustfmt, clippy
       - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
+      - run: just model
       - run: just ci
