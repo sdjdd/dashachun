@@ -251,6 +251,7 @@ mod tests {
                 redis::Client::open("redis://127.0.0.1:6379").unwrap(),
                 "gateway-test",
             ),
+            None,
         );
         (state, Arc::new(NullAgent))
     }

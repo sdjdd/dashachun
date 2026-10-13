@@ -10,6 +10,8 @@
 
 mod store;
 
+pub mod dto;
+
 pub use store::{VoiceprintRecord, VoiceprintStore};
 
 use std::path::Path;

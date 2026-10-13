@@ -8,6 +8,7 @@ use crate::config::AppConfig;
 use crate::device::DeviceStore;
 use crate::provider::ProviderRegistry;
 use crate::vad::VadFactory;
+use crate::voiceprint::Voiceprint;
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -16,6 +17,7 @@ pub struct ServerState {
     pub vad: Arc<dyn VadFactory>,
     pub tools: ToolSet,
     audio_storage: Arc<RwLock<Option<Arc<dyn AudioStorage>>>>,
+    voiceprint: Option<Arc<Mutex<Voiceprint>>>,
     factories: Arc<ArcSwapOption<AgentFactory>>,
     pub swap_lock: Arc<Mutex<()>>,
     pub devices: DeviceStore,
@@ -33,6 +35,7 @@ impl ServerState {
         audio_storage: Option<Arc<dyn AudioStorage>>,
         factories: Arc<ArcSwapOption<AgentFactory>>,
         devices: DeviceStore,
+        voiceprint: Option<Arc<Mutex<Voiceprint>>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
@@ -41,6 +44,7 @@ impl ServerState {
             vad,
             tools,
             audio_storage: Arc::new(RwLock::new(audio_storage)),
+            voiceprint,
             factories,
             swap_lock: Arc::new(Mutex::new(())),
             devices,
@@ -60,6 +64,15 @@ impl ServerState {
     /// path. The previous storage drains with the sessions that hold it.
     pub fn set_audio_storage(&self, next: Option<Arc<dyn AudioStorage>>) {
         *self.audio_storage.write().unwrap() = next;
+    }
+
+    /// The CAM++ model loaded once at boot — `None` when the model file is
+    /// missing, which turns voiceprint enrollment into 503 while the rest of
+    /// the server runs (optional capability, unlike VAD). `embed` takes
+    /// `&mut self`, so handlers clone this handle and lock it inside
+    /// `spawn_blocking` (`blocking_lock`).
+    pub fn voiceprint(&self) -> Option<Arc<Mutex<Voiceprint>>> {
+        self.voiceprint.clone()
     }
 
     /// A snapshot of the current agent generation — `None` until a provider
@@ -160,6 +173,7 @@ mod tests {
                 redis::Client::open("redis://127.0.0.1:6379").unwrap(),
                 "state-test",
             ),
+            None,
         )
     }
 

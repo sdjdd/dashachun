@@ -142,6 +142,7 @@ async fn main() {
         audio_storage,
         agent_factory.clone(),
         DeviceStore::new(pool, redis, "act"),
+        None,
     );
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();

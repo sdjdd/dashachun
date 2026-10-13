@@ -137,6 +137,7 @@ fn test_state_with_registry_inner(
         None,
         Arc::new(ArcSwapOption::from_pointee(factory)),
         devices,
+        None,
     )
 }
 

@@ -1,8 +1,13 @@
-//! The store suite for `src/voiceprints.rs`: CRUD, ownership scoping, and
-//! the element-wise append semantics. Run with
-//! `cargo test --test voiceprints -- --ignored`.
+//! The voiceprints suite: store CRUD, ownership scoping, and the
+//! element-wise append semantics, plus the REST surface over the same
+//! store. Run with `cargo test --test voiceprints -- --ignored`.
 
+mod common;
+
+use axum::http::StatusCode;
 use sqlx::PgPool;
+
+use common::{app, expect_json, register, request, send};
 
 use dashachun::agent::AgentStore;
 use dashachun::error::AppError;
@@ -15,6 +20,14 @@ fn vec192(value: f32) -> Vec<f32> {
 async fn owned_agent(pool: &PgPool, user_id: i64, name: &str) -> i64 {
     AgentStore::new(pool.clone())
         .create(user_id, name, "")
+        .await
+        .unwrap()
+        .id
+}
+
+async fn seed(pool: &PgPool, agent_id: i64, user_id: i64, label: &str) -> i64 {
+    VoiceprintStore::new(pool.clone())
+        .create_or_append(agent_id, user_id, label, None, vec192(0.5), 1)
         .await
         .unwrap()
         .id
@@ -151,4 +164,154 @@ async fn delete_is_scoped_by_ownership(pool: PgPool) {
     assert!(store.delete(agent, record.id, 1).await.unwrap());
     assert!(!store.delete(agent, record.id, 1).await.unwrap());
     assert!(store.list_for_agent(agent, 1).await.unwrap().is_empty());
+}
+
+#[sqlx::test]
+#[ignore]
+async fn list_scopes_by_ownership_and_hides_the_embedding(pool: PgPool) {
+    let app = app(pool.clone());
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent = owned_agent(&pool, user_id, "a").await;
+    seed(&pool, agent, user_id, "张三").await;
+
+    let body = expect_json(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/voiceprints"),
+            None,
+            Some(&cookie),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    let entry = &body[0];
+    assert_eq!(entry["label"], "张三");
+    assert_eq!(entry["agent_id"], agent);
+    assert_eq!(entry["sample_count"], 1);
+    assert!(entry["embedding"].is_null());
+    assert!(entry["created_at"].is_string());
+    assert!(entry["updated_at"].is_string());
+
+    let (other_cookie, _) = register(&app, &pool).await;
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/voiceprints"),
+            None,
+            Some(&other_cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = send(
+        &app,
+        request("GET", "/api/agents/999999/voiceprints", None, Some(&cookie)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/voiceprints"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn create_rejects_invalid_payloads_and_503s_without_the_model(pool: PgPool) {
+    let app = app(pool.clone());
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent = owned_agent(&pool, user_id, "a").await;
+    let path = format!("/api/agents/{agent}/voiceprints");
+
+    for payload in [
+        r#"{}"#,
+        r#"{"label":"","message_ids":[1]}"#,
+        r#"{"label":"张三","message_ids":[]}"#,
+        r#"{"label":"张三","message_ids":[1,2,3,4,5,6,7,8,9,10,11]}"#,
+    ] {
+        let res = send(&app, request("POST", &path, Some(payload), Some(&cookie))).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "payload: {payload}");
+    }
+
+    let res = send(
+        &app,
+        request(
+            "POST",
+            &path,
+            Some(r#"{"label":"张三","description":"主人","message_ids":[1,2]}"#),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn update_and_delete_over_rest_are_scoped_by_ownership(pool: PgPool) {
+    let app = app(pool.clone());
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent = owned_agent(&pool, user_id, "a").await;
+    let first = seed(&pool, agent, user_id, "first").await;
+    seed(&pool, agent, user_id, "second").await;
+    let path = format!("/api/agents/{agent}/voiceprints/{first}");
+
+    let body = expect_json(
+        &app,
+        request(
+            "PUT",
+            &path,
+            Some(r#"{"description":"新的描述"}"#),
+            Some(&cookie),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(body["label"], "first");
+    assert_eq!(body["description"], "新的描述");
+
+    for payload in [
+        r#"{}"#,
+        r#"{"label":""}"#,
+        &format!(r#"{{"description":"{}"}}"#, "长".repeat(201)),
+    ] {
+        let res = send(&app, request("PUT", &path, Some(payload), Some(&cookie))).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "payload: {payload}");
+    }
+
+    let res = send(
+        &app,
+        request("PUT", &path, Some(r#"{"label":"second"}"#), Some(&cookie)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+
+    let (other_cookie, _) = register(&app, &pool).await;
+    for (method, payload) in [("PUT", Some(r#"{"label":"stolen"}"#)), ("DELETE", None)] {
+        let res = send(&app, request(method, &path, payload, Some(&other_cookie))).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method}");
+    }
+
+    let res = send(&app, request("DELETE", &path, None, Some(&cookie))).await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let res = send(&app, request("DELETE", &path, None, Some(&cookie))).await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = send(
+        &app,
+        request("PUT", &path, Some(r#"{"label":"third"}"#), Some(&cookie)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

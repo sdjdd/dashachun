@@ -10,6 +10,7 @@ use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
 use crate::error::ErrorResponse;
 use crate::provider::dto::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
 use crate::settings::AudioCaptureSettings;
+use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, VoiceprintResponse};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -38,6 +39,10 @@ use crate::settings::AudioCaptureSettings;
         crate::routes::providers::activate_provider,
         crate::routes::audio_capture::get_capture,
         crate::routes::audio_capture::put_capture,
+        crate::routes::voiceprints::list_voiceprints,
+        crate::routes::voiceprints::create_voiceprint,
+        crate::routes::voiceprints::update_voiceprint,
+        crate::routes::voiceprints::delete_voiceprint,
     ),
     components(schemas(
         ErrorResponse,
@@ -54,6 +59,9 @@ use crate::settings::AudioCaptureSettings;
         UpdateProviderArgs,
         ProviderResponse,
         AudioCaptureSettings,
+        CreateVoiceprintArgs,
+        UpdateVoiceprintArgs,
+        VoiceprintResponse,
     )),
     modifiers(&CookieAuthAddon),
 )]
@@ -100,13 +108,15 @@ mod tests {
             "/api/providers/{id}",
             "/api/providers/{id}/activate",
             "/api/settings/audio-capture",
+            "/api/agents/{agent_id}/voiceprints",
+            "/api/agents/{agent_id}/voiceprints/{voiceprint_id}",
         ] {
             assert!(
                 paths.contains(&expected.to_owned()),
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 13, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 15, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));

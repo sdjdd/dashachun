@@ -46,6 +46,10 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
             auth: auth.clone(),
             server: server.clone(),
         });
+    let agents = routes::agents::routes().with_state(routes::agents::AgentsState {
+        auth: auth.clone(),
+        server: server.clone(),
+    });
     let router = Router::new()
         .route("/", get(async || "王老师，你看我鞋好看不"))
         .nest("/gateway", routes::gateway::routes())
@@ -53,10 +57,7 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         .with_state(server)
         .nest("/api/providers", providers)
         .nest("/api/auth", routes::auth::routes().with_state(auth.clone()))
-        .nest(
-            "/api/agents",
-            routes::agents::routes().with_state(auth.clone()),
-        )
+        .nest("/api/agents", agents)
         .nest("/api/devices", devices)
         .nest("/api/settings/audio-capture", audio_capture)
         .merge(Scalar::with_url("/scalar", docs::ApiDoc::openapi()))

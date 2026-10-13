@@ -28,6 +28,8 @@ pub enum AppError {
     Conflict(String),
     #[error("Not found")]
     NotFound,
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
     #[error("Internal error: {0}")]
     Internal(String),
 }
@@ -62,6 +64,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::TooManyRequests(_) => unreachable!(),
         };
