@@ -17,6 +17,7 @@ use crate::agent::{
 };
 use crate::util::recv_stream;
 use crate::vad::{Vad, VadEvent};
+use crate::voiceprint::{SAMPLE_RATE, SpeakerMatcher};
 
 enum AsrUpdate {
     Partial { epoch: u64, text: String },
@@ -36,6 +37,21 @@ pub(super) async fn listen_stage(
     let mut slot: Option<AsrSlot> = None;
     let mut epoch: u64 = 0;
     let mut live_turn: Option<CancellationToken> = None;
+    // The identification pipeline is a per-session capability: the matcher
+    // exists only when the agent has enrolled voiceprints and the model
+    // loaded, and the frontend only speaks 16 kHz — anything else runs
+    // without it (the repo has no resampler).
+    let speaker = match agent.speaker_matcher.as_ref() {
+        Some(matcher) if session.sample_rate == SAMPLE_RATE => Some(matcher),
+        Some(_) => {
+            debug!(
+                session_id = %session.id,
+                "voiceprint identification skipped: the uplink is not 16 kHz"
+            );
+            None
+        }
+        None => None,
+    };
     loop {
         tokio::select! {
             item = input.next() => {
@@ -66,7 +82,7 @@ pub(super) async fn listen_stage(
                             let events = vad.flush();
                             handle_vad_events(
                                 events,
-                                listen_deps(&session, &agent, &asr_tx),
+                                listen_deps(&session, &agent, &asr_tx, speaker),
                                 &mut epoch,
                                 &mut slot,
                             )
@@ -79,7 +95,7 @@ pub(super) async fn listen_stage(
                         let events = vad.push(&samples);
                         handle_vad_events(
                             events,
-                            listen_deps(&session, &agent, &asr_tx),
+                            listen_deps(&session, &agent, &asr_tx, speaker),
                             &mut epoch,
                             &mut slot,
                         )
@@ -177,6 +193,7 @@ fn listen_deps<'a>(
     session: &'a AgentSession,
     agent: &'a CompositeAgent,
     asr_tx: &'a mpsc::Sender<AsrUpdate>,
+    speaker: Option<&'a Arc<SpeakerMatcher>>,
 ) -> ListenDeps<'a> {
     ListenDeps {
         session,
@@ -184,6 +201,7 @@ fn listen_deps<'a>(
         asr_tx,
         memory: &agent.memory,
         capture: agent.capture.as_deref(),
+        speaker,
     }
 }
 
@@ -193,6 +211,7 @@ struct ListenDeps<'a> {
     asr_tx: &'a mpsc::Sender<AsrUpdate>,
     memory: &'a Arc<dyn Memory>,
     capture: Option<&'a dyn Capture>,
+    speaker: Option<&'a Arc<SpeakerMatcher>>,
 }
 
 async fn handle_vad_events(
@@ -209,12 +228,16 @@ async fn handle_vad_events(
                 let capture = deps
                     .capture
                     .map(|capture| capture.start_utterance(deps.session));
-                *slot = Some(spawn_asr(&deps, *epoch, capture));
+                let tap = deps.speaker.map(|speaker| speaker.tap(deps.session));
+                *slot = Some(spawn_asr(&deps, *epoch, capture, tap));
             }
             VadEvent::Speech { samples } => {
                 if let Some(current) = slot.as_ref() {
                     if let Some(capture) = &current.capture {
                         capture.push(&samples);
+                    }
+                    if let Some(tap) = &current.tap {
+                        tap.push(&samples);
                     }
                     if current.tx.send(samples).await.is_err() {
                         debug!(session_id = %deps.session.id, "asr input closed, dropping frame");
@@ -230,18 +253,25 @@ async fn handle_vad_events(
     }
 }
 
-/// One live per-utterance ASR task: its audio feed, the cancellable task
-/// and the utterance capture.
+/// One live per-utterance ASR task: its audio feed, the cancellable task,
+/// the utterance capture and the voiceprint tap.
 struct AsrSlot {
     tx: mpsc::Sender<Vec<f32>>,
     task: Cancellable,
     capture: Option<UtteranceCapture>,
+    tap: Option<UtteranceCapture>,
 }
 
 impl AsrSlot {
-    /// Lets the task run to its final on its own.
+    /// Lets the task run to its final on its own and closes the utterance:
+    /// the capture finishes inside the task (it learns its message id
+    /// there), the voiceprint tap finishes here — the speech segment is
+    /// complete, identification does not wait for the ASR final.
     fn detach(mut self) {
         self.task.detach();
+        if let Some(tap) = self.tap.take() {
+            tap.finish();
+        }
     }
 
     fn cancel(self) {
@@ -249,7 +279,12 @@ impl AsrSlot {
     }
 }
 
-fn spawn_asr(deps: &ListenDeps<'_>, epoch: u64, capture: Option<UtteranceCapture>) -> AsrSlot {
+fn spawn_asr(
+    deps: &ListenDeps<'_>,
+    epoch: u64,
+    capture: Option<UtteranceCapture>,
+    tap: Option<UtteranceCapture>,
+) -> AsrSlot {
     let (tx, rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
     let audio: AudioStream = recv_stream(rx);
     let cancel = CancellationToken::new();
@@ -267,6 +302,7 @@ fn spawn_asr(deps: &ListenDeps<'_>, epoch: u64, capture: Option<UtteranceCapture
         tx,
         task: Cancellable::new(cancel, handle),
         capture,
+        tap,
     }
 }
 

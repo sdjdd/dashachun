@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sqlx::PgPool;
+use tokio::sync::Mutex;
 
 use super::capture::{AudioCapture, AudioStorage};
 use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook, MemoryOwner};
@@ -12,6 +13,7 @@ use crate::device::DeviceRecord;
 use crate::error::AppError;
 use crate::provider::{ProviderRegistry, ProviderSpec};
 use crate::vad::VadFactory;
+use crate::voiceprint::{SpeakerMatcher, Voiceprint, VoiceprintStore};
 
 /// One generation of the shared provider bundle plus the per-device
 /// configuration source. Built through the [`ProviderRegistry`] from three
@@ -25,6 +27,7 @@ pub struct AgentFactory {
     llm: Arc<dyn Llm>,
     tts: Arc<dyn Tts>,
     vad: Arc<dyn VadFactory>,
+    voiceprint: Option<Arc<Mutex<Voiceprint>>>,
     tools: ToolSet,
     agents: AgentStore,
     pool: PgPool,
@@ -37,6 +40,7 @@ impl AgentFactory {
         llm: Arc<dyn Llm>,
         tts: Arc<dyn Tts>,
         vad: Arc<dyn VadFactory>,
+        voiceprint: Option<Arc<Mutex<Voiceprint>>>,
         tools: ToolSet,
         agents: AgentStore,
         pool: PgPool,
@@ -46,6 +50,7 @@ impl AgentFactory {
             llm,
             tts,
             vad,
+            voiceprint,
             tools,
             agents,
             pool,
@@ -59,6 +64,7 @@ impl AgentFactory {
         llm: &ProviderSpec,
         tts: &ProviderSpec,
         vad: Arc<dyn VadFactory>,
+        voiceprint: Option<Arc<Mutex<Voiceprint>>>,
         tools: ToolSet,
         agents: AgentStore,
         pool: PgPool,
@@ -74,7 +80,9 @@ impl AgentFactory {
         let llm = registry.build_llm(&llm.kind, &llm.config)?;
         tracing::info!(stage = "tts", kind = %tts.kind, "constructing provider");
         let tts = registry.build_tts(&tts.kind, &tts.config)?;
-        Ok(Self::new(asr, llm, tts, vad, tools, agents, pool))
+        Ok(Self::new(
+            asr, llm, tts, vad, voiceprint, tools, agents, pool,
+        ))
     }
 
     pub async fn build(
@@ -136,6 +144,27 @@ impl AgentFactory {
         )
         .await?;
         let tools = self.tools.clone().merge(memory_tools(&entries));
+        // The voiceprint feature plugs in here like the audio capture: the
+        // model is the boot slot, the agent's enrolled voiceprints are read
+        // once per session. An agent without enrollments — or without the
+        // model — gets no matcher and runs no identification pipeline at
+        // all; enrollments made later join at the next session.
+        let speaker_matcher = match &self.voiceprint {
+            Some(model) => {
+                let voiceprints = VoiceprintStore::new(self.pool.clone())
+                    .embeddings_for_agent(agent_id)
+                    .await?;
+                if !voiceprints.is_empty() {
+                    tracing::info!(
+                        agent_id,
+                        voiceprints = voiceprints.len(),
+                        "voiceprint identification enabled"
+                    );
+                }
+                SpeakerMatcher::new(model.clone(), voiceprints).map(Arc::new)
+            }
+            None => None,
+        };
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
             llm: self.llm.clone(),
@@ -146,6 +175,7 @@ impl AgentFactory {
             tools: Arc::new(tools),
             system_prompt: SystemPrompt::new(&agent.persona_prompt),
             capture: Some(audio as Arc<dyn Capture>),
+            speaker_matcher,
         }))
     }
 

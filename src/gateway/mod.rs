@@ -221,6 +221,7 @@ mod tests {
             &ProviderSpec::stub(),
             &ProviderSpec::stub(),
             vad.clone(),
+            None,
             tools.clone(),
             AgentStore::new(pool.clone()),
             pool.clone(),

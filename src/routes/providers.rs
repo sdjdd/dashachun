@@ -306,6 +306,7 @@ async fn apply_generation(server: &ServerState, pool: &PgPool) -> Result<(), App
         &llm_spec,
         &tts_spec,
         server.vad.clone(),
+        server.voiceprint(),
         server.tools.clone(),
         AgentStore::new(pool.clone()),
         pool.clone(),

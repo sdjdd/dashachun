@@ -19,7 +19,8 @@ pub struct VoiceprintStore {
 
 /// The row as the REST surface returns it — the 192-float embedding is
 /// deliberately left out: lists and edits never carry the vector, and the
-/// future identification flow reads it through its own query.
+/// identification flow reads it through its own query
+/// ([`VoiceprintStore::embeddings_for_agent`]).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct VoiceprintRecord {
     pub id: i64,
@@ -29,6 +30,14 @@ pub struct VoiceprintRecord {
     pub sample_count: i32,
     pub created_at: time::OffsetDateTime,
     pub updated_at: time::OffsetDateTime,
+}
+
+/// The identification read shape: one enrolled label with its embedding
+/// vector — the vector the REST surface deliberately never carries.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EnrolledEmbedding {
+    pub label: String,
+    pub embedding: Vec<f32>,
 }
 
 impl VoiceprintStore {
@@ -140,6 +149,24 @@ impl VoiceprintStore {
         )
         .bind(agent_id)
         .bind(user_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// The agent's enrolled voiceprints with their embedding vectors — the
+    /// session-side identification read (`AgentFactory::build`). Server-internal:
+    /// `agent_id` comes from the verified device binding, so unlike the REST
+    /// queries there is no caller scope to resolve. An agent without
+    /// voiceprints yields an empty vec — no identification pipeline at all.
+    pub async fn embeddings_for_agent(
+        &self,
+        agent_id: i64,
+    ) -> Result<Vec<EnrolledEmbedding>, AppError> {
+        let rows = sqlx::query_as::<_, EnrolledEmbedding>(
+            "SELECT label, embedding FROM voiceprints WHERE agent_id = $1 ORDER BY id",
+        )
+        .bind(agent_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)

@@ -1,22 +1,24 @@
 //! Speaker embeddings (voiceprint) — a standalone capability module, not an
-//! agent-stage provider (there is no `Asr`-style trait here yet). 16 kHz mono
-//! s16le PCM in, CAM++ embedding out. The ONNX graph carries only the
-//! network; the Kaldi fbank frontend (80 mel bins, 25 ms frames / 10 ms
-//! shift, dither 0) and the per-utterance mel-mean normalization live here,
-//! matching the sherpa-onnx `3d-speaker` export contract. The first
-//! consumer — enrollment over captured conversation audio (`store.rs`,
-//! `enroll.rs`, the `/api/agents/{agent_id}/voiceprints` REST, the model
-//! slot `main.rs` fills at boot) — is live; per-turn identification and
-//! prompt injection come later — the integration notes live in this
+//! agent-stage provider (no `Asr`-style trait). 16 kHz mono s16le PCM in,
+//! CAM++ embedding out. The ONNX graph carries only the network; the Kaldi
+//! fbank frontend (80 mel bins, 25 ms frames / 10 ms shift, dither 0) and
+//! the per-utterance mel-mean normalization live here, matching the
+//! sherpa-onnx `3d-speaker` export contract. Two consumers are live:
+//! enrollment over captured conversation audio (`store.rs`, `enroll.rs`,
+//! the `/api/agents/{agent_id}/voiceprints` REST) and session-side
+//! identification (`identify.rs` — a debug-log attribution per utterance);
+//! prompt injection comes later — the integration notes live in this
 //! directory's README.md.
 
 mod store;
 
 pub mod dto;
 mod enroll;
+mod identify;
 
 pub use enroll::enroll;
-pub use store::{VoiceprintRecord, VoiceprintStore};
+pub use identify::{Identification, SpeakerMatcher};
+pub use store::{EnrolledEmbedding, VoiceprintRecord, VoiceprintStore};
 
 use std::path::Path;
 
@@ -46,10 +48,17 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// may differ — the ignored model test asserts this constant.
 pub const EMBEDDING_DIM: usize = 192;
 
+/// Cosine similarity above which an utterance is attributed to a voiceprint
+/// (same speaker ≈ 0.65–0.8, different speakers ≈ 0). The voiceprint-api
+/// convention; a settings surface can come later.
+pub const MATCH_THRESHOLD: f32 = 0.4;
+
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceprintError {
     #[error("onnx: {0}")]
     Onnx(String),
+    #[error("embedding task failed: {0}")]
+    Task(String),
     #[error("empty pcm input")]
     EmptyInput,
     #[error("model has no `embedding` output")]

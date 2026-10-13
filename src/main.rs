@@ -109,6 +109,7 @@ async fn main() {
             &llm,
             &tts,
             vad.clone(),
+            voiceprint.clone(),
             tools.clone(),
             AgentStore::new(pool.clone()),
             pool.clone(),
@@ -213,24 +214,27 @@ async fn build_audio_storage(capture: &AudioCaptureSettings) -> Option<Arc<dyn A
     Some(Arc::new(oss))
 }
 
-/// Loads the pinned CAM++ model into the enrollment slot. The voiceprint
-/// feature is optional: a missing or unreadable model file only switches
-/// enrollment off (the REST answers 503), never exits the server — the
-/// same fail-open reasoning as the audio capture, in contrast to the VAD
-/// model, whose absence kills the boot (core-pipeline tier). `just model`
-/// fetches the pinned file.
+/// Loads the pinned CAM++ model into the voiceprint slot. The feature is
+/// optional: a missing or unreadable model file only switches the voiceprint
+/// features off (enrollment answers 503, identification is skipped), never
+/// exits the server — the same fail-open reasoning as the audio capture, in
+/// contrast to the VAD model, whose absence kills the boot (core-pipeline
+/// tier). `just model` fetches the pinned file.
 fn build_voiceprint() -> Option<Arc<tokio::sync::Mutex<Voiceprint>>> {
     let path = env::var("VOICEPRINT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string());
     match Voiceprint::load(&path) {
         Ok(model) => {
-            tracing::info!(%path, "voiceprint model loaded; enrollment enabled");
+            tracing::info!(
+                %path,
+                "voiceprint model loaded; enrollment and identification enabled"
+            );
             Some(Arc::new(tokio::sync::Mutex::new(model)))
         }
         Err(err) => {
             tracing::warn!(
                 %path,
                 %err,
-                "voiceprint model not loaded; enrollment is off (POST voiceprints answers 503) — run `just model` or point VOICEPRINT_MODEL at the file"
+                "voiceprint model not loaded; enrollment and identification are off (POST voiceprints answers 503) — run `just model` or point VOICEPRINT_MODEL at the file"
             );
             None
         }

@@ -264,6 +264,7 @@ fn stub_agent() -> CompositeAgent {
         tools: empty_tools(),
         system_prompt: SystemPrompt::default(),
         capture: None,
+        speaker_matcher: None,
     }
 }
 

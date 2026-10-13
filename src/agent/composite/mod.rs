@@ -17,6 +17,7 @@ use crate::agent::{
 };
 use crate::util::recv_stream;
 use crate::vad::VadFactory;
+use crate::voiceprint::SpeakerMatcher;
 
 use listen::listen_stage;
 use reply::{ReplyEvent, reply_stage};
@@ -39,6 +40,7 @@ pub struct CompositeAgent {
     pub tools: Arc<ToolSet>,
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
+    pub speaker_matcher: Option<Arc<SpeakerMatcher>>,
 }
 
 impl Agent for CompositeAgent {

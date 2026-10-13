@@ -619,6 +619,37 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
+async fn embeddings_for_agent_reads_the_identification_vectors(pool: PgPool) {
+    let store = VoiceprintStore::new(pool.clone());
+    let mine = owned_agent(&pool, 1, "mine").await;
+    let theirs = owned_agent(&pool, 2, "theirs").await;
+    store
+        .create_or_append(mine, 1, "张三", None, vec192(0.5), 1)
+        .await
+        .unwrap();
+    store
+        .create_or_append(theirs, 2, "李四", None, vec192(0.5), 1)
+        .await
+        .unwrap();
+
+    // The identification read is agent-scoped and carries the vector the
+    // REST surface hides.
+    let embeddings = store.embeddings_for_agent(mine).await.unwrap();
+    assert_eq!(embeddings.len(), 1);
+    assert_eq!(embeddings[0].label, "张三");
+    assert_eq!(embeddings[0].embedding, vec192(0.5));
+
+    assert!(
+        store
+            .embeddings_for_agent(999_999)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[sqlx::test]
+#[ignore]
 async fn update_and_delete_over_rest_are_scoped_by_ownership(pool: PgPool) {
     let app = app(pool.clone());
     let (cookie, user_id) = register(&app, &pool).await;

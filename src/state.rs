@@ -67,10 +67,11 @@ impl ServerState {
     }
 
     /// The CAM++ model loaded once at boot — `None` when the model file is
-    /// missing, which turns voiceprint enrollment into 503 while the rest of
-    /// the server runs (optional capability, unlike VAD). `embed` takes
-    /// `&mut self`, so handlers clone this handle and lock it inside
-    /// `spawn_blocking` (`blocking_lock`).
+    /// missing, which turns voiceprint enrollment into 503 and skips
+    /// identification while the rest of the server runs (optional
+    /// capability, unlike VAD). `embed` takes `&mut self`, so consumers
+    /// clone this handle and lock it inside `spawn_blocking`
+    /// (`blocking_lock`).
     pub fn voiceprint(&self) -> Option<Arc<Mutex<Voiceprint>>> {
         self.voiceprint.clone()
     }
@@ -147,6 +148,7 @@ mod tests {
             &ProviderSpec::stub(),
             &ProviderSpec::stub(),
             vad,
+            None,
             tools,
             AgentStore::new(pool.clone()),
             pool,

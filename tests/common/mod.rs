@@ -137,6 +137,7 @@ fn test_state_with_registry_inner(
         &ProviderSpec::stub(),
         &ProviderSpec::stub(),
         vad.clone(),
+        voiceprint.clone(),
         tools.clone(),
         AgentStore::new(pool.clone()),
         pool.clone(),
