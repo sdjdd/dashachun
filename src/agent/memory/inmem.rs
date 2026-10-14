@@ -9,9 +9,9 @@ use super::{Memory, Turn, trim};
 
 /// Keeps the conversation in process memory, starting empty; its state dies
 /// with the session. Test helper — mirrors the durable semantics (the
-/// production [`super::DbMemory`] adds the Postgres writes): empty
-/// utterances, empty turns and empty partials store nothing; the store
-/// calls are recorded for assertions.
+/// production [`super::DbMemory`] adds the Postgres writes and the hook
+/// fan-out): empty utterances, empty turns and empty partials store
+/// nothing; the store calls are recorded for assertions.
 #[derive(Default)]
 pub struct InMemMemory {
     turns: Mutex<Vec<Turn>>,
@@ -49,7 +49,7 @@ impl Memory for InMemMemory {
             .collect()
     }
 
-    async fn append(&self, items: Vec<ChatItem>) {
+    async fn append(&self, _session: &AgentSession, items: Vec<ChatItem>) {
         let mut turns = self.turns.lock().unwrap();
         match items.first() {
             Some(ChatItem::User { .. }) => turns.push(Turn(items)),
@@ -96,10 +96,10 @@ mod tests {
         let total = HISTORY_TURNS + 5;
         for turn in 1..=total {
             memory
-                .append(vec![ChatItem::user(format!("u{turn}"))])
+                .append(&session(), vec![ChatItem::user(format!("u{turn}"))])
                 .await;
             memory
-                .append(vec![ChatItem::assistant(format!("a{turn}"))])
+                .append(&session(), vec![ChatItem::assistant(format!("a{turn}"))])
                 .await;
         }
 
@@ -120,29 +120,37 @@ mod tests {
         let memory = InMemMemory::default();
         for turn in 1..HISTORY_TURNS {
             memory
-                .append(vec![ChatItem::user(format!("u{turn}"))])
+                .append(&session(), vec![ChatItem::user(format!("u{turn}"))])
                 .await;
             memory
-                .append(vec![ChatItem::assistant(format!("a{turn}"))])
+                .append(&session(), vec![ChatItem::assistant(format!("a{turn}"))])
                 .await;
         }
-        memory.append(vec![ChatItem::user("tool turn")]).await;
         memory
-            .append(vec![
-                ChatItem::assistant_tool_calls(vec![ToolCall {
-                    id: "1".into(),
-                    name: "get_weather".into(),
-                    arguments: "{}".into(),
-                }]),
-                ChatItem::tool("1", "sunny"),
-            ])
+            .append(&session(), vec![ChatItem::user("tool turn")])
+            .await;
+        memory
+            .append(
+                &session(),
+                vec![
+                    ChatItem::assistant_tool_calls(vec![ToolCall {
+                        id: "1".into(),
+                        name: "get_weather".into(),
+                        arguments: "{}".into(),
+                    }]),
+                    ChatItem::tool("1", "sunny"),
+                ],
+            )
             .await;
         for turn in 1..HISTORY_TURNS {
             memory
-                .append(vec![ChatItem::user(format!("late{turn}"))])
+                .append(&session(), vec![ChatItem::user(format!("late{turn}"))])
                 .await;
             memory
-                .append(vec![ChatItem::assistant(format!("late a{turn}"))])
+                .append(
+                    &session(),
+                    vec![ChatItem::assistant(format!("late a{turn}"))],
+                )
                 .await;
         }
 
@@ -168,26 +176,31 @@ mod tests {
         let memory = InMemMemory::default();
         for turn in 1..HISTORY_TURNS {
             memory
-                .append(vec![ChatItem::user(format!("u{turn}"))])
+                .append(&session(), vec![ChatItem::user(format!("u{turn}"))])
                 .await;
             memory
-                .append(vec![ChatItem::assistant(format!("a{turn}"))])
+                .append(&session(), vec![ChatItem::assistant(format!("a{turn}"))])
                 .await;
         }
-        memory.append(vec![ChatItem::user("u")]).await;
+        memory.append(&session(), vec![ChatItem::user("u")]).await;
         memory
-            .append(vec![ChatItem::assistant("thinking out loud")])
+            .append(&session(), vec![ChatItem::assistant("thinking out loud")])
             .await;
         memory
-            .append(vec![ChatItem::assistant_tool_calls(vec![ToolCall {
-                id: "1".into(),
-                name: "get_weather".into(),
-                arguments: "{}".into(),
-            }])])
+            .append(
+                &session(),
+                vec![ChatItem::assistant_tool_calls(vec![ToolCall {
+                    id: "1".into(),
+                    name: "get_weather".into(),
+                    arguments: "{}".into(),
+                }])],
+            )
             .await;
-        memory.append(vec![ChatItem::tool("1", "sunny")]).await;
         memory
-            .append(vec![ChatItem::assistant("sunny today")])
+            .append(&session(), vec![ChatItem::tool("1", "sunny")])
+            .await;
+        memory
+            .append(&session(), vec![ChatItem::assistant("sunny today")])
             .await;
 
         let history = memory.history().await;

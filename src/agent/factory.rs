@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use super::capture::{AudioCapture, AudioStorage};
-use super::memory::{DbEntryMemory, DbMemory, EntryMemory, MemoryHook};
+use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook};
 use super::store::AgentStore;
 use super::tool::memory_tools;
 use super::{
@@ -119,26 +119,6 @@ impl AgentFactory {
             record.client_id,
             audio_storage,
         ));
-        // The extractor hook is temporarily disabled — memory runs on the
-        // tools alone until the extractor is restored. Its wiring, the
-        // Extractor itself and its memory_propose tool are all kept for
-        // that; restoring is re-importing Extractor and registering it
-        // here as the memory's second hook again (it owns exactly this
-        // connection's rows: the announced
-        // ids buffer until a batch is full, then one background extraction
-        // proposes entry changes against the same entry memory the tools
-        // write and the prompt reads).
-        // let extractor = Extractor::new(
-        //     self.pool.clone(),
-        //     agent_id,
-        //     Arc::clone(&self.llm),
-        //     Arc::clone(&entries),
-        // );
-        let memory = DbMemory::new(
-            self.pool.clone(),
-            vec![audio.clone() as Arc<dyn MemoryHook>],
-        );
-        let tools = self.tools.clone().merge(memory_tools(&entries));
         // The voiceprint feature plugs in here like the audio capture: the
         // model is the boot slot, the agent's enrolled voiceprints are read
         // once per session — as the matcher's candidates and, from the same
@@ -174,6 +154,25 @@ impl AgentFactory {
             }
             None => (None, Vec::new()),
         };
+        // The background extractor is the memory's second hook, next to the
+        // audio capture: it sees exactly this connection's window appends —
+        // the announced batches buffer until a batch is full, then one
+        // background extraction proposes entry changes against the same
+        // entry memory the tools write and the prompt reads, with the
+        // session's speaker roster in its prompt.
+        let extractor = Arc::new(Extractor::new(
+            Arc::clone(&self.llm),
+            Arc::clone(&entries),
+            speakers.clone(),
+        ));
+        let memory = DbMemory::new(
+            self.pool.clone(),
+            vec![
+                audio.clone() as Arc<dyn MemoryHook>,
+                extractor as Arc<dyn MemoryHook>,
+            ],
+        );
+        let tools = self.tools.clone().merge(memory_tools(&entries));
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),
             llm: self.llm.clone(),

@@ -47,18 +47,29 @@ impl Memory for DbMemory {
             .collect()
     }
 
-    async fn append(&self, items: Vec<ChatItem>) {
-        let mut turns = self.turns.lock().unwrap();
-        match items.first() {
-            Some(ChatItem::User { .. }) => turns.push(Turn(items)),
-            Some(_) => {
-                if let Some(turn) = turns.last_mut() {
-                    turn.0.extend(items);
-                }
-            }
-            None => {}
+    async fn append(&self, session: &AgentSession, items: Vec<ChatItem>) {
+        if items.is_empty() {
+            return;
         }
-        trim(&mut turns);
+        {
+            let mut turns = self.turns.lock().unwrap();
+            match items.first() {
+                Some(ChatItem::User { .. }) => turns.push(Turn(items.clone())),
+                Some(_) => {
+                    if let Some(turn) = turns.last_mut() {
+                        turn.0.extend(items.iter().cloned());
+                    }
+                }
+                None => {}
+            }
+            trim(&mut turns);
+        }
+        // Outside the window lock and after trim — the hook receives the
+        // batch verbatim, and everything announced is in the window: items
+        // land at the tail, trim only drops from the front.
+        for hook in &self.hooks {
+            hook.appended(session, &items);
+        }
     }
 
     async fn store_utterance(&self, session: &AgentSession, text: &str) -> Result<(), String> {

@@ -19,7 +19,9 @@ use tower::ServiceExt;
 
 pub type TestApp = tower_http::normalize_path::NormalizePath<axum::Router>;
 
-use dashachun::agent::{AgentFactory, AgentSession, AgentStore, AudioStorage, MemoryHook, ToolSet};
+use dashachun::agent::{
+    AgentFactory, AgentSession, AgentStore, AudioStorage, ChatItem, MemoryHook, ToolSet,
+};
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
@@ -284,11 +286,13 @@ pub async fn device_session(pool: &PgPool, id: &str, device_id: i64, agent_id: i
         .unwrap();
 }
 
-/// Records the message ids the memory announces, for hook assertions.
+/// Records the message ids the memory announces and the batches it hands
+/// to the window hook, for hook assertions.
 #[derive(Default)]
 pub struct RecordingHook {
     utterances: Mutex<Vec<i64>>,
     turns: Mutex<Vec<i64>>,
+    appends: Mutex<Vec<Vec<ChatItem>>>,
 }
 
 impl MemoryHook for RecordingHook {
@@ -299,6 +303,10 @@ impl MemoryHook for RecordingHook {
     fn turn_stored(&self, _session: &AgentSession, message_id: i64) {
         self.turns.lock().unwrap().push(message_id);
     }
+
+    fn appended(&self, _session: &AgentSession, items: &[ChatItem]) {
+        self.appends.lock().unwrap().push(items.to_vec());
+    }
 }
 
 impl RecordingHook {
@@ -308,6 +316,10 @@ impl RecordingHook {
 
     pub fn turn_ids(&self) -> Vec<i64> {
         self.turns.lock().unwrap().clone()
+    }
+
+    pub fn appends(&self) -> Vec<Vec<ChatItem>> {
+        self.appends.lock().unwrap().clone()
     }
 }
 

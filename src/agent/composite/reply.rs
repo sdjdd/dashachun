@@ -238,11 +238,14 @@ pub(super) async fn reply_stage(
                         }
                         agent
                             .memory
-                            .append(vec![ChatItem::user(labelled_utterance(
-                                text,
-                                speaker,
-                                &agent.speakers,
-                            ))])
+                            .append(
+                                &session,
+                                vec![ChatItem::user(labelled_utterance(
+                                    text,
+                                    speaker,
+                                    &agent.speakers,
+                                ))],
+                            )
                             .await;
                         let entries = agent.entries.list().await;
                         let prompt = agent.system_prompt.for_turn(&entries, &agent.speakers);
@@ -332,7 +335,7 @@ pub(super) async fn reply_stage(
                         info!(session_id = %session.id, %text, "llm result");
                         agent.memory.log_items(&session, items.clone());
                         reply.turn_logged = true;
-                        agent.memory.append(items).await;
+                        agent.memory.append(&session, items).await;
                     }
                     ReplyEvent::Failed { message } => {
                         warn!(session_id = %session.id, %message, "llm failed");

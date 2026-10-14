@@ -1,31 +1,33 @@
 //! The memory extractor: distills conversation batches into entry-memory
 //! changes in the background. One extractor per connection implements
-//! [`MemoryHook`] and owns exactly the rows its own connection wrote — the
-//! announced ids buffer in memory until [`BATCH_ROWS`] of them are pending,
-//! then one flush reads them back from the log and puts a forced
+//! [`MemoryHook`] and sees exactly what its own connection's warm window
+//! receives — the hook-announced append batches buffer in memory until
+//! [`BATCH_ITEMS`] items are pending, then one flush puts a forced
 //! [`MemoryPropose`] decision through the generation loop; dropping the
 //! connection flushes whatever is left. There is no durable extraction
-//! state: rows loaded at connection time count as seen (a past connection
-//! either flushed them or died), so a crash only ever loses the crashed
-//! connection's unflushed tail.
+//! state: a crash only ever loses the crashed connection's unflushed tail,
+//! and so does a flush whose LLM call failed — its items go back to the
+//! front of the buffer (order preserved) and retry on the next trigger or
+//! at teardown.
 
 use std::sync::{Arc, LazyLock, Mutex};
 
 use minijinja::{Environment, Value, context, syntax::SyntaxConfig};
-use sqlx::PgPool;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::{debug, warn};
 
 use crate::agent::tool::{MemoryPropose, ToolSet, stop_after_proposal};
 use crate::agent::{
-    AgentSession, ChatItem, Llm, ReasoningEffort, StreamTextParams, Tool, ToolChoice, generate_text,
+    AgentSession, ChatItem, Llm, ReasoningEffort, Speaker, StreamTextParams, Tool, ToolChoice,
+    generate_text,
 };
 
 use super::{EntryMemory, MAX_ENTRIES, MemoryEntry, MemoryHook, entry_id};
 
-/// Flushes once this many of the connection's own rows are pending — about
+/// Flushes once this many buffered conversation items are pending — about
 /// six turns of dialogue per extraction call.
-const BATCH_ROWS: usize = 12;
+const BATCH_ITEMS: usize = 12;
 
 const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（助手）与用户的对话，对照现有记忆条目，把值得长期保留的信息整理成对条目的修改，然后通过 memory_propose 工具一次性提交：
 - 只记稳定有用的事实：身份、偏好、习惯、重要关系、长期计划等；寒暄和一次性事务不记。
@@ -33,6 +35,25 @@ const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（
 - 条目接近上限（{{ max_entries }}）时优先更新或删除，而不是新增。
 - 每条内容一句话，自包含，第三人称。
 - 没有值得记录的就提交空列表。
+
+对话以消息列表的形式附在本提示之后。{% if days %}本批对话发生在 {{ days|first }}{% if days|length > 1 %} 至 {{ days|last }}{% endif %}。{% endif %}
+{% if speakers %}
+
+## 说话人
+
+<known_speakers>
+{% for speaker in speakers %}
+  <speaker id="{{ speaker.id }}" name="{{ speaker.name }}">
+{% if speaker.description %}
+    <description>{{ speaker.description }}</description>
+{% endif %}
+  </speaker>
+{% endfor %}
+</known_speakers>
+
+每条用户消息开头的 [speaker_id={id}] 标记了说话人：{id} 对应名册中的一位，unknown 表示未能识别。
+说话人身份不作为记忆内容——不要记录谁在说话或如何称呼；说话人谈到的事实照常记录。
+{% endif %}
 
 ## 现有记忆条目
 {% if entries %}
@@ -42,12 +63,6 @@ const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（
 {% else %}
 （暂无）
 {% endif %}"#;
-
-const EXTRACT_USER: &str = r#"对话记录{% if days|length == 1 %}（{{ days|first }}）{% elif days|length > 1 %}（{{ days|first }} 至 {{ days|last }}）{% endif %}：
-
-{% for line in dialogue %}
-{{ line.speaker }}：{{ line.text }}
-{% endfor %}"#;
 
 static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
     let mut env = Environment::new();
@@ -60,16 +75,13 @@ static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
     );
     env.add_template("extract_system", EXTRACT_SYSTEM)
         .expect("valid extractor system template");
-    env.add_template("extract_user", EXTRACT_USER)
-        .expect("valid extractor user template");
     env
 });
 
 pub struct Extractor {
-    pool: PgPool,
-    agent_id: i64,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
+    speakers: Vec<Speaker>,
     propose: ToolSet,
     state: Arc<Mutex<ExtractState>>,
     flush_lock: Arc<AsyncMutex<()>>,
@@ -77,22 +89,16 @@ pub struct Extractor {
 
 #[derive(Default)]
 struct ExtractState {
-    pending: Vec<i64>,
+    pending: Vec<(String, ChatItem)>,
 }
 
 impl Extractor {
-    pub fn new(
-        pool: PgPool,
-        agent_id: i64,
-        llm: Arc<dyn Llm>,
-        entries: Arc<dyn EntryMemory>,
-    ) -> Self {
+    pub fn new(llm: Arc<dyn Llm>, entries: Arc<dyn EntryMemory>, speakers: Vec<Speaker>) -> Self {
         let propose = ToolSet::new().tool(MemoryPropose::new(Arc::clone(&entries)));
         Self {
-            pool,
-            agent_id,
             llm,
             entries,
+            speakers,
             propose,
             state: Arc::new(Mutex::new(ExtractState::default())),
             flush_lock: Arc::new(AsyncMutex::new(())),
@@ -103,23 +109,12 @@ impl Extractor {
     /// tool comes from the entry built once at construction.
     fn flush_task(&self) -> FlushTask {
         FlushTask {
-            pool: self.pool.clone(),
-            agent_id: self.agent_id,
             llm: Arc::clone(&self.llm),
             entries: Arc::clone(&self.entries),
+            speakers: self.speakers.clone(),
             propose: self.propose.clone(),
             state: Arc::clone(&self.state),
         }
-    }
-
-    fn poke(&self, message_id: i64) {
-        let mut state = self.state.lock().unwrap();
-        state.pending.push(message_id);
-        if state.pending.len() < BATCH_ROWS {
-            return;
-        }
-        drop(state);
-        self.spawn_flush();
     }
 
     /// Becomes the flusher unless one is already running — the try-lock is
@@ -139,12 +134,20 @@ impl Extractor {
 }
 
 impl MemoryHook for Extractor {
-    fn utterance_stored(&self, _session: &AgentSession, message_id: i64) {
-        self.poke(message_id);
-    }
-
-    fn turn_stored(&self, _session: &AgentSession, message_id: i64) {
-        self.poke(message_id);
+    fn appended(&self, _session: &AgentSession, items: &[ChatItem]) {
+        if items.is_empty() {
+            return;
+        }
+        let day = today();
+        let mut state = self.state.lock().unwrap();
+        state
+            .pending
+            .extend(items.iter().map(|item| (day.clone(), item.clone())));
+        if state.pending.len() < BATCH_ITEMS {
+            return;
+        }
+        drop(state);
+        self.spawn_flush();
     }
 }
 
@@ -174,16 +177,15 @@ impl Drop for Extractor {
 /// The flush's state-carrying clone: everything a detached task needs to run
 /// batches and restore them on failure.
 struct FlushTask {
-    pool: PgPool,
-    agent_id: i64,
     llm: Arc<dyn Llm>,
     entries: Arc<dyn EntryMemory>,
+    speakers: Vec<Speaker>,
     propose: ToolSet,
     state: Arc<Mutex<ExtractState>>,
 }
 
 impl FlushTask {
-    fn take_pending(&self) -> Vec<i64> {
+    fn take_pending(&self) -> Vec<(String, ChatItem)> {
         std::mem::take(&mut self.state.lock().unwrap().pending)
     }
 
@@ -191,21 +193,21 @@ impl FlushTask {
     /// keeps every poke that lands mid-flush buffered instead of spawning a
     /// second flush; the same guard serializes the teardown flush behind a
     /// still-running one.
-    async fn flush_all(self, _guard: OwnedMutexGuard<()>, mut batch: Vec<i64>) {
+    async fn flush_all(self, _guard: OwnedMutexGuard<()>, mut batch: Vec<(String, ChatItem)>) {
         loop {
             if let Err(err) = run_flush(&self, &batch).await {
-                warn!(%err, count = batch.len(), "memory extraction failed; the rows stay pending");
+                warn!(%err, count = batch.len(), "memory extraction failed; the items stay pending");
                 let mut state = self.state.lock().unwrap();
                 // Back to the front, so the retried batch keeps its order
                 // around whatever pokes landed meanwhile. Only another full
-                // batch with fresh rows continues — a pure retry waits for
+                // batch with fresh items continues — a pure retry waits for
                 // the next trigger instead of spinning on a broken store.
                 let restored = batch.len();
                 state.pending.splice(.., batch);
                 if state.pending.len() <= restored {
                     return;
                 }
-            } else if self.state.lock().unwrap().pending.len() < BATCH_ROWS {
+            } else if self.state.lock().unwrap().pending.len() < BATCH_ITEMS {
                 return;
             }
             batch = self.take_pending();
@@ -216,38 +218,18 @@ impl FlushTask {
     }
 }
 
-/// One extraction: load the batch's rows, keep the dialogue (user utterances
-/// and spoken assistant text), and put one forced decision call through the
-/// loop. An error leaves the rows to the next flush — the caller restores
-/// them.
-async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
-    let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(
-        "SELECT m.message, to_char(m.created_at, 'YYYY-MM-DD') FROM messages m \
-         JOIN device_sessions ds ON ds.id = m.session_id \
-         WHERE m.id = ANY($1) AND ds.agent_id = $2 ORDER BY m.id",
-    )
-    .bind(ids.to_vec())
-    .bind(task.agent_id)
-    .fetch_all(&task.pool)
-    .await
-    .map_err(|err| err.to_string())?;
-    let mut items = Vec::with_capacity(rows.len());
-    let mut days: Vec<String> = Vec::new();
-    for (value, day) in rows {
-        if days.last() != Some(&day) {
-            days.push(day);
-        }
-        match serde_json::from_value(value) {
-            Ok(item) => items.push(item),
-            Err(err) => warn!(%err, "skipping an unreadable message row"),
-        }
-    }
-    let dialogue = dialogue_lines(&items);
-    if dialogue.is_empty() {
+/// One extraction: keep the dialogue out of the batch — user utterances and
+/// spoken assistant text, exactly as the agent's context carries them — and
+/// put one forced decision call through the loop. An error leaves the items
+/// to the next flush — the caller restores them.
+async fn run_flush(task: &FlushTask, batch: &[(String, ChatItem)]) -> Result<(), String> {
+    let conversation = conversation_items(batch.iter().map(|(_, item)| item));
+    if conversation.is_empty() {
         return Ok(());
     }
+    let days = day_span(batch.iter().map(|(day, _)| day));
     let entries = task.entries.list().await;
-    let messages = build_messages(&entries, &dialogue, &days);
+    let messages = build_messages(&entries, &task.speakers, &conversation, &days);
     let result = generate_text(
         StreamTextParams::builder(task.llm.as_ref())
             .messages(messages)
@@ -263,46 +245,60 @@ async fn run_flush(task: &FlushTask, ids: &[i64]) -> Result<(), String> {
     .map_err(|err| err.to_string())?;
     debug!(
         steps = result.steps,
-        rows = ids.len(),
+        items = batch.len(),
         "memory extraction flush finished"
     );
     Ok(())
 }
 
-/// The batch's dialogue lines — user utterances and spoken assistant text in
-/// order; tool exchange rows are plumbing, not conversation.
-#[derive(Debug, PartialEq)]
-struct DialogueLine {
-    speaker: &'static str,
-    text: String,
-}
-
-fn dialogue_lines(items: &[ChatItem]) -> Vec<DialogueLine> {
+/// The batch's dialogue — user utterances and spoken assistant text in
+/// order, handed over verbatim (speaker labels included); tool exchange
+/// items are plumbing, not conversation.
+fn conversation_items<'a>(items: impl Iterator<Item = &'a ChatItem>) -> Vec<ChatItem> {
     items
-        .iter()
         .filter_map(|item| match item {
-            ChatItem::User { content } => Some(DialogueLine {
-                speaker: "用户",
-                text: content.clone(),
-            }),
+            ChatItem::User { .. } => Some(item.clone()),
             ChatItem::Assistant { content, .. } => content
                 .as_deref()
                 .filter(|text| !text.is_empty())
-                .map(|text| DialogueLine {
-                    speaker: "助手",
-                    text: text.into(),
-                }),
+                .map(|text| ChatItem::assistant(text.to_owned())),
             _ => None,
         })
         .collect()
 }
 
-/// The flush's one exchange: the job description plus the current entries as
-/// the system prompt, the dialogue batch as the user turn — both rendered
-/// whole from the module's templates.
+/// The batch's distinct days in arrival order — arrivals are chronological,
+/// so collapsing consecutive duplicates is the whole span.
+fn day_span<'a>(days: impl Iterator<Item = &'a String>) -> Vec<String> {
+    let mut span: Vec<String> = Vec::new();
+    for day in days {
+        if span.last() != Some(day) {
+            span.push(day.clone());
+        }
+    }
+    span
+}
+
+/// The arrival day of a batch item — the same UTC date the durable row's
+/// `to_char(created_at)` used to carry.
+fn today() -> String {
+    let now = OffsetDateTime::now_utc();
+    format!(
+        "{:04}-{:02}-{:02}",
+        now.year(),
+        u8::from(now.month()),
+        now.day()
+    )
+}
+
+/// The flush's one exchange: the job description plus the current entries,
+/// the batch's day span and the known speakers as the system prompt, the
+/// dialogue batch itself as the message list — the same role-structured
+/// items the agent's LLM call carries, led by the system prompt.
 fn build_messages(
     entries: &[MemoryEntry],
-    dialogue: &[DialogueLine],
+    speakers: &[Speaker],
+    conversation: &[ChatItem],
     days: &[String],
 ) -> Vec<ChatItem> {
     let entries = entries
@@ -314,27 +310,25 @@ fn build_messages(
             }
         })
         .collect::<Value>();
-    let dialogue = dialogue
+    let speakers = speakers
         .iter()
-        .map(|line| {
+        .map(|speaker| {
             context! {
-                speaker => line.speaker,
-                text => &line.text,
+                id => speaker.id,
+                name => &speaker.name,
+                description => &speaker.description,
             }
         })
         .collect::<Value>();
+    let days = days.iter().map(Value::from).collect::<Value>();
     let system = render_extract(
         "extract_system",
-        context! { entries, max_entries => MAX_ENTRIES },
+        context! { entries, speakers, days, max_entries => MAX_ENTRIES },
     );
-    let user = render_extract(
-        "extract_user",
-        context! {
-            days => days.iter().map(Value::from).collect::<Value>(),
-            dialogue,
-        },
-    );
-    vec![ChatItem::system(system), ChatItem::user(user)]
+    let mut messages = Vec::with_capacity(conversation.len() + 1);
+    messages.push(ChatItem::system(system));
+    messages.extend(conversation.iter().cloned());
+    messages
 }
 
 fn render_extract(name: &str, ctx: Value) -> String {
@@ -349,71 +343,101 @@ fn render_extract(name: &str, ctx: Value) -> String {
 mod tests {
     use super::*;
     use crate::agent::{InMemEntryMemory, LlmError, LlmEvents, StepResult, ToolCall, ToolSpec};
-    use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
+    fn session() -> AgentSession {
+        AgentSession {
+            id: "sess".into(),
+            sample_rate: 16000,
+            channels: 1,
+            frame_duration_ms: 60,
+        }
+    }
+
     #[test]
-    fn dialogue_keeps_utterances_and_spoken_replies_only() {
-        let items = vec![
+    fn conversation_keeps_utterances_and_spoken_replies_only() {
+        let items = [
             ChatItem::system("prompt"),
-            ChatItem::user("你好"),
+            ChatItem::user("[speaker_id=1] 你好"),
             ChatItem::assistant_tool_calls(vec![]),
             ChatItem::tool("1", "sunny"),
             ChatItem::assistant("🙂 今天晴"),
         ];
         assert_eq!(
-            dialogue_lines(&items),
+            conversation_items(items.iter()),
             vec![
-                DialogueLine {
-                    speaker: "用户",
-                    text: "你好".into(),
-                },
-                DialogueLine {
-                    speaker: "助手",
-                    text: "🙂 今天晴".into(),
-                },
+                ChatItem::user("[speaker_id=1] 你好"),
+                ChatItem::assistant("🙂 今天晴"),
             ]
         );
     }
 
-    #[test]
-    fn messages_carry_the_prompt_entries_and_the_day_span() {
-        let entries = vec![MemoryEntry {
-            mem_no: 1,
-            content: "likes Rust".into(),
-        }];
-        let dialogue = vec![DialogueLine {
-            speaker: "用户",
-            text: "你好".into(),
-        }];
+    fn entry(mem_no: i32, content: &str) -> MemoryEntry {
+        MemoryEntry {
+            mem_no,
+            content: content.to_string(),
+        }
+    }
 
-        let messages = build_messages(&entries, &dialogue, &["2026-10-12".into()]);
-        assert_eq!(messages.len(), 2);
+    fn speaker(id: i64, name: &str, description: &str) -> Speaker {
+        Speaker {
+            id,
+            name: name.into(),
+            description: description.into(),
+        }
+    }
+
+    #[test]
+    fn messages_carry_the_prompt_day_span_and_roster() {
+        let entries = vec![entry(1, "likes Rust")];
+        let conversation = vec![
+            ChatItem::user("[speaker_id=1] 你好"),
+            ChatItem::assistant("🙂 你好呀"),
+        ];
+
+        let messages = build_messages(
+            &entries,
+            &[speaker(1, "张三", "同事")],
+            &conversation,
+            &["2026-10-12".into()],
+        );
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1], conversation[0]);
+        assert_eq!(messages[2], conversation[1]);
         let ChatItem::System { content } = &messages[0] else {
             panic!("expected the extractor prompt")
         };
         assert!(content.starts_with("你是长期记忆提炼器。"));
         assert!(content.contains("memory_propose 工具一次性提交"));
         assert!(content.contains(&format!("条目接近上限（{MAX_ENTRIES}）")));
+        assert!(
+            content.contains("对话以消息列表的形式附在本提示之后。本批对话发生在 2026-10-12。")
+        );
+        assert!(content.contains(
+            "## 说话人\n\n<known_speakers>\n  \
+             <speaker id=\"1\" name=\"张三\">\n    \
+             <description>同事</description>\n  </speaker>\n\
+             </known_speakers>"
+        ));
+        assert!(content.contains("说话人身份不作为记忆内容"));
         assert!(content.ends_with("## 现有记忆条目\n[mem_01] likes Rust\n"));
-        let ChatItem::User { content } = &messages[1] else {
-            panic!("expected the dialogue batch")
-        };
-        assert_eq!(content, "对话记录（2026-10-12）：\n\n用户：你好\n");
 
-        let messages = build_messages(&[], &dialogue, &["2026-10-11".into(), "2026-10-12".into()]);
+        // No roster: the speaker block renders away entirely; several days
+        // render the span.
+        let messages = build_messages(
+            &[],
+            &[],
+            &conversation,
+            &["2026-10-11".into(), "2026-10-12".into()],
+        );
         let ChatItem::System { content } = &messages[0] else {
             panic!("expected the extractor prompt")
         };
+        assert!(!content.contains("known_speakers"));
+        assert!(!content.contains("说话人"));
+        assert!(content.contains("本批对话发生在 2026-10-11 至 2026-10-12。"));
         assert!(content.ends_with("## 现有记忆条目\n（暂无）\n"));
-        let ChatItem::User { content } = &messages[1] else {
-            panic!("expected the dialogue batch")
-        };
-        assert_eq!(
-            content,
-            "对话记录（2026-10-11 至 2026-10-12）：\n\n用户：你好\n"
-        );
     }
 
     fn step(tool_calls: Vec<ToolCall>, ok: bool) -> StepResult {
@@ -462,45 +486,31 @@ mod tests {
         }
     }
 
-    /// A pool that never connects — the flush's first query fails, which is
-    /// the failure the restore path has to survive. The acquire timeout has
-    /// to be short: against a machine with nothing listening the pool keeps
-    /// retrying the refused connect until the timeout (30s by default),
-    /// longer than any deadline below.
-    fn lazy_pool() -> PgPool {
-        PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(500))
-            .connect_lazy("postgres://localhost:5432/extractor_test_missing")
-            .unwrap()
-    }
-
     #[tokio::test]
-    async fn pokes_below_the_threshold_only_buffer() {
+    async fn appended_batches_below_the_threshold_only_buffer() {
         let extractor = Extractor::new(
-            lazy_pool(),
-            2,
             Arc::new(FailLlm),
             Arc::new(InMemEntryMemory::default()),
+            vec![],
         );
-        for i in 0..BATCH_ROWS - 1 {
-            extractor.poke(i as i64 + 1);
+        for i in 0..BATCH_ITEMS - 1 {
+            extractor.appended(&session(), &[ChatItem::user(format!("u{i}"))]);
         }
-        assert_eq!(extractor.pending_len(), BATCH_ROWS - 1);
+        assert_eq!(extractor.pending_len(), BATCH_ITEMS - 1);
     }
 
     #[tokio::test]
-    async fn a_failed_flush_restores_the_pending_rows() {
+    async fn a_failed_flush_restores_the_pending_items() {
         let extractor = Extractor::new(
-            lazy_pool(),
-            2,
             Arc::new(FailLlm),
             Arc::new(InMemEntryMemory::default()),
+            vec![],
         );
-        for i in 0..BATCH_ROWS {
-            extractor.poke(i as i64 + 1);
+        for i in 0..BATCH_ITEMS {
+            extractor.appended(&session(), &[ChatItem::user(format!("u{i}"))]);
         }
         // The threshold poke spawns the flush: the buffer drains first, then
-        // the failed query restores every row.
+        // the failed LLM call restores every item.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while extractor.pending_len() != 0 {
             assert!(
@@ -510,10 +520,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while extractor.pending_len() != BATCH_ROWS {
+        while extractor.pending_len() != BATCH_ITEMS {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the flush never restored the rows"
+                "the flush never restored the items"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

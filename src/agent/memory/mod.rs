@@ -22,17 +22,26 @@ pub use entries::{
 pub use extract::Extractor;
 pub use inmem::InMemMemory;
 
-/// Observes committed message rows. Called synchronously on the store's
-/// task right after the insert commits: implementations must be cheap and
-/// never block — spawn your own task for anything slow. Hooks never fire
-/// for a row that was not committed.
+/// Observes the memory: committed message rows on the storage side, warm
+/// window appends on the view side. Called synchronously on the caller's
+/// task right after the change lands: implementations must be cheap and
+/// never block — spawn your own task for anything slow. Row hooks never
+/// fire for a row that was not committed. Implement what you observe;
+/// every method is a no-op by default.
 pub trait MemoryHook: Send + Sync {
     /// The user message row for a final utterance was committed.
-    fn utterance_stored(&self, session: &AgentSession, message_id: i64);
+    fn utterance_stored(&self, _session: &AgentSession, _message_id: i64) {}
 
     /// A turn row — the tool exchange plus the final reply, or a truncated
     /// partial — was committed.
-    fn turn_stored(&self, session: &AgentSession, message_id: i64);
+    fn turn_stored(&self, _session: &AgentSession, _message_id: i64) {}
+
+    /// The warm window received one append batch: the exact items the
+    /// agent's context carries, speaker labels included. Announced right
+    /// after the append lands — the batch is handed over verbatim, with no
+    /// ids and no durable-row guarantee here; row consumers use the
+    /// storage hooks above.
+    fn appended(&self, _session: &AgentSession, _items: &[ChatItem]) {}
 }
 
 /// The text side of one session's conversation store. A fresh instance is
@@ -49,9 +58,10 @@ pub trait Memory: Send + Sync {
     /// message when the utterance is final, then the assistant reply and
     /// any tool exchange when the turn completes. A batch opening with a
     /// `User` item starts a turn; anything else extends the open one.
-    /// Batched because a tool turn is several items. The durable copy is
-    /// written by the store methods below, never here.
-    async fn append(&self, items: Vec<ChatItem>);
+    /// Batched because a tool turn is several items. The batch is announced
+    /// to the hooks ([`MemoryHook::appended`]); the durable copy is written
+    /// by the store methods below, never here.
+    async fn append(&self, session: &AgentSession, items: Vec<ChatItem>);
 
     /// Writes the user message row for a final utterance and notifies the
     /// hooks once it commits. Empty text stores nothing.
