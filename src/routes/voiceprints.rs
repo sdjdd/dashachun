@@ -60,12 +60,12 @@ pub(crate) async fn list_voiceprints(
     ))
 }
 
-/// Enrollment: the audio of the named user messages (captured by the audio
-/// feature) is fetched from the storage, decoded, embedded, and appended
-/// into the label's vector sum. Guards escalate with specificity —
-/// ownership 404, disabled audio capture 400, rejected messages 400 with
-/// per-message reasons, missing model 503 — so request-side problems are
-/// reported even while the feature is off.
+// Enrollment: the audio of the named user messages (captured by the audio
+// feature) is fetched from the storage, decoded, embedded, and appended
+// into the label's vector sum. Guards escalate with specificity —
+// ownership 404, disabled audio capture 400, rejected messages 400 with
+// per-message reasons, missing model 503 — so request-side problems are
+// reported even while the feature is off.
 #[utoipa::path(
     post,
     path = "/api/agents/{agent_id}/voiceprints",

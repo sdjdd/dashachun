@@ -58,11 +58,11 @@ pub(crate) async fn get_capture(
     Ok(Json(capture))
 }
 
-/// Stores and hot-applies the audio-capture section. Enabling runs the
-/// storage check eagerly (build + `ensure_bucket`) before anything is
-/// stored — a failed check keeps the current settings standing, exactly
-/// like the provider build path. In-flight sessions keep their storage
-/// clone across the swap.
+// Stores and hot-applies the audio-capture section. Enabling runs the
+// storage check eagerly (build + `ensure_bucket`) before anything is
+// stored — a failed check keeps the current settings standing, exactly
+// like the provider build path. In-flight sessions keep their storage
+// clone across the swap.
 #[utoipa::path(
     put,
     path = "/api/settings/audio-capture",
