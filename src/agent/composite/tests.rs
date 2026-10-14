@@ -978,7 +978,7 @@ async fn system_prompt_carries_the_user_memory() {
     let first = wait_for_calls(&calls, 1).await;
     assert!(matches!(
         first[0].first(),
-        Some(ChatItem::System { content }) if content.contains("<memory id=\"mem_01\">likes tea</memory>")
+        Some(ChatItem::System { content }) if content.contains("<memory id=\"1\">likes tea</memory>")
     ));
 }
 
@@ -1063,7 +1063,7 @@ async fn memory_tool_stores_an_entry_the_next_turn_sees() {
     let second = wait_for_calls(&calls, 2).await;
     assert!(matches!(
         second[1].first(),
-        Some(ChatItem::System { content }) if content.contains("<memory id=\"mem_01\">likes tea</memory>")
+        Some(ChatItem::System { content }) if content.contains("<memory id=\"1\">likes tea</memory>")
     ));
 }
 

@@ -478,7 +478,7 @@ async fn entry_memory_applies_a_batch_in_one_transaction(pool: PgPool) {
         vec![
             EntryOpResult::Updated(1),
             EntryOpResult::Added(2),
-            EntryOpResult::Skipped("unknown mem_09".into()),
+            EntryOpResult::Skipped("unknown 9".into()),
         ]
     );
     assert_eq!(

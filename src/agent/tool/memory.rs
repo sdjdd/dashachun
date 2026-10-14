@@ -20,7 +20,7 @@ pub struct MemoryAddArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryUpdateArgs {
-    /// The ID of the entry to replace, e.g. "mem_03".
+    /// The ID of the entry to replace, e.g. "3".
     id: String,
     /// The replacement text, short and self-contained.
     content: String,
@@ -29,7 +29,7 @@ pub struct MemoryUpdateArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryDeleteArgs {
-    /// The ID of the entry to delete, e.g. "mem_03".
+    /// The ID of the entry to delete, e.g. "3".
     id: String,
 }
 
@@ -46,8 +46,8 @@ fn check_content(content: &str) -> Result<String, String> {
     Ok(content.to_string())
 }
 
-/// Accepts the id exactly as the prompt shows it ("mem_03") and tolerates
-/// the bare number.
+/// Accepts the id exactly as the prompt shows it ("3") and tolerates a
+/// stray mem_ prefix.
 fn parse_id(id: &str) -> Option<i32> {
     let id = id.trim();
     let id = id.strip_prefix("mem_").unwrap_or(id);
@@ -195,14 +195,14 @@ pub enum MemoryOp {
     },
     /// Replace the text of an existing entry.
     Update {
-        /// The id of the entry to replace, e.g. "mem_03".
+        /// The id of the entry to replace, e.g. "3".
         id: String,
         /// The replacement text, short and self-contained.
         content: String,
     },
     /// Remove an entry that no longer holds.
     Delete {
-        /// The id of the entry to remove, e.g. "mem_03".
+        /// The id of the entry to remove, e.g. "3".
         id: String,
     },
 }
@@ -349,14 +349,14 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(outcome, "stored as [mem_01]");
+        assert_eq!(outcome, "stored as [1]");
         let outcome = tool
             .call(MemoryAddArgs {
                 content: "building an ESP32 assistant".into(),
             })
             .await
             .unwrap();
-        assert_eq!(outcome, "stored as [mem_02]");
+        assert_eq!(outcome, "stored as [2]");
         assert_eq!(memory.list().await.len(), 2);
         assert_eq!(memory.list().await[0].content, "likes Rust");
     }
@@ -403,22 +403,22 @@ mod tests {
         let tool = MemoryUpdate::new(memory.clone());
         let outcome = tool
             .call(MemoryUpdateArgs {
-                id: "mem_01".into(),
+                id: "1".into(),
                 content: "new".into(),
             })
             .await
             .unwrap();
-        assert_eq!(outcome, "updated [mem_01]");
+        assert_eq!(outcome, "updated [1]");
         assert_eq!(memory.list().await[0].content, "new");
-        // Bare numbers work too; unknown ids report instead of failing.
+        // A stray mem_ prefix works too; unknown ids report instead of failing.
         let outcome = tool
             .call(MemoryUpdateArgs {
-                id: "9".into(),
+                id: "mem_9".into(),
                 content: "x".into(),
             })
             .await
             .unwrap();
-        assert_eq!(outcome, "no memory entry [mem_09]");
+        assert_eq!(outcome, "no memory entry [9]");
         assert!(
             tool.call(MemoryUpdateArgs {
                 id: "abc".into(),
@@ -435,20 +435,16 @@ mod tests {
         memory.add("one").await.unwrap();
         let tool = MemoryDelete::new(memory.clone());
         let outcome = tool
-            .call(MemoryDeleteArgs {
-                id: "mem_01".into(),
-            })
+            .call(MemoryDeleteArgs { id: "1".into() })
             .await
             .unwrap();
-        assert_eq!(outcome, "deleted [mem_01]");
+        assert_eq!(outcome, "deleted [1]");
         assert!(memory.list().await.is_empty());
         let outcome = tool
-            .call(MemoryDeleteArgs {
-                id: "mem_01".into(),
-            })
+            .call(MemoryDeleteArgs { id: "1".into() })
             .await
             .unwrap();
-        assert_eq!(outcome, "no memory entry [mem_01]");
+        assert_eq!(outcome, "no memory entry [1]");
     }
 
     #[test]
@@ -526,21 +522,21 @@ mod tests {
     fn propose_args_take_the_structured_shape() {
         let args: MemoryProposeArgs = serde_json::from_str(
             r#"{"memories":[
-                {"action":"update","id":"mem_01","content":"用户目前使用 Go 开发后端。"},
+                {"action":"update","id":"1","content":"用户目前使用 Go 开发后端。"},
                 {"action":"add","content":"用户养了一只猫"},
-                {"action":"delete","id":"mem_09"}]}"#,
+                {"action":"delete","id":"9"}]}"#,
         )
         .unwrap();
         assert_eq!(args.memories.len(), 3);
         assert!(matches!(
             &args.memories[0],
             MemoryOp::Update { id, content }
-                if id == "mem_01" && content == "用户目前使用 Go 开发后端。"
+                if id == "1" && content == "用户目前使用 Go 开发后端。"
         ));
         assert!(
             matches!(&args.memories[1], MemoryOp::Add { content } if content == "用户养了一只猫")
         );
-        assert!(matches!(&args.memories[2], MemoryOp::Delete { id } if id == "mem_09"));
+        assert!(matches!(&args.memories[2], MemoryOp::Delete { id } if id == "9"));
         assert!(
             serde_json::from_str::<MemoryProposeArgs>(r#"{"memories":[{"action":"drop"}]}"#)
                 .is_err()
@@ -556,23 +552,18 @@ mod tests {
             .call(MemoryProposeArgs {
                 memories: vec![
                     MemoryOp::Update {
-                        id: "mem_01".into(),
+                        id: "1".into(),
                         content: "renamed".into(),
                     },
                     MemoryOp::Add {
                         content: "new fact".into(),
                     },
-                    MemoryOp::Delete {
-                        id: "mem_09".into(),
-                    },
+                    MemoryOp::Delete { id: "9".into() },
                 ],
             })
             .await
             .unwrap();
-        assert_eq!(
-            outcome,
-            "updated [mem_01]; added [mem_02]; skipped (unknown mem_09)"
-        );
+        assert_eq!(outcome, "updated [1]; added [2]; skipped (unknown 9)");
         assert_eq!(
             memory.list().await,
             vec![
@@ -613,7 +604,7 @@ mod tests {
             .unwrap();
         assert!(outcome.contains("skipped (content is too long"));
         assert!(outcome.contains("skipped (invalid id `abc`"));
-        assert!(outcome.contains("added [mem_01]"));
+        assert!(outcome.contains("added [1]"));
     }
 
     #[tokio::test]
@@ -629,14 +620,12 @@ mod tests {
                     MemoryOp::Add {
                         content: "one more".into(),
                     },
-                    MemoryOp::Delete {
-                        id: "mem_20".into(),
-                    },
+                    MemoryOp::Delete { id: "20".into() },
                 ],
             })
             .await
             .unwrap();
         assert!(outcome.contains("skipped (memory is full"), "{outcome}");
-        assert!(outcome.contains("deleted [mem_20]"));
+        assert!(outcome.contains("deleted [20]"));
     }
 }

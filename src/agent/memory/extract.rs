@@ -56,13 +56,12 @@ const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（
 {% endif %}
 
 ## 现有记忆条目
-{% if entries %}
+
+<memories>
 {% for entry in entries %}
-[{{ entry.id }}] {{ entry.content }}
+  <memory id="{{ entry.id }}">{{ entry.content }}</memory>
 {% endfor %}
-{% else %}
-（暂无）
-{% endif %}"#;
+</memories>"#;
 
 static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
     let mut env = Environment::new();
@@ -421,7 +420,11 @@ mod tests {
              </known_speakers>"
         ));
         assert!(content.contains("说话人身份不作为记忆内容"));
-        assert!(content.ends_with("## 现有记忆条目\n[mem_01] likes Rust\n"));
+        assert!(content.ends_with(
+            "## 现有记忆条目\n\n<memories>\n  \
+                 <memory id=\"1\">likes Rust</memory>\n\
+                 </memories>"
+        ));
 
         // No roster: the speaker block renders away entirely; several days
         // render the span.
@@ -437,7 +440,7 @@ mod tests {
         assert!(!content.contains("known_speakers"));
         assert!(!content.contains("说话人"));
         assert!(content.contains("本批对话发生在 2026-10-11 至 2026-10-12。"));
-        assert!(content.ends_with("## 现有记忆条目\n（暂无）\n"));
+        assert!(content.ends_with("## 现有记忆条目\n\n<memories>\n</memories>"));
     }
 
     fn step(tool_calls: Vec<ToolCall>, ok: bool) -> StepResult {

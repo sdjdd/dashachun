@@ -262,8 +262,8 @@ mod tests {
         let turn = turn.as_str();
         assert!(turn.contains(
             "\n\n<memories>\n  \
-             <memory id=\"mem_01\">用 Rust 写后端</memory>\n  \
-             <memory id=\"mem_12\">喜欢喝茶</memory>\n\
+             <memory id=\"1\">用 Rust 写后端</memory>\n  \
+             <memory id=\"12\">喜欢喝茶</memory>\n\
              </memories>\n\n"
         ));
         assert!(turn.contains("memory_add"));
@@ -286,7 +286,7 @@ mod tests {
         let turn = turn.as_str();
         assert!(turn.starts_with(prompt.as_str()));
         assert!(turn.contains("\n\n## 长期记忆"));
-        assert!(turn.contains("<memory id=\"mem_03\">喜欢喝茶</memory>"));
+        assert!(turn.contains("<memory id=\"3\">喜欢喝茶</memory>"));
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod tests {
         let turn = turn.as_str();
         assert!(turn.starts_with("你是一位通过智能设备与用户交谈的语音助手"));
         assert!(!turn.contains("<persona>"));
-        assert!(turn.contains("<memory id=\"mem_01\">喜欢喝茶</memory>"));
+        assert!(turn.contains("<memory id=\"1\">喜欢喝茶</memory>"));
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
         let memory = turn.find("## 长期记忆").unwrap();
         assert!(speakers < memory);
         assert!(turn.contains("同一个人。\n\n## 长期记忆"));
-        assert!(turn.contains("<memory id=\"mem_03\">喜欢喝茶</memory>"));
+        assert!(turn.contains("<memory id=\"3\">喜欢喝茶</memory>"));
     }
 
     #[test]

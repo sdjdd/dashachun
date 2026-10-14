@@ -12,7 +12,7 @@ pub const MAX_ENTRIES: usize = 20;
 /// The display form of an entry id, the `id` attribute of a `<memory>`
 /// element in the system prompt and echoed back by the memory tools.
 pub fn entry_id(mem_no: i32) -> String {
-    format!("mem_{mem_no:02}")
+    mem_no.to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,13 +395,6 @@ impl EntryMemory for InMemEntryMemory {
 mod tests {
     use super::*;
 
-    #[test]
-    fn entry_ids_are_zero_padded() {
-        assert_eq!(entry_id(1), "mem_01");
-        assert_eq!(entry_id(20), "mem_20");
-        assert_eq!(entry_id(137), "mem_137");
-    }
-
     #[tokio::test]
     async fn inmem_add_lists_and_keeps_ids_monotonic() {
         let memory = InMemEntryMemory::default();
@@ -462,7 +455,7 @@ mod tests {
             vec![
                 EntryOpResult::Updated(1),
                 EntryOpResult::Added(2),
-                EntryOpResult::Skipped("unknown mem_09".into()),
+                EntryOpResult::Skipped("unknown 9".into()),
             ]
         );
         assert_eq!(
