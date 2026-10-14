@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use super::capture::{AudioCapture, AudioStorage};
-use super::memory::{DbEntryMemory, DbMemory, EntryMemory, Extractor, MemoryHook};
+use super::memory::{DbEntryMemory, DbMemory, EntryMemory, MemoryHook};
 use super::store::AgentStore;
 use super::tool::memory_tools;
 use super::{
@@ -119,23 +119,24 @@ impl AgentFactory {
             record.client_id,
             audio_storage,
         ));
-        // The extractor is the memory's second hook: it owns exactly this
-        // connection's rows — the announced ids buffer until a batch is
-        // full, then one background extraction proposes entry changes
-        // against the same entry memory the tools write and the prompt
-        // reads.
-        let extractor = Extractor::new(
-            self.pool.clone(),
-            agent_id,
-            Arc::clone(&self.llm),
-            Arc::clone(&entries),
-        );
+        // The extractor hook is temporarily disabled — memory runs on the
+        // tools alone until the extractor is restored. Its wiring, the
+        // Extractor itself and its memory_propose tool are all kept for
+        // that; restoring is re-importing Extractor and registering it
+        // here as the memory's second hook again (it owns exactly this
+        // connection's rows: the announced
+        // ids buffer until a batch is full, then one background extraction
+        // proposes entry changes against the same entry memory the tools
+        // write and the prompt reads).
+        // let extractor = Extractor::new(
+        //     self.pool.clone(),
+        //     agent_id,
+        //     Arc::clone(&self.llm),
+        //     Arc::clone(&entries),
+        // );
         let memory = DbMemory::new(
             self.pool.clone(),
-            vec![
-                audio.clone() as Arc<dyn MemoryHook>,
-                Arc::new(extractor) as Arc<dyn MemoryHook>,
-            ],
+            vec![audio.clone() as Arc<dyn MemoryHook>],
         );
         let tools = self.tools.clone().merge(memory_tools(&entries));
         // The voiceprint feature plugs in here like the audio capture: the
