@@ -2,7 +2,7 @@ use super::*;
 use crate::agent::InMemEntryMemory;
 use crate::agent::InMemMemory;
 use crate::agent::collect;
-use crate::agent::memory::HISTORY_LIMIT;
+use crate::agent::memory::HISTORY_TURNS;
 use crate::agent::tool::MemoryAdd;
 use crate::agent::{
     AgentInput, Asr, AsrError, AsrEvent, AsrEvents, AudioStream, Capture, ChatItem, EntryMemory,
@@ -492,11 +492,12 @@ async fn stalled_tts_cancel_does_not_delay_next_reply() {
 }
 
 #[tokio::test]
-async fn session_history_is_capped_to_the_last_messages() {
+async fn session_history_is_capped_to_the_last_turns() {
     // Enough plain user/assistant turns for the cap to bind: the history
-    // seen by call t has 2t-1 items (the user item is appended before the
-    // LLM runs, its reply after).
-    let turns = HISTORY_LIMIT / 2 + 5;
+    // seen by call t is t whole turns — 2t-1 items while under the cap,
+    // then 2*HISTORY_TURNS-1, since the open turn contributes only its
+    // user item and the window always starts at a user message.
+    let turns = HISTORY_TURNS + 5;
     let calls = Arc::new(Mutex::new(Vec::new()));
     let silent: &[usize] = &[];
     let agent = CompositeAgent {
@@ -525,16 +526,16 @@ async fn session_history_is_capped_to_the_last_messages() {
     assert_eq!(calls.len(), turns);
     for call in &calls {
         assert!(
-            call.len() <= HISTORY_LIMIT,
+            call.len() < HISTORY_TURNS * 2,
             "history grew past the cap: {}",
             call.len()
         );
     }
-    assert_eq!(calls[calls.len() - 2].len(), HISTORY_LIMIT);
-    assert_eq!(calls[calls.len() - 1].len(), HISTORY_LIMIT);
+    assert_eq!(calls[calls.len() - 2].len(), HISTORY_TURNS * 2 - 1);
+    assert_eq!(calls[calls.len() - 1].len(), HISTORY_TURNS * 2 - 1);
     assert!(matches!(
         calls[calls.len() - 1].first(),
-        Some(ChatItem::Assistant { .. })
+        Some(ChatItem::User { .. })
     ));
 }
 

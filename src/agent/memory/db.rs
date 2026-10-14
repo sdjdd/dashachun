@@ -8,20 +8,21 @@ use tracing::warn;
 use crate::agent::AgentSession;
 use crate::agent::ChatItem;
 
-use super::{Memory, MemoryHook, trim};
+use super::{Memory, MemoryHook, Turn, trim};
 
 /// The conversation memory backed by the durable `messages` log. The window
 /// starts empty — the context lives only here for the session's lifetime,
 /// the durable log is a record, never reloaded — and every turn is appended
 /// by the driver while, in parallel, written durably by the store methods,
-/// so per-turn requests never wait on Postgres. Each row holds one message
-/// in the JSON form of a [`ChatItem`] (AI SDK ModelMessage shape, tagged by
-/// `role`), so storing is a serde write. Committed rows are announced to
-/// the [`MemoryHook`]s.
+/// so per-turn requests never wait on Postgres. The window is a list of
+/// whole turns capped at [`super::HISTORY_TURNS`]. Each row of the durable log
+/// holds one message in the JSON form of a [`ChatItem`] (AI SDK
+/// ModelMessage shape, tagged by `role`), so storing is a serde write.
+/// Committed rows are announced to the [`MemoryHook`]s.
 pub struct DbMemory {
     pool: PgPool,
     hooks: Vec<Arc<dyn MemoryHook>>,
-    messages: Mutex<Vec<ChatItem>>,
+    turns: Mutex<Vec<Turn>>,
 }
 
 impl DbMemory {
@@ -30,7 +31,7 @@ impl DbMemory {
         Self {
             pool,
             hooks,
-            messages: Mutex::new(Vec::new()),
+            turns: Mutex::new(Vec::new()),
         }
     }
 }
@@ -38,13 +39,26 @@ impl DbMemory {
 #[async_trait]
 impl Memory for DbMemory {
     async fn history(&self) -> Vec<ChatItem> {
-        self.messages.lock().unwrap().clone()
+        self.turns
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|turn| turn.0.iter().cloned())
+            .collect()
     }
 
     async fn append(&self, items: Vec<ChatItem>) {
-        let mut messages = self.messages.lock().unwrap();
-        messages.extend(items);
-        trim(&mut messages);
+        let mut turns = self.turns.lock().unwrap();
+        match items.first() {
+            Some(ChatItem::User { .. }) => turns.push(Turn(items)),
+            Some(_) => {
+                if let Some(turn) = turns.last_mut() {
+                    turn.0.extend(items);
+                }
+            }
+            None => {}
+        }
+        trim(&mut turns);
     }
 
     async fn store_utterance(&self, session: &AgentSession, text: &str) -> Result<(), String> {

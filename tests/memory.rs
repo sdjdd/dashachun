@@ -109,23 +109,26 @@ async fn a_new_session_starts_with_an_empty_window(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
-async fn the_window_caps_at_the_limit(pool: PgPool) {
-    // Mirrors the agent's HISTORY_LIMIT (pub(crate) there).
-    const HISTORY_LIMIT: usize = 20;
+async fn the_window_caps_at_the_turns(pool: PgPool) {
+    // Mirrors the agent's HISTORY_TURNS (pub(crate) there).
+    const HISTORY_TURNS: usize = 10;
 
     let memory = DbMemory::new(pool, vec![]);
-    for turn in 1..=(HISTORY_LIMIT + 5) {
+    for turn in 1..=(HISTORY_TURNS + 5) {
         memory
             .append(vec![ChatItem::user(format!("u{turn}"))])
+            .await;
+        memory
+            .append(vec![ChatItem::assistant(format!("a{turn}"))])
             .await;
     }
 
     let history = memory.history().await;
-    assert_eq!(history.len(), HISTORY_LIMIT);
+    assert_eq!(history.len(), HISTORY_TURNS * 2);
     assert_eq!(history.first(), Some(&ChatItem::user("u6")));
     assert_eq!(
         history.last(),
-        Some(&ChatItem::user(format!("u{}", HISTORY_LIMIT + 5)))
+        Some(&ChatItem::assistant(format!("a{}", HISTORY_TURNS + 5)))
     );
 }
 

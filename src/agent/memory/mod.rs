@@ -1,8 +1,8 @@
-//! The conversation memory: a warm in-process window over the durable
-//! `messages` log, plus the entry-based user memory the prompt reads and
-//! the memory tools maintain. Text only — audio storage is a separate
-//! feature ([`AudioCapture`]) that attaches to committed rows through
-//! [`MemoryHook`].
+//! The conversation memory: a warm in-process window, grouped into whole
+//! conversation turns, over the durable `messages` log, plus the
+//! entry-based user memory the prompt reads and the memory tools maintain.
+//! Text only — audio storage is a separate feature ([`AudioCapture`]) that
+//! attaches to committed rows through [`MemoryHook`].
 
 mod db;
 mod entries;
@@ -47,9 +47,10 @@ pub trait Memory: Send + Sync {
 
     /// Records the new items of one turn in the warm window — the user
     /// message when the utterance is final, then the assistant reply and
-    /// any tool exchange when the turn completes. Batched because a tool
-    /// turn is several items. The durable copy is written by the store
-    /// methods below, never here.
+    /// any tool exchange when the turn completes. A batch opening with a
+    /// `User` item starts a turn; anything else extends the open one.
+    /// Batched because a tool turn is several items. The durable copy is
+    /// written by the store methods below, never here.
     async fn append(&self, items: Vec<ChatItem>);
 
     /// Writes the user message row for a final utterance and notifies the
@@ -70,24 +71,20 @@ pub trait Memory: Send + Sync {
     fn store_partial_reply(&self, session: &AgentSession, text: &str);
 }
 
-/// Caps the stored window so a long session cannot grow the per-turn request
-/// (token cost and latency) without bound. The window is widened backwards
-/// when it would start inside a tool exchange: a `Tool` item without its
-/// owning assistant tool-call message is an invalid request for
-/// OpenAI-compatible APIs, so one oversized tool turn may exceed the cap but
-/// an exchange is never split.
-pub(crate) const HISTORY_LIMIT: usize = 20;
+/// One conversation turn in the window: the user utterance that opens it,
+/// then everything the reply stage produced for it — interim assistant
+/// texts, tool calls and results, the final reply. The unit the window
+/// counts and never splits.
+pub(crate) struct Turn(pub(crate) Vec<ChatItem>);
 
-/// Drops the oldest items past the cap, widening the window backwards over
-/// `Tool` items so an exchange is never split.
-pub(crate) fn trim(history: &mut Vec<ChatItem>) {
-    let overflow = history.len().saturating_sub(HISTORY_LIMIT);
-    if overflow == 0 {
-        return;
-    }
-    let mut start = overflow;
-    while start > 0 && matches!(history[start], ChatItem::Tool { .. }) {
-        start -= 1;
-    }
-    history.drain(..start);
+/// Caps the stored window at [`HISTORY_TURNS`] turns so a long session
+/// cannot grow the per-turn request (token cost and latency) without bound.
+/// Turns are atomic — the window always starts at a user utterance and a
+/// tool exchange is never split — so one oversized turn may exceed the cap
+/// but a turn is never cut.
+pub(crate) const HISTORY_TURNS: usize = 10;
+
+/// Drops the oldest turns past the cap.
+pub(crate) fn trim(turns: &mut Vec<Turn>) {
+    turns.drain(..turns.len().saturating_sub(HISTORY_TURNS));
 }

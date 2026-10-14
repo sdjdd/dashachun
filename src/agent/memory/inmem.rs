@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use crate::agent::AgentSession;
 use crate::agent::ChatItem;
 
-use super::{Memory, trim};
+use super::{Memory, Turn, trim};
 
 /// Keeps the conversation in process memory, starting empty; its state dies
 /// with the session. Test helper — mirrors the durable semantics (the
@@ -14,9 +14,9 @@ use super::{Memory, trim};
 /// calls are recorded for assertions.
 #[derive(Default)]
 pub struct InMemMemory {
-    messages: Mutex<Vec<ChatItem>>,
+    turns: Mutex<Vec<Turn>>,
     utterances: Mutex<Vec<String>>,
-    turns: Mutex<Vec<Vec<ChatItem>>>,
+    logged_turns: Mutex<Vec<Vec<ChatItem>>>,
     partials: Mutex<Vec<String>>,
 }
 
@@ -28,7 +28,7 @@ impl InMemMemory {
 
     /// The item batches passed to [`Memory::log_items`], in order.
     pub fn logged_turns(&self) -> Vec<Vec<ChatItem>> {
-        self.turns.lock().unwrap().clone()
+        self.logged_turns.lock().unwrap().clone()
     }
 
     /// The partial texts passed to [`Memory::store_partial_reply`], in
@@ -41,13 +41,26 @@ impl InMemMemory {
 #[async_trait]
 impl Memory for InMemMemory {
     async fn history(&self) -> Vec<ChatItem> {
-        self.messages.lock().unwrap().clone()
+        self.turns
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|turn| turn.0.iter().cloned())
+            .collect()
     }
 
     async fn append(&self, items: Vec<ChatItem>) {
-        let mut messages = self.messages.lock().unwrap();
-        messages.extend(items);
-        trim(&mut messages);
+        let mut turns = self.turns.lock().unwrap();
+        match items.first() {
+            Some(ChatItem::User { .. }) => turns.push(Turn(items)),
+            Some(_) => {
+                if let Some(turn) = turns.last_mut() {
+                    turn.0.extend(items);
+                }
+            }
+            None => {}
+        }
+        trim(&mut turns);
     }
 
     async fn store_utterance(&self, _session: &AgentSession, text: &str) -> Result<(), String> {
@@ -59,7 +72,7 @@ impl Memory for InMemMemory {
 
     fn log_items(&self, _session: &AgentSession, items: Vec<ChatItem>) {
         if !items.is_empty() {
-            self.turns.lock().unwrap().push(items);
+            self.logged_turns.lock().unwrap().push(items);
         }
     }
 
@@ -75,13 +88,13 @@ mod tests {
     use super::*;
 
     use crate::agent::ToolCall;
-    use crate::agent::memory::HISTORY_LIMIT;
+    use crate::agent::memory::HISTORY_TURNS;
 
     #[tokio::test]
-    async fn keeps_only_the_last_messages() {
+    async fn keeps_only_the_last_turns() {
         let memory = InMemMemory::default();
-        let turns = HISTORY_LIMIT / 2 + 10;
-        for turn in 1..=turns {
+        let total = HISTORY_TURNS + 5;
+        for turn in 1..=total {
             memory
                 .append(vec![ChatItem::user(format!("u{turn}"))])
                 .await;
@@ -91,28 +104,29 @@ mod tests {
         }
 
         let history = memory.history().await;
-        assert_eq!(history.len(), HISTORY_LIMIT);
+        assert_eq!(history.len(), HISTORY_TURNS * 2);
         assert_eq!(
             history.first(),
-            Some(&ChatItem::user(format!(
-                "u{}",
-                turns - HISTORY_LIMIT / 2 + 1
-            )))
+            Some(&ChatItem::user(format!("u{}", total - HISTORY_TURNS + 1)))
         );
         assert_eq!(
             history.last(),
-            Some(&ChatItem::assistant(format!("a{turns}")))
+            Some(&ChatItem::assistant(format!("a{total}")))
         );
     }
 
     #[tokio::test]
-    async fn never_orphans_a_tool_result() {
+    async fn a_tool_turn_is_kept_whole() {
         let memory = InMemMemory::default();
-        for turn in 1..=(HISTORY_LIMIT - 2) {
+        for turn in 1..HISTORY_TURNS {
             memory
                 .append(vec![ChatItem::user(format!("u{turn}"))])
                 .await;
+            memory
+                .append(vec![ChatItem::assistant(format!("a{turn}"))])
+                .await;
         }
+        memory.append(vec![ChatItem::user("tool turn")]).await;
         memory
             .append(vec![
                 ChatItem::assistant_tool_calls(vec![ToolCall {
@@ -123,26 +137,65 @@ mod tests {
                 ChatItem::tool("1", "sunny"),
             ])
             .await;
-        for turn in 1..=(HISTORY_LIMIT - 1) {
+        for turn in 1..HISTORY_TURNS {
             memory
                 .append(vec![ChatItem::user(format!("late{turn}"))])
+                .await;
+            memory
+                .append(vec![ChatItem::assistant(format!("late a{turn}"))])
                 .await;
         }
 
         let history = memory.history().await;
-        // The overflow lands on the tool result, but the window cannot start
-        // there, so the owning assistant item stays and the cap is exceeded
-        // by one.
-        assert_eq!(history.len(), HISTORY_LIMIT + 1);
+        // The tool turn is the oldest of the ten kept turns and its items
+        // exceed what the simple turns carry — the window starts at its
+        // user message, never inside the exchange.
+        assert_eq!(history.first(), Some(&ChatItem::user("tool turn")));
         assert!(matches!(
-            history.first(),
+            history.get(1),
             Some(ChatItem::Assistant { tool_calls, .. }) if !tool_calls.is_empty()
         ));
-        assert_eq!(history[1], ChatItem::tool("1", "sunny"));
+        assert_eq!(history[2], ChatItem::tool("1", "sunny"));
+        assert_eq!(history.len(), 3 + (HISTORY_TURNS - 1) * 2);
         assert_eq!(
             history.last(),
-            Some(&ChatItem::user(format!("late{}", HISTORY_LIMIT - 1)))
+            Some(&ChatItem::assistant(format!("late a{}", HISTORY_TURNS - 1)))
         );
+    }
+
+    #[tokio::test]
+    async fn interim_replies_and_tools_belong_to_one_turn() {
+        let memory = InMemMemory::default();
+        for turn in 1..HISTORY_TURNS {
+            memory
+                .append(vec![ChatItem::user(format!("u{turn}"))])
+                .await;
+            memory
+                .append(vec![ChatItem::assistant(format!("a{turn}"))])
+                .await;
+        }
+        memory.append(vec![ChatItem::user("u")]).await;
+        memory
+            .append(vec![ChatItem::assistant("thinking out loud")])
+            .await;
+        memory
+            .append(vec![ChatItem::assistant_tool_calls(vec![ToolCall {
+                id: "1".into(),
+                name: "get_weather".into(),
+                arguments: "{}".into(),
+            }])])
+            .await;
+        memory.append(vec![ChatItem::tool("1", "sunny")]).await;
+        memory
+            .append(vec![ChatItem::assistant("sunny today")])
+            .await;
+
+        let history = memory.history().await;
+        // The complex turn counts once: the nine simple turns and its five
+        // items all fit inside the cap.
+        assert_eq!(history.len(), (HISTORY_TURNS - 1) * 2 + 5);
+        assert_eq!(history[HISTORY_TURNS * 2 - 2], ChatItem::user("u"));
+        assert_eq!(history.last(), Some(&ChatItem::assistant("sunny today")));
     }
 
     #[tokio::test]
