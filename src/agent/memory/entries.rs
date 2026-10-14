@@ -9,8 +9,8 @@ use tracing::warn;
 /// refuses beyond it — the model must update or delete instead.
 pub const MAX_ENTRIES: usize = 20;
 
-/// The display form of an entry id, as shown in the system prompt
-/// (`[mem_07]`) and echoed back by the memory tools.
+/// The display form of an entry id, the `id` attribute of a `<memory>`
+/// element in the system prompt and echoed back by the memory tools.
 pub fn entry_id(mem_no: i32) -> String {
     format!("mem_{mem_no:02}")
 }

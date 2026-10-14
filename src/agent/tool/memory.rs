@@ -113,7 +113,7 @@ impl Tool for MemoryUpdate {
     async fn call(&self, args: MemoryUpdateArgs) -> Result<String, String> {
         let mem_no = parse_id(&args.id).ok_or_else(|| {
             format!(
-                "invalid id `{}`; use the [mem_NN] shown in the prompt",
+                "invalid id `{}`; use the <memory> id shown in the prompt",
                 args.id
             )
         })?;
@@ -151,7 +151,7 @@ impl Tool for MemoryDelete {
     async fn call(&self, args: MemoryDeleteArgs) -> Result<String, String> {
         let mem_no = parse_id(&args.id).ok_or_else(|| {
             format!(
-                "invalid id `{}`; use the [mem_NN] shown in the prompt",
+                "invalid id `{}`; use the <memory> id shown in the prompt",
                 args.id
             )
         })?;
@@ -258,7 +258,7 @@ impl Tool for MemoryPropose {
                         ops.push(EntryOp::Update(mem_no, content));
                     }
                     (None, _) => plan.push(Err(format!(
-                        "invalid id `{id}`; use the [mem_NN] shown in the prompt"
+                        "invalid id `{id}`; use the <memory> id shown in the prompt"
                     ))),
                     (_, Err(err)) => plan.push(Err(err)),
                 },
@@ -268,7 +268,7 @@ impl Tool for MemoryPropose {
                         ops.push(EntryOp::Delete(mem_no));
                     }
                     None => plan.push(Err(format!(
-                        "invalid id `{id}`; use the [mem_NN] shown in the prompt"
+                        "invalid id `{id}`; use the <memory> id shown in the prompt"
                     ))),
                 },
             }
