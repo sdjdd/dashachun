@@ -2,22 +2,22 @@
 //! message rows the memory commits. Captured FLAC goes to an object store
 //! through the [`AudioStorage`] port and the `message_audios` row records its
 //! object key. The driver drives the session lifecycle (speech and tts
-//! boundaries) through the [`Capture`] handles; the memory's [`MemoryHook`]s
-//! deliver the message ids, so audio code never writes a message row and
-//! never sees one being planned.
+//! boundaries) through the [`Capture`] handles and binds each capture to its
+//! row at the store call site (`attach`/`attach_sink` with the id the store
+//! call returned or hands to its sink), so audio code never writes a message
+//! row and never receives a row that is not its own.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::agent::AgentSession;
-use crate::agent::memory::MemoryHook;
+use crate::agent::memory::OnCommit;
 use crate::audio::DOWNLINK;
 
 const BITS_PER_SAMPLE: usize = 16;
@@ -37,16 +37,14 @@ pub trait AudioStorage: Send + Sync {
 /// The audio-storage feature: captures the device's uplink and the
 /// synthesized reply, and stores them as `message_audios` rows linked by
 /// `message_id` to the rows the memory commits. One instance lives per
-/// connection; register it as a hook on the memory so captures learn their
-/// message ids, and hand it to the driver as the [`Capture`] implementation.
-/// A `None` storage disables storage entirely: captures still flow but
-/// store no rows and no objects.
+/// connection; hand it to the driver as the [`Capture`] implementation and
+/// bind each capture to its row through the store call's id (the attach
+/// sink or the returned id). A `None` storage disables storage entirely:
+/// captures still flow but store no rows and no objects.
 pub struct AudioCapture {
     pool: PgPool,
     client_id: Uuid,
     audio_storage: Option<Arc<dyn AudioStorage>>,
-    open_utterance: Mutex<Option<oneshot::Sender<i64>>>,
-    open_reply: Mutex<Option<oneshot::Sender<i64>>>,
 }
 
 impl AudioCapture {
@@ -59,31 +57,13 @@ impl AudioCapture {
             pool,
             client_id,
             audio_storage,
-            open_utterance: Mutex::new(None),
-            open_reply: Mutex::new(None),
-        }
-    }
-}
-
-impl MemoryHook for AudioCapture {
-    fn utterance_stored(&self, _session: &AgentSession, message_id: i64) {
-        if let Some(tx) = self.open_utterance.lock().unwrap().take() {
-            let _ = tx.send(message_id);
-        }
-    }
-
-    fn turn_stored(&self, _session: &AgentSession, message_id: i64) {
-        if let Some(tx) = self.open_reply.lock().unwrap().take() {
-            let _ = tx.send(message_id);
         }
     }
 }
 
 impl Capture for AudioCapture {
     fn start_utterance(&self, session: &AgentSession) -> UtteranceCapture {
-        let (capture, mut rx) = UtteranceCapture::channel();
-        let (tx_id, rx_id) = oneshot::channel();
-        *self.open_utterance.lock().unwrap() = Some(tx_id);
+        let (capture, mut rx, mut id_rx) = UtteranceCapture::channel();
         let pool = self.pool.clone();
         let client_id = self.client_id;
         let audio_storage = self.audio_storage.clone();
@@ -94,7 +74,7 @@ impl Capture for AudioCapture {
             let Some(chunks) = collect(&mut rx).await else {
                 return;
             };
-            let Ok(message_id) = rx_id.await else {
+            let Some(message_id) = id_rx.recv().await else {
                 debug!(session_id, "utterance audio discarded: no message row");
                 return;
             };
@@ -119,9 +99,7 @@ impl Capture for AudioCapture {
     }
 
     fn start_reply(&self, session: &AgentSession) -> ReplyCapture {
-        let (capture, mut rx) = ReplyCapture::channel();
-        let (tx_id, rx_id) = oneshot::channel();
-        *self.open_reply.lock().unwrap() = Some(tx_id);
+        let (capture, mut rx, mut id_rx) = ReplyCapture::channel();
         let pool = self.pool.clone();
         let client_id = self.client_id;
         let audio_storage = self.audio_storage.clone();
@@ -130,7 +108,7 @@ impl Capture for AudioCapture {
             let Some(chunks) = collect(&mut rx).await else {
                 return;
             };
-            let Ok(message_id) = rx_id.await else {
+            let Some(message_id) = id_rx.recv().await else {
                 debug!(session_id, "reply audio discarded: no message row");
                 return;
             };
@@ -182,15 +160,17 @@ pub enum Frame {
 #[derive(Clone)]
 pub struct UtteranceCapture {
     tx: mpsc::UnboundedSender<Frame>,
+    id_tx: mpsc::Sender<i64>,
 }
 
 impl UtteranceCapture {
-    /// Opens a capture channel for custom [`Capture`] implementations. The
-    /// consumer receives chunks in order and at most one finish, then the
-    /// channel closes.
-    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Frame>) {
+    /// Opens a capture channel for custom [`Capture`] implementations: the
+    /// frame channel for [`collect`], the id receiver for the row the
+    /// capture's own store call committed.
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Frame>, mpsc::Receiver<i64>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx }, rx)
+        let (id_tx, id_rx) = mpsc::channel(1);
+        (Self { tx, id_tx }, rx, id_rx)
     }
 
     /// Feeds one decoded uplink chunk. Non-blocking by contract: the caller
@@ -199,9 +179,18 @@ impl UtteranceCapture {
         let _ = self.tx.send(Frame::Chunk(samples.to_vec()));
     }
 
+    /// Attaches the capture to the message row its own store call
+    /// committed: the id comes straight from the awaited `store_utterance`
+    /// return, so a capture can never receive a row that is not its own —
+    /// captures overlap in time, a shared routing slot could not tell them
+    /// apart. A second attach is ignored.
+    pub fn attach(&self, message_id: i64) {
+        let _ = self.id_tx.try_send(message_id);
+    }
+
     /// Ends the capture: the audio attaches to the user message row the
-    /// memory commits (delivered through the hook). Dropping the capture
-    /// without finishing discards it.
+    /// memory commits (bound through [`Self::attach`]). Dropping the
+    /// capture without finishing discards it.
     pub fn finish(self) {
         let _ = self.tx.send(Frame::Finish);
     }
@@ -211,23 +200,42 @@ impl UtteranceCapture {
 /// server's downlink format. Finishing attaches the audio to the last
 /// message row the memory commits for the turn; dropping it discards the
 /// capture.
+#[derive(Clone)]
 pub struct ReplyCapture {
     tx: mpsc::UnboundedSender<Frame>,
+    id_tx: mpsc::Sender<i64>,
 }
 
 impl ReplyCapture {
-    /// Opens a capture channel for custom [`Capture`] implementations. The
-    /// consumer receives chunks in order and at most one finish, then the
-    /// channel closes.
-    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Frame>) {
+    /// Opens a capture channel for custom [`Capture`] implementations: the
+    /// frame channel for [`collect`], the id receiver for the row the
+    /// turn's store call committed.
+    pub fn channel() -> (Self, mpsc::UnboundedReceiver<Frame>, mpsc::Receiver<i64>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        (Self { tx }, rx)
+        let (id_tx, id_rx) = mpsc::channel(1);
+        (Self { tx, id_tx }, rx, id_rx)
     }
 
     /// Feeds one synthesized chunk. Non-blocking by contract: the caller is
     /// the agent driver, which must never wait on storage.
     pub fn push(&self, samples: &[f32]) {
         let _ = self.tx.send(Frame::Chunk(samples.to_vec()));
+    }
+
+    /// Attaches the capture to the message row its own store call
+    /// committed — the last row of the turn, full or truncated partial
+    /// alike. A second attach is ignored.
+    pub fn attach(&self, message_id: i64) {
+        let _ = self.id_tx.try_send(message_id);
+    }
+
+    /// The attach sink for the turn's store call (`log_items` /
+    /// `store_partial_reply`): a [`Clone`] of this handle behind the
+    /// callback, so the id lands even though the driver's own handle was
+    /// finished by then — the store runs in a background task.
+    pub fn attach_sink(&self) -> OnCommit {
+        let capture = self.clone();
+        Box::new(move |message_id| capture.attach(message_id))
     }
 
     /// Ends the capture: the audio attaches to the last message row the
@@ -420,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_capture_collects_nothing() {
-        let (capture, mut rx) = UtteranceCapture::channel();
+        let (capture, mut rx, _id_rx) = UtteranceCapture::channel();
         capture.push(&[0.5]);
         drop(capture);
         assert!(collect(&mut rx).await.is_none());
@@ -428,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn finished_capture_collects_chunks_in_order() {
-        let (capture, mut rx) = ReplyCapture::channel();
+        let (capture, mut rx, _id_rx) = ReplyCapture::channel();
         capture.push(&[0.25, 0.5]);
         capture.push(&[-0.25]);
         capture.finish();
@@ -436,5 +444,22 @@ mod tests {
             collect(&mut rx).await,
             Some(vec![vec![0.25, 0.5], vec![-0.25]])
         );
+    }
+
+    #[tokio::test]
+    async fn the_first_attach_wins_and_the_id_survives_the_finish() {
+        let (capture, mut rx, mut id_rx) = UtteranceCapture::channel();
+        capture.attach(7);
+        capture.attach(9);
+        capture.finish();
+        assert!(collect(&mut rx).await.is_some());
+        assert_eq!(id_rx.recv().await, Some(7));
+    }
+
+    #[tokio::test]
+    async fn a_finished_capture_without_an_attach_yields_no_id() {
+        let (capture, _rx, mut id_rx) = ReplyCapture::channel();
+        capture.finish();
+        assert_eq!(id_rx.recv().await, None);
     }
 }

@@ -20,7 +20,7 @@ use tower::ServiceExt;
 pub type TestApp = tower_http::normalize_path::NormalizePath<axum::Router>;
 
 use dashachun::agent::{
-    AgentFactory, AgentSession, AgentStore, AudioStorage, ChatItem, MemoryHook, ToolSet,
+    AgentFactory, AgentSession, AgentStore, AudioStorage, ChatItem, MemoryHook, OnCommit, ToolSet,
 };
 use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
@@ -286,40 +286,42 @@ pub async fn device_session(pool: &PgPool, id: &str, device_id: i64, agent_id: i
         .unwrap();
 }
 
-/// Records the message ids the memory announces and the batches it hands
-/// to the window hook, for hook assertions.
+/// Records the batches the memory hands to the window hook, for hook
+/// assertions.
 #[derive(Default)]
 pub struct RecordingHook {
-    utterances: Mutex<Vec<i64>>,
-    turns: Mutex<Vec<i64>>,
     appends: Mutex<Vec<Vec<ChatItem>>>,
 }
 
 impl MemoryHook for RecordingHook {
-    fn utterance_stored(&self, _session: &AgentSession, message_id: i64) {
-        self.utterances.lock().unwrap().push(message_id);
-    }
-
-    fn turn_stored(&self, _session: &AgentSession, message_id: i64) {
-        self.turns.lock().unwrap().push(message_id);
-    }
-
     fn appended(&self, _session: &AgentSession, items: &[ChatItem]) {
         self.appends.lock().unwrap().push(items.to_vec());
     }
 }
 
 impl RecordingHook {
-    pub fn utterance_ids(&self) -> Vec<i64> {
-        self.utterances.lock().unwrap().clone()
-    }
-
-    pub fn turn_ids(&self) -> Vec<i64> {
-        self.turns.lock().unwrap().clone()
-    }
-
     pub fn appends(&self) -> Vec<Vec<ChatItem>> {
         self.appends.lock().unwrap().clone()
+    }
+}
+
+/// Collects the ids store calls hand to their attach sinks — the
+/// durable-row view the sinks carry.
+#[derive(Default)]
+pub struct IdSink {
+    ids: Mutex<Vec<i64>>,
+}
+
+impl IdSink {
+    /// The sink to pass to `log_items`/`store_partial_reply`; clone the
+    /// `Arc` per call or share one — ids arrive in commit order.
+    pub fn sink(self: &Arc<Self>) -> OnCommit {
+        let sink = self.clone();
+        Box::new(move |id| sink.ids.lock().unwrap().push(id))
+    }
+
+    pub fn ids(&self) -> Vec<i64> {
+        self.ids.lock().unwrap().clone()
     }
 }
 

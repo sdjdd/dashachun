@@ -13,9 +13,9 @@ use tracing::{Instrument, debug, info, trace, warn};
 use super::{Cancellable, CompositeAgent, ListenEvent, TTS_TEXT_CHANNEL_CAPACITY, stop_task};
 use crate::agent::tool::stop_after_memory_writes;
 use crate::agent::{
-    AgentOutput, AgentSession, Capture, ChatItem, Llm, Memory, ReasoningEffort, ReplyCapture,
-    StreamEvent, StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolSet, Tts, TtsEvent,
-    emotion, labelled_utterance, stream_text,
+    AgentOutput, AgentSession, Capture, ChatItem, Llm, Memory, OnCommit, ReasoningEffort,
+    ReplyCapture, StreamEvent, StreamTextParams, Subtitle, SystemPrompt, TextStream, ToolSet, Tts,
+    TtsEvent, emotion, labelled_utterance, stream_text,
 };
 use crate::util::recv_stream;
 
@@ -77,11 +77,16 @@ impl Cut {
 }
 
 /// The live reply: the current turn slot, the speaking flag and the
-/// partially streamed reply's bookkeeping — everything a cut touches.
+/// partially streamed reply's bookkeeping — everything a cut touches. The
+/// capture and its attach sink are created together at turn start, so the
+/// store call's sink exists no matter how the turn's events interleave —
+/// `ReplyDone` can be processed before the first synthesized audio, and
+/// the natural `TtsStop` can beat `ReplyDone` back through the channel.
 struct LiveReply {
     turn: Option<Turn>,
     speaking: bool,
     capture: Option<ReplyCapture>,
+    sink: Option<OnCommit>,
     turn_logged: bool,
     streamed: String,
 }
@@ -92,26 +97,37 @@ impl LiveReply {
             turn: None,
             speaking: false,
             capture: None,
+            sink: None,
             turn_logged: false,
             streamed: String::new(),
         }
     }
 
-    /// Records one synthesized chunk, lazily opening the reply capture.
-    fn record(&mut self, capture: &dyn Capture, session: &AgentSession, samples: &[f32]) {
-        let recording = self
-            .capture
-            .get_or_insert_with(|| capture.start_reply(session));
-        recording.push(samples);
+    /// Opens the turn's reply capture and pre-binds its attach sink: the
+    /// store call for this turn carries exactly this capture's sink, so a
+    /// late commit can never land in a later turn's capture and this
+    /// turn's commit reaches it no matter the event order.
+    fn started(&mut self, capture: &dyn Capture, session: &AgentSession) {
+        let recording = capture.start_reply(session);
+        self.sink = Some(recording.attach_sink());
+        self.capture = Some(recording);
+    }
+
+    /// Records one synthesized chunk into the turn's capture.
+    fn record(&mut self, samples: &[f32]) {
+        if let Some(recording) = self.capture.as_ref() {
+            recording.push(samples);
+        }
     }
 
     /// The natural `TtsStop`: finish any open capture — the audio attaches
-    /// to the logged turn row — and clear the per-turn bookkeeping.
+    /// through the pre-bound sink — and clear the per-turn bookkeeping.
     fn stopped(&mut self) {
         self.speaking = false;
         if let Some(recording) = self.capture.take() {
             recording.finish();
         }
+        self.sink = None;
         self.turn_logged = false;
         self.streamed.clear();
     }
@@ -147,12 +163,12 @@ impl LiveReply {
     }
 
     /// Ends the reply audio capture at a cut (barge-in, provider error):
-    /// when the turn completed the audio attaches to the stored reply row,
-    /// otherwise the partially streamed text is stored as a truncated
-    /// assistant row and the partial audio attaches to it — both through
-    /// the memory's hooks. A reply that never produced text (and no turn
-    /// row) just discards the capture. A session teardown drops the
-    /// handles, which discards it too.
+    /// when the turn completed the audio attaches to the stored reply row
+    /// (the sink `ReplyDone` consumed), otherwise the partially streamed
+    /// text is stored as a truncated assistant row and the partial audio
+    /// attaches through the still pre-bound sink. A reply that never
+    /// produced text (and no turn row) just discards the capture. A
+    /// session teardown drops the handles, which discards it too.
     fn settle(&mut self, memory: &Arc<dyn Memory>, session: &AgentSession) {
         if let Some(recording) = self.capture.take() {
             if self.turn_logged {
@@ -162,11 +178,12 @@ impl LiveReply {
                 if text.is_empty() {
                     drop(recording);
                 } else {
-                    memory.store_partial_reply(session, &text);
+                    memory.store_partial_reply(session, &text, self.sink.take());
                     recording.finish();
                 }
             }
         }
+        self.sink = None;
         self.turn_logged = false;
         self.streamed.clear();
     }
@@ -247,6 +264,9 @@ pub(super) async fn reply_stage(
                                 ))],
                             )
                             .await;
+                        if let Some(capture) = agent.capture.as_deref() {
+                            reply.started(capture, &session);
+                        }
                         let entries = agent.entries.list().await;
                         let prompt = agent.system_prompt.for_turn(&entries, &agent.speakers);
                         let history = agent.memory.history().await;
@@ -294,9 +314,7 @@ pub(super) async fn reply_stage(
                         }
                     }
                     ReplyEvent::Audio { samples } => {
-                        if let Some(capture) = agent.capture.as_deref() {
-                            reply.record(capture, &session, &samples);
-                        }
+                        reply.record(&samples);
                         if out_tx.send(AgentOutput::Audio(samples)).await.is_err() {
                             break;
                         }
@@ -333,7 +351,10 @@ pub(super) async fn reply_stage(
                     }
                     ReplyEvent::ReplyDone { reply: text, items } => {
                         info!(session_id = %session.id, %text, "llm result");
-                        agent.memory.log_items(&session, items.clone());
+                        // The turn's audio attaches through the sink the
+                        // turn start pre-bound — exactly this turn's store
+                        // call, immune to the event interleaving.
+                        agent.memory.log_items(&session, items.clone(), reply.sink.take());
                         reply.turn_logged = true;
                         agent.memory.append(&session, items).await;
                     }

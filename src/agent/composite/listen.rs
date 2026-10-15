@@ -369,20 +369,23 @@ async fn run_asr(
             Ok(AsrEvent::Partial { text }) => AsrUpdate::Partial { epoch, text },
             Ok(AsrEvent::Final { text }) => {
                 // The utterance is real speech even when the turn was
-                // superseded, so the row is stored regardless of the cancel
-                // token; the capture learns its message id through the
-                // memory's hook, not from here. The speaker resolves before
-                // the store: the row carries the same attribution the turn
-                // is labeled with.
+                // superseded, so the row is stored whenever the task itself
+                // was not cancelled mid-speech. The capture attaches to the
+                // id this store call returns — its own row, never a later
+                // utterance's, however far behind the final lags. The
+                // speaker resolves before the store: the row carries the
+                // same attribution the turn is labeled with.
                 let mut speaker = None;
                 if !cancel.is_cancelled() && !text.is_empty() {
                     speaker = resolve_speaker(speaker_rx).await;
                     match memory.store_utterance(&session, &text, speaker).await {
-                        Ok(()) => {
+                        Ok(Some(message_id)) => {
                             if let Some(capture) = capture {
+                                capture.attach(message_id);
                                 capture.finish();
                             }
                         }
+                        Ok(None) => {}
                         Err(err) => {
                             warn!(session_id = %session.id, %err, "failed to store utterance");
                         }

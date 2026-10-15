@@ -109,11 +109,12 @@ impl AgentFactory {
         // clone of it with its own memory tools.
         let entries: Arc<dyn EntryMemory> =
             Arc::new(DbEntryMemory::new(self.pool.clone(), user_id, agent_id));
-        // The audio feature plugs in here: it implements both the driver's
-        // Capture surface and the memory's MemoryHook, so committed rows
-        // hand their ids straight to the open captures. The storage is the
-        // caller's slot snapshot, taken per connection — a settings swap
-        // applies to every new session without touching the generation.
+        // The audio feature plugs in here: the driver's Capture surface —
+        // each capture handle carries its own id channel, and the store
+        // call sites bind the committed row's id to the very capture that
+        // produced the audio. The storage is the caller's slot snapshot,
+        // taken per connection — a settings swap applies to every new
+        // session without touching the generation.
         let audio = Arc::new(AudioCapture::new(
             self.pool.clone(),
             record.client_id,
@@ -154,24 +155,18 @@ impl AgentFactory {
             }
             None => (None, Vec::new()),
         };
-        // The background extractor is the memory's second hook, next to the
-        // audio capture: it sees exactly this connection's window appends —
-        // the announced batches buffer until a batch is full, then one
-        // background extraction proposes entry changes against the same
-        // entry memory the tools write and the prompt reads, with the
-        // session's speaker roster in its prompt.
+        // The background extractor is the memory's one hook: it sees
+        // exactly this connection's window appends — the announced batches
+        // buffer until a batch is full, then one background extraction
+        // proposes entry changes against the same entry memory the tools
+        // write and the prompt reads, with the session's speaker roster in
+        // its prompt.
         let extractor = Arc::new(Extractor::new(
             Arc::clone(&self.llm),
             Arc::clone(&entries),
             speakers.clone(),
         ));
-        let memory = DbMemory::new(
-            self.pool.clone(),
-            vec![
-                audio.clone() as Arc<dyn MemoryHook>,
-                extractor as Arc<dyn MemoryHook>,
-            ],
-        );
+        let memory = DbMemory::new(self.pool.clone(), vec![extractor as Arc<dyn MemoryHook>]);
         let tools = self.tools.clone().merge(memory_tools(&entries));
         Ok(Arc::new(CompositeAgent {
             asr: self.asr.clone(),

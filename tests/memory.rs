@@ -8,7 +8,7 @@ mod common;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use common::{RecordingHook, session};
+use common::{IdSink, RecordingHook, session};
 use dashachun::agent::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor, Llm,
     LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ReasoningEffort,
@@ -98,6 +98,7 @@ async fn a_new_session_starts_with_an_empty_window(pool: PgPool) {
             ChatItem::tool("call_a", "sunny 26 degrees"),
             ChatItem::assistant("sunny today"),
         ],
+        None,
     );
     common::wait_for_count(&pool, "messages", 4).await;
 
@@ -157,24 +158,18 @@ async fn appended_batches_are_announced_to_the_hooks(pool: PgPool) {
             vec![ChatItem::assistant("hi there")],
         ]
     );
-    // The append announce carries no row ids — the storage hooks stay quiet.
-    assert!(hook.utterance_ids().is_empty());
-    assert!(hook.turn_ids().is_empty());
 }
 
 #[sqlx::test]
 #[ignore]
 async fn utterance_row_is_written_and_announced(pool: PgPool) {
-    let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::new(
-        pool.clone(),
-        vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    );
+    let memory = DbMemory::new(pool.clone(), vec![]);
 
-    memory
+    let message_id = memory
         .store_utterance(&session("sess-1"), "hello there", None)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("a non-empty utterance stores a row");
 
     common::wait_for_count(&pool, "messages", 1).await;
     let row = sqlx::query_as::<_, (String, Option<String>)>(
@@ -190,16 +185,15 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(hook.utterance_ids(), vec![id]);
-    assert!(hook.turn_ids().is_empty());
+    assert_eq!(message_id, id);
 
-    // An empty utterance writes nothing and announces nothing.
-    memory
+    // An empty utterance stores nothing and returns no id.
+    let empty = memory
         .store_utterance(&session("sess-1"), "", None)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(hook.utterance_ids().len(), 1);
+    assert_eq!(empty, None);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
         .fetch_one(&pool)
         .await
@@ -238,7 +232,7 @@ async fn the_utterance_row_records_its_speaker(pool: PgPool) {
         ]
     );
 
-    memory.log_items(&session("s1"), vec![ChatItem::assistant("hi")]);
+    memory.log_items(&session("s1"), vec![ChatItem::assistant("hi")], None);
     common::wait_for_count(&pool, "messages", 3).await;
     let assistant_speaker: Option<i64> =
         sqlx::query_scalar("SELECT speaker_id FROM messages ORDER BY id DESC LIMIT 1")
@@ -251,11 +245,8 @@ async fn the_utterance_row_records_its_speaker(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
-    let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::new(
-        pool.clone(),
-        vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    );
+    let ids = Arc::new(IdSink::default());
+    let memory = DbMemory::new(pool.clone(), vec![]);
 
     memory.log_items(
         &session("sess-2"),
@@ -268,6 +259,7 @@ async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
             ChatItem::tool("call_x", "sunny 26 degrees"),
             ChatItem::assistant("🙂sunny today"),
         ],
+        Some(ids.sink()),
     );
 
     common::wait_for_count(&pool, "messages", 3).await;
@@ -293,12 +285,12 @@ async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
         serde_json::json!({"role": "assistant", "content": "🙂sunny today"})
     );
 
-    // The hook carries the last written row's id — the audio attach point.
+    // The sink carries the last written row's id — the audio attach point.
     let id: i64 = sqlx::query_scalar("SELECT id FROM messages ORDER BY id DESC LIMIT 1")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(hook.turn_ids(), vec![id]);
+    assert_eq!(ids.ids(), vec![id]);
 }
 
 #[sqlx::test]
@@ -322,6 +314,7 @@ async fn multi_round_tool_exchange_stores_one_row_per_message(pool: PgPool) {
             ChatItem::tool("call_b", "result b"),
             ChatItem::assistant("done"),
         ],
+        None,
     );
 
     common::wait_for_count(&pool, "messages", 5).await;
@@ -346,11 +339,8 @@ async fn multi_round_tool_exchange_stores_one_row_per_message(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn tool_only_turn_stores_rows_without_content(pool: PgPool) {
-    let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::new(
-        pool.clone(),
-        vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    );
+    let ids = Arc::new(IdSink::default());
+    let memory = DbMemory::new(pool.clone(), vec![]);
 
     memory.log_items(
         &session("sess-10"),
@@ -362,6 +352,7 @@ async fn tool_only_turn_stores_rows_without_content(pool: PgPool) {
             }]),
             ChatItem::tool("call_x", "result"),
         ],
+        Some(ids.sink()),
     );
 
     common::wait_for_count(&pool, "messages", 2).await;
@@ -383,20 +374,21 @@ async fn tool_only_turn_stores_rows_without_content(pool: PgPool) {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(hook.turn_ids(), vec![id]);
+    assert_eq!(ids.ids(), vec![id]);
 }
 
 #[sqlx::test]
 #[ignore]
 async fn turns_without_storable_content_write_nothing(pool: PgPool) {
-    let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::new(
-        pool.clone(),
-        vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    );
+    let ids = Arc::new(IdSink::default());
+    let memory = DbMemory::new(pool.clone(), vec![]);
 
-    memory.log_items(&session("sess-3"), vec![ChatItem::system("system prompt")]);
-    memory.log_items(&session("sess-3"), vec![]);
+    memory.log_items(
+        &session("sess-3"),
+        vec![ChatItem::system("system prompt")],
+        Some(ids.sink()),
+    );
+    memory.log_items(&session("sess-3"), vec![], Some(ids.sink()));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
@@ -404,20 +396,21 @@ async fn turns_without_storable_content_write_nothing(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 0);
-    assert!(hook.turn_ids().is_empty());
+    assert!(ids.ids().is_empty());
 }
 
 #[sqlx::test]
 #[ignore]
 async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
-    let hook = std::sync::Arc::new(RecordingHook::default());
-    let memory = DbMemory::new(
-        pool.clone(),
-        vec![hook.clone() as std::sync::Arc<dyn MemoryHook>],
-    );
+    let ids = Arc::new(IdSink::default());
+    let memory = DbMemory::new(pool.clone(), vec![]);
 
-    memory.store_partial_reply(&session("sess-4"), "partially spoke");
-    memory.log_items(&session("sess-4"), vec![ChatItem::assistant("ok")]);
+    memory.store_partial_reply(&session("sess-4"), "partially spoke", Some(ids.sink()));
+    memory.log_items(
+        &session("sess-4"),
+        vec![ChatItem::assistant("ok")],
+        Some(ids.sink()),
+    );
     common::wait_for_count(&pool, "messages", 2).await;
 
     // The two writes run in independent background tasks, so the commit
@@ -434,10 +427,19 @@ async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
     assert_eq!(rows[0].1.as_deref(), Some("ok"));
     assert_eq!(rows[1].0, "assistant");
     assert_eq!(rows[1].1.as_deref(), Some("partially spoke"));
-    assert_eq!(hook.turn_ids().len(), 2);
+
+    // Each write handed its own row's id to the sink.
+    let mut stored: Vec<i64> = sqlx::query_scalar("SELECT id FROM messages ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    stored.sort();
+    let mut announced = ids.ids();
+    announced.sort();
+    assert_eq!(announced, stored);
 
     // An empty partial stores nothing.
-    memory.store_partial_reply(&session("sess-4"), "");
+    memory.store_partial_reply(&session("sess-4"), "", None);
     tokio::time::sleep(Duration::from_millis(100)).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
         .fetch_one(&pool)

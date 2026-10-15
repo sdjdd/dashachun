@@ -352,7 +352,10 @@ async fn wait_for_replies(replies: &StoredReplies, len: usize) -> Vec<FakeReply>
     .await
 }
 
-async fn wait_for_utterances(utterances: &StoredUtterances, len: usize) -> Vec<Vec<Vec<f32>>> {
+async fn wait_for_utterances(
+    utterances: &StoredUtterances,
+    len: usize,
+) -> Vec<(Vec<Vec<f32>>, Option<i64>)> {
     wait_until("fake utterances", || {
         let snapshot = utterances.lock().unwrap().clone();
         (snapshot.len() >= len).then_some(snapshot)
@@ -1217,8 +1220,9 @@ async fn interrupt_cancels_in_flight_tts_instead_of_aborting() {
     wait_until("tts cancelled", || cancelled.lock().unwrap().then_some(())).await;
 }
 
-/// In-memory capture: records which utterances and replies finished,
-/// with their chunks; dropping a capture records a discard.
+/// In-memory capture: records which utterances and replies finished —
+/// with their chunks and the message id each capture attached — and which
+/// were discarded.
 struct FakeCapture {
     utterances: StoredUtterances,
     replies: StoredReplies,
@@ -1227,37 +1231,46 @@ struct FakeCapture {
 /// How a fake reply capture ended, mirroring the driver's outcomes.
 #[derive(Debug, Clone, PartialEq)]
 enum FakeReply {
-    Finished { chunks: Vec<Vec<f32>> },
+    Finished {
+        chunks: Vec<Vec<f32>>,
+        id: Option<i64>,
+    },
     Discarded,
 }
 
 impl Capture for FakeCapture {
     fn start_utterance(&self, _session: &AgentSession) -> UtteranceCapture {
-        let (recording, mut rx) = UtteranceCapture::channel();
+        let (recording, mut rx, mut id_rx) = UtteranceCapture::channel();
         let utterances = self.utterances.clone();
         tokio::spawn(async move {
-            if let Some(chunks) = collect(&mut rx).await {
-                utterances.lock().unwrap().push(chunks);
-            }
+            let Some(chunks) = collect(&mut rx).await else {
+                return;
+            };
+            let id = id_rx.recv().await;
+            utterances.lock().unwrap().push((chunks, id));
         });
         recording
     }
 
     fn start_reply(&self, _session: &AgentSession) -> ReplyCapture {
-        let (recording, mut rx) = ReplyCapture::channel();
+        let (recording, mut rx, mut id_rx) = ReplyCapture::channel();
         let replies = self.replies.clone();
         tokio::spawn(async move {
             let Some(chunks) = collect(&mut rx).await else {
                 replies.lock().unwrap().push(FakeReply::Discarded);
                 return;
             };
-            replies.lock().unwrap().push(FakeReply::Finished { chunks });
+            let id = id_rx.recv().await;
+            replies
+                .lock()
+                .unwrap()
+                .push(FakeReply::Finished { chunks, id });
         });
         recording
     }
 }
 
-type StoredUtterances = Arc<Mutex<Vec<Vec<Vec<f32>>>>>;
+type StoredUtterances = Arc<Mutex<Vec<(Vec<Vec<f32>>, Option<i64>)>>>;
 type StoredReplies = Arc<Mutex<Vec<FakeReply>>>;
 
 fn fake_capture() -> (Arc<FakeCapture>, StoredUtterances, StoredReplies) {
@@ -1292,11 +1305,12 @@ async fn finalized_utterance_stores_text_and_audio() {
     })
     .await;
 
-    // The memory row is written (and the hook fired) before the capture
-    // is finished, so the text is recorded by the time the audio lands.
+    // The memory row is written (and its id attached) before the capture
+    // is finished, so the text and the row id are recorded by the time the
+    // audio lands. The utterance's store is the memory's first row.
     assert_eq!(
         wait_for_utterances(&utterances, 1).await,
-        vec![vec![vec![0.5; 960]]]
+        vec![(vec![vec![0.5; 960]], Some(1))]
     );
     assert_eq!(memory.stored_utterances(), vec!["hello"]);
 }
@@ -1478,7 +1492,8 @@ async fn completed_reply_audio_is_stored() {
     tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
     // The natural tts stop finishes the capture; the audio attaches to
-    // the turn row through the memory's hook.
+    // the turn row whose id the log_items store handed to the capture's
+    // sink. The utterance's row was the memory's first.
     next_matching(&mut output, |item| matches!(item, AgentOutput::TtsStop)).await;
 
     let stored = wait_for_replies(&replies, 1).await;
@@ -1486,6 +1501,7 @@ async fn completed_reply_audio_is_stored() {
         stored,
         vec![FakeReply::Finished {
             chunks: vec![vec![0.25; 960]],
+            id: Some(2),
         }]
     );
 }
@@ -1522,6 +1538,7 @@ async fn aborted_reply_after_done_keeps_the_full_row_attachment() {
         stored,
         vec![FakeReply::Finished {
             chunks: vec![vec![0.25; 960]],
+            id: Some(2),
         }]
     );
 }
@@ -1575,8 +1592,9 @@ async fn aborted_reply_before_done_stores_the_truncated_row() {
     tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
 
     // The llm error aborts the reply mid-flight: the driver stores the
-    // partially streamed text as a truncated assistant row and the
-    // capture attaches the partial audio through the hook.
+    // partially streamed text as a truncated assistant row and the capture
+    // attaches the partial audio to that row's id (the memory's second row
+    // — the utterance's was the first).
     next_matching(&mut output, |item| {
         matches!(item, AgentOutput::Error { .. })
     })
@@ -1587,6 +1605,7 @@ async fn aborted_reply_before_done_stores_the_truncated_row() {
         stored,
         vec![FakeReply::Finished {
             chunks: vec![vec![0.25; 960]],
+            id: Some(2),
         }]
     );
     assert_eq!(memory.stored_partials(), vec!["hi"]);

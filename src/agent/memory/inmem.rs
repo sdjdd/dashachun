@@ -1,17 +1,19 @@
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use async_trait::async_trait;
 
 use crate::agent::AgentSession;
 use crate::agent::ChatItem;
 
-use super::{Memory, Turn, trim};
+use super::{Memory, OnCommit, Turn, trim};
 
 /// Keeps the conversation in process memory, starting empty; its state dies
 /// with the session. Test helper — mirrors the durable semantics (the
-/// production [`super::DbMemory`] adds the Postgres writes and the hook
-/// fan-out): empty utterances, empty turns and empty partials store
-/// nothing; the store calls are recorded for assertions.
+/// production [`super::DbMemory`] adds the Postgres writes): empty
+/// utterances, empty turns and empty partials store nothing; the store
+/// calls are recorded for assertions and hand out fake ids from one shared
+/// counter, so the attach sinks observe the same order the rows would.
 #[derive(Default)]
 pub struct InMemMemory {
     turns: Mutex<Vec<Turn>>,
@@ -19,9 +21,16 @@ pub struct InMemMemory {
     speakers: Mutex<Vec<Option<i64>>>,
     logged_turns: Mutex<Vec<Vec<ChatItem>>>,
     partials: Mutex<Vec<String>>,
+    next_id: AtomicI64,
 }
 
 impl InMemMemory {
+    /// The next fake row id — one shared sequence across every store call,
+    /// mirroring the durable log's single id sequence.
+    fn next_id(&self) -> i64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
     /// The utterance texts passed to [`Memory::store_utterance`], in order.
     pub fn stored_utterances(&self) -> Vec<String> {
         self.utterances.lock().unwrap().clone()
@@ -75,23 +84,32 @@ impl Memory for InMemMemory {
         _session: &AgentSession,
         text: &str,
         speaker: Option<i64>,
-    ) -> Result<(), String> {
-        if !text.is_empty() {
-            self.utterances.lock().unwrap().push(text.to_string());
-            self.speakers.lock().unwrap().push(speaker);
+    ) -> Result<Option<i64>, String> {
+        if text.is_empty() {
+            return Ok(None);
         }
-        Ok(())
+        self.utterances.lock().unwrap().push(text.to_string());
+        self.speakers.lock().unwrap().push(speaker);
+        Ok(Some(self.next_id()))
     }
 
-    fn log_items(&self, _session: &AgentSession, items: Vec<ChatItem>) {
-        if !items.is_empty() {
-            self.logged_turns.lock().unwrap().push(items);
+    fn log_items(&self, _session: &AgentSession, items: Vec<ChatItem>, attach: Option<OnCommit>) {
+        if items.is_empty() {
+            return;
+        }
+        self.logged_turns.lock().unwrap().push(items);
+        if let Some(attach) = attach {
+            attach(self.next_id());
         }
     }
 
-    fn store_partial_reply(&self, _session: &AgentSession, text: &str) {
-        if !text.is_empty() {
-            self.partials.lock().unwrap().push(text.to_string());
+    fn store_partial_reply(&self, _session: &AgentSession, text: &str, attach: Option<OnCommit>) {
+        if text.is_empty() {
+            return;
+        }
+        self.partials.lock().unwrap().push(text.to_string());
+        if let Some(attach) = attach {
+            attach(self.next_id());
         }
     }
 }
@@ -228,8 +246,8 @@ mod tests {
     async fn empty_store_calls_record_nothing() {
         let memory = InMemMemory::default();
         memory.store_utterance(&session(), "", None).await.unwrap();
-        memory.log_items(&session(), vec![]);
-        memory.store_partial_reply(&session(), "");
+        memory.log_items(&session(), vec![], None);
+        memory.store_partial_reply(&session(), "", None);
 
         assert!(memory.stored_utterances().is_empty());
         assert!(memory.logged_turns().is_empty());

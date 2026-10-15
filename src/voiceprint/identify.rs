@@ -47,7 +47,9 @@ impl SpeakerMatcher {
     /// held by the caller from the start (the listening stage hands it to
     /// the utterance's ASR task, which resolves it at the final).
     pub fn tap(&self, session: &AgentSession) -> (SpeakerTap, SpeakerResult) {
-        let (tap, mut rx) = UtteranceCapture::channel();
+        // The tap collects samples like an audio capture but binds no row:
+        // its id receiver is dropped — nothing attaches to a tap.
+        let (tap, mut rx, _id_rx) = UtteranceCapture::channel();
         let (result_tx, result_rx) = oneshot::channel();
         let matcher = self.clone();
         let session_id = session.id.clone();

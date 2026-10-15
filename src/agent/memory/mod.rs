@@ -2,7 +2,8 @@
 //! conversation turns, over the durable `messages` log, plus the
 //! entry-based user memory the prompt reads and the memory tools maintain.
 //! Text only — audio storage is a separate feature ([`AudioCapture`]) that
-//! attaches to committed rows through [`MemoryHook`].
+//! binds to committed rows through the ids the store calls return or hand
+//! to their attach sinks.
 
 mod db;
 mod entries;
@@ -22,25 +23,23 @@ pub use entries::{
 pub use extract::Extractor;
 pub use inmem::InMemMemory;
 
-/// Observes the memory: committed message rows on the storage side, warm
-/// window appends on the view side. Called synchronously on the caller's
-/// task right after the change lands: implementations must be cheap and
-/// never block — spawn your own task for anything slow. Row hooks never
-/// fire for a row that was not committed. Implement what you observe;
-/// every method is a no-op by default.
+/// The store call's attach sink: runs once the rows the call wrote have
+/// committed, with the last committed row's id — the audio attach point.
+/// The caller binds the sink at the store call site, so the id always
+/// lands on the capture that produced the audio, never on a newer one.
+pub type OnCommit = Box<dyn FnOnce(i64) + Send>;
+
+/// Observes the memory's warm window: every append batch the window
+/// receives is announced here, verbatim. Called synchronously on the
+/// caller's task right after the append lands: implementations must be
+/// cheap and never block — spawn your own task for anything slow.
+/// Implement what you observe; every method is a no-op by default.
 pub trait MemoryHook: Send + Sync {
-    /// The user message row for a final utterance was committed.
-    fn utterance_stored(&self, _session: &AgentSession, _message_id: i64) {}
-
-    /// A turn row — the tool exchange plus the final reply, or a truncated
-    /// partial — was committed.
-    fn turn_stored(&self, _session: &AgentSession, _message_id: i64) {}
-
     /// The warm window received one append batch: the exact items the
     /// agent's context carries, speaker labels included. Announced right
     /// after the append lands — the batch is handed over verbatim, with no
-    /// ids and no durable-row guarantee here; row consumers use the
-    /// storage hooks above.
+    /// ids and no durable-row guarantee here; row consumers bind the ids
+    /// at the store call sites instead.
     fn appended(&self, _session: &AgentSession, _items: &[ChatItem]) {}
 }
 
@@ -63,30 +62,30 @@ pub trait Memory: Send + Sync {
     /// by the store methods below, never here.
     async fn append(&self, session: &AgentSession, items: Vec<ChatItem>);
 
-    /// Writes the user message row for a final utterance and notifies the
-    /// hooks once it commits. Empty text stores nothing. `speaker` is the
-    /// utterance's attribution — the matched speakers row id, `None` when
-    /// the utterance identified no one or the agent runs no
+    /// Writes the user message row for a final utterance and returns its id
+    /// once it commits — `None` for empty text, nothing stored. `speaker`
+    /// is the utterance's attribution — the matched speakers row id, `None`
+    /// when the utterance identified no one or the agent runs no
     /// identification — persisted on the row for the transcript's readers.
     async fn store_utterance(
         &self,
         session: &AgentSession,
         text: &str,
         speaker: Option<i64>,
-    ) -> Result<(), String>;
+    ) -> Result<Option<i64>, String>;
 
     /// Writes the turn's assistant and tool messages in one background
-    /// transaction and notifies the hooks once it commits — the hook
-    /// carries the last written row's id, the capture attach point. A turn
-    /// that produced nothing stores nothing. Fire-and-forget: failures are
+    /// transaction and runs `attach` with the last written row's id once it
+    /// commits — the capture attach point. A turn that produced nothing
+    /// stores nothing and calls no sink. Fire-and-forget: failures are
     /// logged, never surfaced.
-    fn log_items(&self, session: &AgentSession, items: Vec<ChatItem>);
+    fn log_items(&self, session: &AgentSession, items: Vec<ChatItem>, attach: Option<OnCommit>);
 
     /// Writes a truncated assistant message row for a reply cut mid-flight
-    /// before the turn completed, and notifies the hooks once it commits.
-    /// Empty text stores nothing. Fire-and-forget: failures are logged,
-    /// never surfaced.
-    fn store_partial_reply(&self, session: &AgentSession, text: &str);
+    /// before the turn completed, and runs `attach` with the row's id once
+    /// it commits. Empty text stores nothing. Fire-and-forget: failures are
+    /// logged, never surfaced.
+    fn store_partial_reply(&self, session: &AgentSession, text: &str, attach: Option<OnCommit>);
 }
 
 /// One conversation turn in the window: the user utterance that opens it,

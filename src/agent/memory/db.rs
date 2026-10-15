@@ -8,7 +8,7 @@ use tracing::warn;
 use crate::agent::AgentSession;
 use crate::agent::ChatItem;
 
-use super::{Memory, MemoryHook, Turn, trim};
+use super::{Memory, MemoryHook, OnCommit, Turn, trim};
 
 /// The conversation memory backed by the durable `messages` log. The window
 /// starts empty — the context lives only here for the session's lifetime,
@@ -18,7 +18,8 @@ use super::{Memory, MemoryHook, Turn, trim};
 /// whole turns capped at [`super::HISTORY_TURNS`]. Each row of the durable log
 /// holds one message in the JSON form of a [`ChatItem`] (AI SDK
 /// ModelMessage shape, tagged by `role`), so storing is a serde write.
-/// Committed rows are announced to the [`MemoryHook`]s.
+/// Window appends are announced to the [`MemoryHook`]s; the store methods
+/// hand their committed row ids to the attach sinks their callers passed.
 pub struct DbMemory {
     pool: PgPool,
     hooks: Vec<Arc<dyn MemoryHook>>,
@@ -77,31 +78,27 @@ impl Memory for DbMemory {
         session: &AgentSession,
         text: &str,
         speaker: Option<i64>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<i64>, String> {
         if text.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let message_id =
             insert_message_row(&self.pool, &session.id, &ChatItem::user(text), speaker).await?;
-        for hook in &self.hooks {
-            hook.utterance_stored(session, message_id);
-        }
         debug!(session_id = %session.id, message_id, "utterance stored");
-        Ok(())
+        Ok(Some(message_id))
     }
 
-    fn log_items(&self, session: &AgentSession, items: Vec<ChatItem>) {
+    fn log_items(&self, session: &AgentSession, items: Vec<ChatItem>, attach: Option<OnCommit>) {
         if items.is_empty() {
             return;
         }
         let pool = self.pool.clone();
-        let hooks = self.hooks.clone();
         let session = session.clone();
         tokio::spawn(async move {
             match store_log_rows(&pool, &session.id, &items).await {
                 Ok(Some(message_id)) => {
-                    for hook in &hooks {
-                        hook.turn_stored(&session, message_id);
+                    if let Some(attach) = attach {
+                        attach(message_id);
                     }
                     debug!(session_id = %session.id, message_id, "turn stored");
                 }
@@ -111,19 +108,18 @@ impl Memory for DbMemory {
         });
     }
 
-    fn store_partial_reply(&self, session: &AgentSession, text: &str) {
+    fn store_partial_reply(&self, session: &AgentSession, text: &str, attach: Option<OnCommit>) {
         if text.is_empty() {
             return;
         }
         let pool = self.pool.clone();
-        let hooks = self.hooks.clone();
         let session = session.clone();
         let text = text.to_string();
         tokio::spawn(async move {
             match insert_message_row(&pool, &session.id, &ChatItem::assistant(text), None).await {
                 Ok(message_id) => {
-                    for hook in &hooks {
-                        hook.turn_stored(&session, message_id);
+                    if let Some(attach) = attach {
+                        attach(message_id);
                     }
                     debug!(session_id = %session.id, message_id, "partial reply stored");
                 }
