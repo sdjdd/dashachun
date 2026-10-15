@@ -24,16 +24,17 @@ async fn owned_agent(pool: &PgPool, user_id: i64, name: &str) -> i64 {
         .id
 }
 
-async fn message_row(pool: &PgPool, agent_id: i64, role: &str) -> i64 {
+async fn message_row(pool: &PgPool, agent_id: i64, role: &str) -> (i64, i64) {
     let conversation_id = common::conversation(pool, 1, agent_id).await;
-    sqlx::query_scalar(
+    let id = sqlx::query_scalar(
         "INSERT INTO messages (conversation_id, message) VALUES ($1, $2) RETURNING id",
     )
     .bind(conversation_id)
     .bind(serde_json::json!({ "role": role, "content": "你好" }))
     .fetch_one(pool)
     .await
-    .unwrap()
+    .unwrap();
+    (conversation_id, id)
 }
 
 async fn audio_row(pool: &PgPool, message_id: i64, bucket: &str, key: &str) {
@@ -244,8 +245,8 @@ async fn playback_serves_the_captured_bytes(pool: PgPool) {
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent = owned_agent(&pool, user_id, "a").await;
-    let uplink = message_row(&pool, agent, "user").await;
-    let downlink = message_row(&pool, agent, "assistant").await;
+    let (uplink_conv, uplink) = message_row(&pool, agent, "user").await;
+    let (downlink_conv, downlink) = message_row(&pool, agent, "assistant").await;
     storage
         .put("audios/test/up.flac", b"fLaC-uplink".to_vec())
         .await
@@ -257,8 +258,14 @@ async fn playback_serves_the_captured_bytes(pool: PgPool) {
     audio_row(&pool, uplink, "bucket", "audios/test/up.flac").await;
     audio_row(&pool, downlink, "bucket", "audios/test/down.flac").await;
 
-    let path = format!("/api/agents/{agent}/messages/{uplink}/audio");
-    let res = send(&app, request("GET", &path, None, Some(&cookie))).await;
+    let path = |conv: i64, message: i64| {
+        format!("/api/agents/{agent}/conversations/{conv}/messages/{message}/audio")
+    };
+    let res = send(
+        &app,
+        request("GET", &path(uplink_conv, uplink), None, Some(&cookie)),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers()["content-type"], "audio/flac");
     assert_eq!(res.headers()["cache-control"], "private");
@@ -267,8 +274,11 @@ async fn playback_serves_the_captured_bytes(pool: PgPool) {
 
     // The downlink capture (assistant row) plays back the same way — the
     // route is not role-gated.
-    let path = format!("/api/agents/{agent}/messages/{downlink}/audio");
-    let res = send(&app, request("GET", &path, None, Some(&cookie))).await;
+    let res = send(
+        &app,
+        request("GET", &path(downlink_conv, downlink), None, Some(&cookie)),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
     let bytes = to_bytes(res.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&bytes[..], b"fLaC-downlink");
@@ -287,36 +297,71 @@ async fn playback_scopes_by_ownership_and_reports_missing_audio(pool: PgPool) {
     let (other_cookie, other_user) = register(&app, &pool).await;
     let foreign_agent = owned_agent(&pool, other_user, "c").await;
 
-    let uncaptured = message_row(&pool, agent, "user").await;
-    let cross_agent = message_row(&pool, other_agent, "user").await;
-    let foreign = message_row(&pool, foreign_agent, "user").await;
-    let vanished = message_row(&pool, agent, "user").await;
+    let (uncaptured_conv, uncaptured) = message_row(&pool, agent, "user").await;
+    let (cross_conv, cross_message) = message_row(&pool, other_agent, "user").await;
+    let (foreign_conv, foreign) = message_row(&pool, foreign_agent, "user").await;
+    let (vanished_conv, vanished) = message_row(&pool, agent, "user").await;
     audio_row(&pool, vanished, "bucket", "never-stored.flac").await;
 
-    let path = |agent: i64, message: i64| format!("/api/agents/{agent}/messages/{message}/audio");
+    let path = |agent: i64, conv: i64, message: i64| {
+        format!("/api/agents/{agent}/conversations/{conv}/messages/{message}/audio")
+    };
 
-    let res = send(&app, request("GET", &path(agent, uncaptured), None, None)).await;
+    let res = send(
+        &app,
+        request("GET", &path(agent, uncaptured_conv, uncaptured), None, None),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // Foreign agents and their messages stay invisible.
     let res = send(
         &app,
-        request("GET", &path(foreign_agent, foreign), None, Some(&cookie)),
+        request(
+            "GET",
+            &path(foreign_agent, foreign_conv, foreign),
+            None,
+            Some(&cookie),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let res = send(
         &app,
-        request("GET", &path(agent, foreign), None, Some(&other_cookie)),
+        request(
+            "GET",
+            &path(agent, foreign_conv, foreign),
+            None,
+            Some(&other_cookie),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // The agent is owned but the message belongs to the caller's other
-    // agent — out of scope.
+    // The agent is owned but the conversation belongs to the caller's
+    // other agent — out of scope.
     let res = send(
         &app,
-        request("GET", &path(agent, cross_agent), None, Some(&cookie)),
+        request(
+            "GET",
+            &path(agent, cross_conv, cross_message),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // A message must hang off the path conversation — another in-scope
+    // conversation does not vouch for it.
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &path(agent, uncaptured_conv, vanished),
+            None,
+            Some(&cookie),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -324,13 +369,23 @@ async fn playback_scopes_by_ownership_and_reports_missing_audio(pool: PgPool) {
     // Unknown message, and a message whose capture never happened.
     let res = send(
         &app,
-        request("GET", &path(agent, 999_999), None, Some(&cookie)),
+        request(
+            "GET",
+            &path(agent, uncaptured_conv, 999_999),
+            None,
+            Some(&cookie),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let res = send(
         &app,
-        request("GET", &path(agent, uncaptured), None, Some(&cookie)),
+        request(
+            "GET",
+            &path(agent, uncaptured_conv, uncaptured),
+            None,
+            Some(&cookie),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -339,7 +394,12 @@ async fn playback_scopes_by_ownership_and_reports_missing_audio(pool: PgPool) {
     // stands, the storage read failed.
     let res = send(
         &app,
-        request("GET", &path(agent, vanished), None, Some(&cookie)),
+        request(
+            "GET",
+            &path(agent, vanished_conv, vanished),
+            None,
+            Some(&cookie),
+        ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -352,7 +412,7 @@ async fn playback_503s_while_audio_storage_is_disabled(pool: PgPool) {
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent = owned_agent(&pool, user_id, "a").await;
-    let message = message_row(&pool, agent, "user").await;
+    let (conv, message) = message_row(&pool, agent, "user").await;
     audio_row(&pool, message, "bucket", "audios/test/up.flac").await;
 
     // The capture row stands but the storage slot is empty (the feature
@@ -361,7 +421,7 @@ async fn playback_503s_while_audio_storage_is_disabled(pool: PgPool) {
         &app,
         request(
             "GET",
-            &format!("/api/agents/{agent}/messages/{message}/audio"),
+            &format!("/api/agents/{agent}/conversations/{conv}/messages/{message}/audio"),
             None,
             Some(&cookie),
         ),

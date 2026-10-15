@@ -27,6 +27,7 @@ pub use llm::{
 pub use memory::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor,
     InMemEntryMemory, InMemMemory, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, OnCommit,
+    TranscriptMessage, read_transcript,
 };
 pub use prompt::{Speaker, SystemPrompt, labelled_utterance};
 pub use store::{AgentRecord, AgentStore};

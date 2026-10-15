@@ -7,6 +7,7 @@ use crate::auth::Role;
 use crate::error::ErrorResponse;
 use crate::http::dto::agent::{AgentResponse, CreateAgentArgs};
 use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
+use crate::http::dto::conversation::{ConversationPage, MessagePage};
 use crate::http::dto::device::{ActivateDeviceArgs, DeviceResponse};
 use crate::http::dto::provider::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
 use crate::http::dto::speaker::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
@@ -43,7 +44,9 @@ use crate::settings::AudioCaptureSettings;
         crate::http::routes::speakers::create_speaker,
         crate::http::routes::speakers::update_speaker,
         crate::http::routes::speakers::delete_speaker,
-        crate::http::routes::messages::message_audio,
+        crate::http::routes::conversations::list_conversations,
+        crate::http::routes::conversations::list_messages,
+        crate::http::routes::conversations::message_audio,
     ),
     components(schemas(
         ErrorResponse,
@@ -63,6 +66,8 @@ use crate::settings::AudioCaptureSettings;
         CreateSpeakerArgs,
         UpdateSpeakerArgs,
         SpeakerResponse,
+        ConversationPage,
+        MessagePage,
     )),
     modifiers(&CookieAuthAddon),
 )]
@@ -110,14 +115,16 @@ mod tests {
             "/api/settings/audio-capture",
             "/api/agents/{agent_id}/speakers",
             "/api/agents/{agent_id}/speakers/{speaker_id}",
-            "/api/agents/{agent_id}/messages/{message_id}/audio",
+            "/api/agents/{agent_id}/conversations",
+            "/api/agents/{agent_id}/conversations/{conversation_id}/messages",
+            "/api/agents/{agent_id}/conversations/{conversation_id}/messages/{message_id}/audio",
         ] {
             assert!(
                 paths.contains(&expected.to_owned()),
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 15, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 17, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));

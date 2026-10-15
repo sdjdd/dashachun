@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use crate::agent::AgentSession;
 use crate::agent::ChatItem;
 
-pub use db::DbMemory;
+pub use db::{DbMemory, TranscriptMessage, read_transcript};
 pub use entries::{
     AddError, DbEntryMemory, EntryMemory, EntryOp, EntryOpResult, InMemEntryMemory, MAX_ENTRIES,
     MemoryEntry, entry_id,

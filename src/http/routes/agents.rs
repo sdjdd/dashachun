@@ -14,7 +14,7 @@ pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route("/", post(create_agent))
         .merge(crate::http::routes::speakers::routes())
-        .merge(crate::http::routes::messages::routes())
+        .merge(crate::http::routes::conversations::routes())
         .merge(crate::http::routes::devices::routes())
 }
 

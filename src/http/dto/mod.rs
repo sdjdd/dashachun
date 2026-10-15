@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod auth;
+pub mod conversation;
 pub mod device;
 pub mod ota;
 pub mod provider;

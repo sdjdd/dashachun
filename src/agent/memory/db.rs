@@ -1,7 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
+use time::OffsetDateTime;
 use tracing::debug;
 use tracing::warn;
 
@@ -198,4 +199,38 @@ async fn store_log_rows(
     }
     tx.commit().await.map_err(|err| err.to_string())?;
     Ok(last_id)
+}
+
+/// One durable transcript row as the read side hands it over: the stored
+/// AI SDK ModelMessage JSON verbatim plus the columns a reader hangs off.
+#[derive(Debug, FromRow)]
+pub struct TranscriptMessage {
+    pub id: i64,
+    pub message: serde_json::Value,
+    pub speaker_id: Option<i64>,
+    pub created_at: OffsetDateTime,
+}
+
+/// Reads the durable log of one conversation, newest first, keyset-paginated
+/// on the row id: `before_id` (the previous page's last id) is an exclusive
+/// upper bound, so the next page continues where the previous one ended.
+/// Returns at most `limit` rows.
+pub async fn read_transcript(
+    pool: &PgPool,
+    conversation_id: i64,
+    before_id: Option<i64>,
+    limit: i64,
+) -> Result<Vec<TranscriptMessage>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT id, message, speaker_id, created_at \
+         FROM messages \
+         WHERE conversation_id = $1 AND ($2::BIGINT IS NULL OR id < $2) \
+         ORDER BY id DESC \
+         LIMIT $3",
+    )
+    .bind(conversation_id)
+    .bind(before_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }
