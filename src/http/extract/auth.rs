@@ -2,14 +2,20 @@ use core::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use axum::extract::{ConnectInfo, FromRef, FromRequestParts};
+use axum::http::HeaderMap;
+use axum::http::header;
 use axum::http::request::Parts;
 use axum_extra::extract::cookie::SignedCookieJar;
+use tracing::warn;
 use uuid::Uuid;
 
-use crate::error::AppError;
-
 use crate::auth::{Role, session};
+use crate::error::AppError;
 use crate::http::session::AuthState;
+
+/// User agents are unbounded client input and the column is metadata, not
+/// content — capture truncates.
+const USER_AGENT_MAX_CHARS: usize = 256;
 
 pub struct AuthUser {
     pub id: i64,
@@ -31,12 +37,23 @@ where
             .and_then(|cookie| Uuid::parse_str(cookie.value()).ok())
             .ok_or(AppError::Unauthorized)?;
 
-        let user_id = session::user_id(&state.pool, session_id)
+        let live = session::verify(&state.pool, session_id)
             .await?
             .ok_or(AppError::Unauthorized)?;
 
+        if live.touch_due {
+            let pool = state.pool.clone();
+            let ip = client_ip(&state, parts);
+            let ua = user_agent(&parts.headers);
+            tokio::spawn(async move {
+                if let Err(err) = session::touch(&pool, session_id, ip, &ua).await {
+                    warn!(%err, "session activity refresh failed");
+                }
+            });
+        }
+
         Ok(AuthUser {
-            id: user_id,
+            id: live.user_id,
             session_id,
         })
     }
@@ -73,10 +90,11 @@ where
     }
 }
 
-/// The client IP for rate limiting: with `TRUST_PROXY` the rightmost
-/// `X-Forwarded-For` entry (the one the trusted edge appended), otherwise
-/// the socket peer. Falls back to `0.0.0.0` when neither is present (e.g.
-/// the `oneshot` test path, which has no connect info) — never fails.
+/// The client IP for rate limiting and session metadata: with `TRUST_PROXY`
+/// the rightmost `X-Forwarded-For` entry (the one the trusted edge
+/// appended), otherwise the socket peer. Falls back to `0.0.0.0` when
+/// neither is present (e.g. the `oneshot` test path, which has no connect
+/// info) — never fails.
 pub struct ClientIp(pub IpAddr);
 
 impl<S> FromRequestParts<S> for ClientIp
@@ -88,18 +106,29 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let state = AuthState::from_ref(state);
-        if state.trust_proxy
-            && let Some(forwarded) = parts.headers.get("x-forwarded-for")
-            && let Ok(raw) = forwarded.to_str()
-            && let Some(ip) = raw.rsplit(',').next().and_then(|s| s.trim().parse().ok())
-        {
-            return Ok(ClientIp(ip));
-        }
-        let ip = parts
-            .extensions
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|info| info.0.ip())
-            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        Ok(ClientIp(ip))
+        Ok(ClientIp(client_ip(&state, parts)))
     }
+}
+
+fn client_ip(state: &AuthState, parts: &Parts) -> IpAddr {
+    if state.trust_proxy
+        && let Some(forwarded) = parts.headers.get("x-forwarded-for")
+        && let Ok(raw) = forwarded.to_str()
+        && let Some(ip) = raw.rsplit(',').next().and_then(|s| s.trim().parse().ok())
+    {
+        return ip;
+    }
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+}
+
+pub(crate) fn user_agent(headers: &HeaderMap) -> String {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|ua| ua.chars().take(USER_AGENT_MAX_CHARS).collect())
+        .unwrap_or_default()
 }

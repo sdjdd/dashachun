@@ -1,30 +1,75 @@
+use std::net::IpAddr;
+
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::AppError;
 
-pub async fn create(pool: &PgPool, user_id: i64, ttl_secs: i64) -> Result<Uuid, AppError> {
+/// A session's activity snapshot (`last_active_at`, `ip`, `user_agent`) is
+/// written at most once per this interval. The throttle state is the row's
+/// own `last_active_at` — no in-process buffer — so the refresh is safe
+/// across instances and the common request performs no write at all.
+pub const TOUCH_INTERVAL_SECS: u64 = 60;
+
+pub async fn create(
+    pool: &PgPool,
+    user_id: i64,
+    ttl_secs: i64,
+    ip: IpAddr,
+    user_agent: &str,
+) -> Result<Uuid, AppError> {
     let id = Uuid::new_v4();
     sqlx::query(
-        "INSERT INTO auth_sessions (id, user_id, expires_at) \
-         VALUES ($1, $2, now() + make_interval(secs => $3))",
+        "INSERT INTO auth_sessions (id, user_id, expires_at, ip, user_agent) \
+         VALUES ($1, $2, now() + make_interval(secs => $3), $4, $5)",
     )
     .bind(id)
     .bind(user_id)
     .bind(ttl_secs as f64)
+    .bind(ip.to_string())
+    .bind(user_agent)
     .execute(pool)
     .await?;
     Ok(id)
 }
 
-pub async fn user_id(pool: &PgPool, id: Uuid) -> Result<Option<i64>, AppError> {
-    let row = sqlx::query_scalar::<_, i64>(
-        "SELECT user_id FROM auth_sessions WHERE id = $1 AND expires_at > now()",
+pub struct LiveSession {
+    pub user_id: i64,
+    pub touch_due: bool,
+}
+
+/// The per-request session check: the usual expiry-scoped lookup plus the
+/// staleness verdict (`last_active_at` older than [`TOUCH_INTERVAL_SECS`])
+/// decided in SQL against the database clock.
+pub async fn verify(pool: &PgPool, id: Uuid) -> Result<Option<LiveSession>, AppError> {
+    let row = sqlx::query_as::<_, (i64, bool)>(
+        "SELECT user_id, last_active_at < now() - make_interval(secs => $2) \
+         FROM auth_sessions WHERE id = $1 AND expires_at > now()",
     )
     .bind(id)
+    .bind(TOUCH_INTERVAL_SECS as f64)
     .fetch_optional(pool)
     .await?;
-    Ok(row)
+    Ok(row.map(|(user_id, touch_due)| LiveSession { user_id, touch_due }))
+}
+
+/// Refresh the activity snapshot. The predicate is the authoritative gate:
+/// when concurrent touches race (same or different instance) the loser's
+/// WHERE no longer holds against the committed row, so one interval yields
+/// at most one write per session.
+pub async fn touch(pool: &PgPool, id: Uuid, ip: IpAddr, user_agent: &str) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE auth_sessions \
+         SET last_active_at = now(), ip = $2, user_agent = $3 \
+         WHERE id = $1 AND last_active_at < now() - make_interval(secs => $4)",
+    )
+    .bind(id)
+    .bind(ip.to_string())
+    .bind(user_agent)
+    .bind(TOUCH_INTERVAL_SECS as f64)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn delete(pool: &PgPool, id: Uuid) -> Result<(), AppError> {

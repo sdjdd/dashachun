@@ -1,5 +1,7 @@
 mod common;
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::Request;
 use axum::http::StatusCode;
@@ -19,6 +21,42 @@ fn post_from(path: &str, body: &str, ip: &str) -> Request<Body> {
         .header("x-forwarded-for", ip)
         .body(Body::from(body.to_owned()))
         .unwrap()
+}
+
+fn post_with(path: &str, body: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Body::from(body.to_owned())).unwrap()
+}
+
+fn get_with(path: &str, cookie: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("cookie", cookie);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// The trust-proxy auth state, shared by the tests that assert on the
+/// captured client IP.
+fn trust_proxy_auth(pool: PgPool) -> AuthState {
+    AuthState {
+        pool,
+        key: Key::from(&[7u8; 64]),
+        ttl_secs: 3600,
+        cookie_name: "xz_session".into(),
+        cookie_secure: false,
+        limiter: common::test_limiter(),
+        trust_proxy: true,
+    }
 }
 
 #[sqlx::test]
@@ -186,15 +224,7 @@ async fn repeated_logins_hit_the_rate_limit(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn the_rate_limit_is_per_client_ip(pool: PgPool) {
-    let auth = AuthState {
-        pool: pool.clone(),
-        key: Key::from(&[7u8; 64]),
-        ttl_secs: 3600,
-        cookie_name: "xz_session".into(),
-        cookie_secure: false,
-        limiter: common::test_limiter(),
-        trust_proxy: true,
-    };
+    let auth = trust_proxy_auth(pool.clone());
     let app = dashachun::http::app(common::test_state(pool, None), auth);
     let body = r#"{"username":"ghost","password":"supersecret1"}"#;
     for _ in 0..LOGIN_LIMIT {
@@ -220,4 +250,132 @@ async fn the_first_registration_is_admin_and_the_rest_are_not(pool: PgPool) {
     let body =
         body_json(send(&app, request("GET", "/api/auth/me", None, Some(&second))).await).await;
     assert_eq!(body["role"], "user");
+}
+
+#[sqlx::test]
+#[ignore]
+async fn login_records_the_client_ip_and_user_agent(pool: PgPool) {
+    let app = dashachun::http::app(
+        common::test_state(pool.clone(), None),
+        trust_proxy_auth(pool.clone()),
+    );
+    let username = common::test_name();
+    send(
+        &app,
+        request(
+            "POST",
+            "/api/auth/register",
+            Some(&json!({"username": username, "password": "supersecret1"}).to_string()),
+            None,
+        ),
+    )
+    .await;
+
+    let res = send(
+        &app,
+        post_with(
+            "/api/auth/login",
+            &json!({"username": username, "password": "supersecret1"}).to_string(),
+            &[
+                ("x-forwarded-for", "203.0.113.9, 198.51.100.7"),
+                ("user-agent", "probe/1.0"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let (ip, ua): (String, String) = sqlx::query_as(
+        "SELECT ip, user_agent FROM auth_sessions \
+         WHERE user_id = (SELECT id FROM users WHERE username = $1) \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&username)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ip, "198.51.100.7");
+    assert_eq!(ua, "probe/1.0");
+}
+
+#[sqlx::test]
+#[ignore]
+async fn activity_writes_are_throttled_within_the_interval(pool: PgPool) {
+    let app = app(pool.clone());
+    let (cookie, user_id) = common::register(&app, &pool).await;
+    async fn snapshot(pool: &PgPool, user_id: i64) -> (String, String, i64) {
+        sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT ip, user_agent, EXTRACT(EPOCH FROM last_active_at)::BIGINT \
+             FROM auth_sessions WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+    let before = snapshot(&pool, user_id).await;
+
+    for _ in 0..3 {
+        expect_json(
+            &app,
+            request("GET", "/api/auth/me", None, Some(&cookie)),
+            StatusCode::OK,
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let after = snapshot(&pool, user_id).await;
+    assert_eq!(after, before);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn stale_activity_is_refreshed_with_the_latest_contact(pool: PgPool) {
+    let app = dashachun::http::app(
+        common::test_state(pool.clone(), None),
+        trust_proxy_auth(pool.clone()),
+    );
+    let (cookie, user_id) = common::register(&app, &pool).await;
+    sqlx::query(
+        "UPDATE auth_sessions SET last_active_at = now() - interval '5 minutes' WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let res = send(
+        &app,
+        get_with(
+            "/api/auth/me",
+            &cookie,
+            &[
+                ("x-forwarded-for", "203.0.113.9, 198.51.100.7"),
+                ("user-agent", "roaming/2.0"),
+            ],
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // The refresh runs off the response path — poll for it to land.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let (ip, ua): (String, String) =
+            sqlx::query_as("SELECT ip, user_agent FROM auth_sessions WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if ip == "198.51.100.7" {
+            assert_eq!(ua, "roaming/2.0");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session was never refreshed, ip still {ip}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }

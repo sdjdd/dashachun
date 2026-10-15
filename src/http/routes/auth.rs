@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::{Json, Router, routing::get, routing::post};
 use axum_extra::extract::cookie::SignedCookieJar;
 
@@ -9,7 +9,7 @@ use crate::auth::{self, password, session};
 use crate::error::{AppError, ErrorResponse};
 use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
 use crate::http::extract::Validated;
-use crate::http::extract::auth::{AuthUser, ClientIp};
+use crate::http::extract::auth::{AuthUser, ClientIp, user_agent};
 use crate::http::session::AuthState;
 use crate::ratelimit::Decision;
 
@@ -61,12 +61,20 @@ async fn enforce(
 pub(crate) async fn register(
     State(state): State<AuthState>,
     ip: ClientIp,
+    headers: HeaderMap,
     jar: SignedCookieJar,
     Validated(args): Validated<RegisterArgs>,
 ) -> Result<(StatusCode, SignedCookieJar, Json<UserResponse>), AppError> {
     enforce(&state, "register", &ip, REGISTER_LIMIT).await?;
     let (user_id, role) = auth::create_user(&state.pool, &args.username, &args.password).await?;
-    let session_id = session::create(&state.pool, user_id, state.ttl_secs).await?;
+    let session_id = session::create(
+        &state.pool,
+        user_id,
+        state.ttl_secs,
+        ip.0,
+        &user_agent(&headers),
+    )
+    .await?;
     let user = UserResponse {
         id: user_id,
         username: args.username,
@@ -94,6 +102,7 @@ pub(crate) async fn register(
 pub(crate) async fn login(
     State(state): State<AuthState>,
     ip: ClientIp,
+    headers: HeaderMap,
     jar: SignedCookieJar,
     Validated(args): Validated<LoginArgs>,
 ) -> Result<(SignedCookieJar, Json<UserResponse>), AppError> {
@@ -106,7 +115,14 @@ pub(crate) async fn login(
     if !password::verify(&args.password, &user.password_hash) {
         return Err(AppError::Unauthorized);
     }
-    let session_id = session::create(&state.pool, user.id, state.ttl_secs).await?;
+    let session_id = session::create(
+        &state.pool,
+        user.id,
+        state.ttl_secs,
+        ip.0,
+        &user_agent(&headers),
+    )
+    .await?;
     let response = UserResponse {
         id: user.id,
         username: user.username,

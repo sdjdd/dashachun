@@ -12,10 +12,13 @@ CREATE TABLE users (
 -- Login sessions: the bearer tokens / cookies issued by /api/auth,
 -- validated on every authenticated request by absolute expiry.
 CREATE TABLE auth_sessions (
-    id         UUID PRIMARY KEY,
-    user_id    BIGINT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
+    id             UUID PRIMARY KEY,
+    user_id        BIGINT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at     TIMESTAMPTZ NOT NULL,
+    ip             TEXT NOT NULL DEFAULT '',
+    user_agent     TEXT NOT NULL DEFAULT '',
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX auth_sessions_user_id_idx ON auth_sessions (user_id);
