@@ -16,6 +16,9 @@ import { Route as AuthLoginRouteImport } from './routes/_auth/login'
 import { Route as AuthRegisterRouteImport } from './routes/_auth/register'
 import { Route as AppAgentsIndexRouteImport } from './routes/_app/agents/index'
 import { Route as AppAgentsAgentIdRouteImport } from './routes/_app/agents/$agentId'
+import { Route as AppAgentsAgentIdIndexRouteImport } from './routes/_app/agents/$agentId.index'
+import { Route as AppAgentsAgentIdDevicesRouteImport } from './routes/_app/agents/$agentId.devices'
+import { Route as AppAgentsAgentIdMemoriesRouteImport } from './routes/_app/agents/$agentId.memories'
 
 const AppRouteRoute = AppRouteRouteImport.update({
   id: '/_app',
@@ -50,20 +53,41 @@ const AppAgentsAgentIdRoute = AppAgentsAgentIdRouteImport.update({
   path: '/agents/$agentId',
   getParentRoute: () => AppRouteRoute,
 } as any)
+const AppAgentsAgentIdIndexRoute = AppAgentsAgentIdIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppAgentsAgentIdRoute,
+} as any)
+const AppAgentsAgentIdDevicesRoute = AppAgentsAgentIdDevicesRouteImport.update({
+  id: '/devices',
+  path: '/devices',
+  getParentRoute: () => AppAgentsAgentIdRoute,
+} as any)
+const AppAgentsAgentIdMemoriesRoute =
+  AppAgentsAgentIdMemoriesRouteImport.update({
+    id: '/memories',
+    path: '/memories',
+    getParentRoute: () => AppAgentsAgentIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
   '/login': typeof AuthLoginRoute
   '/register': typeof AuthRegisterRoute
-  '/agents/$agentId': typeof AppAgentsAgentIdRoute
+  '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
   '/agents/': typeof AppAgentsIndexRoute
+  '/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
+  '/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
+  '/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
   '/login': typeof AuthLoginRoute
   '/register': typeof AuthRegisterRoute
-  '/agents/$agentId': typeof AppAgentsAgentIdRoute
   '/agents': typeof AppAgentsIndexRoute
+  '/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
+  '/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
+  '/agents/$agentId': typeof AppAgentsAgentIdIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -72,14 +96,32 @@ export interface FileRoutesById {
   '/_auth/login': typeof AuthLoginRoute
   '/_auth/register': typeof AuthRegisterRoute
   '/_app/': typeof AppIndexRoute
-  '/_app/agents/$agentId': typeof AppAgentsAgentIdRoute
+  '/_app/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
   '/_app/agents/': typeof AppAgentsIndexRoute
+  '/_app/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
+  '/_app/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
+  '/_app/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/login' | '/register' | '/agents/$agentId' | '/agents/'
+  fullPaths:
+    | '/'
+    | '/login'
+    | '/register'
+    | '/agents/$agentId'
+    | '/agents/'
+    | '/agents/$agentId/devices'
+    | '/agents/$agentId/memories'
+    | '/agents/$agentId/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/login' | '/register' | '/agents/$agentId' | '/agents'
+  to:
+    | '/'
+    | '/login'
+    | '/register'
+    | '/agents'
+    | '/agents/$agentId/devices'
+    | '/agents/$agentId/memories'
+    | '/agents/$agentId'
   id:
     | '__root__'
     | '/_app'
@@ -89,6 +131,9 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/_app/agents/$agentId'
     | '/_app/agents/'
+    | '/_app/agents/$agentId/devices'
+    | '/_app/agents/$agentId/memories'
+    | '/_app/agents/$agentId/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -147,18 +192,54 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAgentsAgentIdRouteImport
       parentRoute: typeof AppRouteRoute
     }
+    '/_app/agents/$agentId/': {
+      id: '/_app/agents/$agentId/'
+      path: '/'
+      fullPath: '/agents/$agentId/'
+      preLoaderRoute: typeof AppAgentsAgentIdIndexRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
+    '/_app/agents/$agentId/devices': {
+      id: '/_app/agents/$agentId/devices'
+      path: '/devices'
+      fullPath: '/agents/$agentId/devices'
+      preLoaderRoute: typeof AppAgentsAgentIdDevicesRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
+    '/_app/agents/$agentId/memories': {
+      id: '/_app/agents/$agentId/memories'
+      path: '/memories'
+      fullPath: '/agents/$agentId/memories'
+      preLoaderRoute: typeof AppAgentsAgentIdMemoriesRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
   }
 }
 
+interface AppAgentsAgentIdRouteChildren {
+  AppAgentsAgentIdDevicesRoute: typeof AppAgentsAgentIdDevicesRoute
+  AppAgentsAgentIdMemoriesRoute: typeof AppAgentsAgentIdMemoriesRoute
+  AppAgentsAgentIdIndexRoute: typeof AppAgentsAgentIdIndexRoute
+}
+
+const AppAgentsAgentIdRouteChildren: AppAgentsAgentIdRouteChildren = {
+  AppAgentsAgentIdDevicesRoute: AppAgentsAgentIdDevicesRoute,
+  AppAgentsAgentIdMemoriesRoute: AppAgentsAgentIdMemoriesRoute,
+  AppAgentsAgentIdIndexRoute: AppAgentsAgentIdIndexRoute,
+}
+
+const AppAgentsAgentIdRouteWithChildren =
+  AppAgentsAgentIdRoute._addFileChildren(AppAgentsAgentIdRouteChildren)
+
 interface AppRouteRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
-  AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRoute
+  AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRouteWithChildren
   AppAgentsIndexRoute: typeof AppAgentsIndexRoute
 }
 
 const AppRouteRouteChildren: AppRouteRouteChildren = {
   AppIndexRoute: AppIndexRoute,
-  AppAgentsAgentIdRoute: AppAgentsAgentIdRoute,
+  AppAgentsAgentIdRoute: AppAgentsAgentIdRouteWithChildren,
   AppAgentsIndexRoute: AppAgentsIndexRoute,
 }
 

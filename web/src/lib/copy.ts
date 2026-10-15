@@ -46,6 +46,11 @@ export const copy = {
     notFound: "未找到该智能体",
     back: "返回列表",
     createdAt: "创建于",
+    tabs: {
+      basic: "基本",
+      devices: "设备",
+      memories: "记忆",
+    },
     fields: {
       name: "名称",
       namePlaceholder: "例如：前台小助手",
@@ -72,6 +77,42 @@ export const copy = {
       nameRequired: "请输入名称",
       nameLength: "名称长度为 1-64 个字符",
       personaLength: "人设提示词最长 4096 个字符",
+    },
+    devices: {
+      bindTitle: "绑定设备",
+      bindDescription: "设备首次开机联网后，屏幕上会显示 6 位激活码，在此输入即可完成绑定。",
+      codeLabel: "激活码",
+      bindSubmit: "绑定",
+      listTitle: "已绑定设备",
+      empty: "还没有绑定设备",
+      emptyHint: "点击右上角「绑定设备」，输入设备屏幕上显示的激活码",
+      unbind: "解绑",
+      unbindTitle: "解绑设备",
+      unbindDescription: (clientId: string) =>
+        `确认解绑 ${clientId}？解绑后设备将无法再连接该智能体，需要重新绑定。`,
+      unbindConfirm: "确认解绑",
+      activatedAt: "绑定于",
+      errors: {
+        codeInvalid: "激活码无效或已过期",
+        alreadyBound: "该设备已绑定到智能体",
+        notBoundHere: "该设备未绑定到此智能体",
+      },
+      validation: {
+        code: "激活码为 6 位数字",
+      },
+    },
+    memories: {
+      title: "长期记忆",
+      description: "智能体在对话中沉淀的长期记忆，删除后不可恢复，对之后的对话立即生效",
+      empty: "还没有长期记忆",
+      emptyHint: "智能体会在对话中自动沉淀值得记住的信息",
+      deleteTitle: "删除记忆",
+      deleteDescription: (no: number) =>
+        `确认删除第 ${no} 条记忆？删除后智能体将不再记得这段内容。`,
+      deleteConfirm: "确认删除",
+      errors: {
+        notFound: "该记忆条目不存在或已被删除",
+      },
     },
   },
   common: {
