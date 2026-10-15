@@ -76,5 +76,5 @@ export function describeAuthError(err: unknown): string {
     if (err.status === 429) return copy.auth.errors.rateLimited(err.retryAfter ?? 60);
     return err.message;
   }
-  return copy.auth.errors.network;
+  return copy.common.network;
 }
