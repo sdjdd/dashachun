@@ -34,6 +34,22 @@ impl AgentStore {
         Ok(record)
     }
 
+    pub async fn find_for_user(
+        &self,
+        agent_id: i64,
+        user_id: i64,
+    ) -> Result<Option<AgentRecord>, AppError> {
+        let record = sqlx::query_as::<_, AgentRecord>(
+            "SELECT id, user_id, name, persona_prompt, created_at FROM agents \
+             WHERE id = $1 AND user_id = $2",
+        )
+        .bind(agent_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(record)
+    }
+
     pub async fn list_for_user(&self, user_id: i64) -> Result<Vec<AgentRecord>, AppError> {
         let records = sqlx::query_as::<_, AgentRecord>(
             "SELECT id, user_id, name, persona_prompt, created_at FROM agents \

@@ -35,6 +35,7 @@ use crate::settings::{AudioCaptureSettings, OtaSettings};
         crate::http::routes::auth::delete_session,
         crate::http::routes::agents::list_agents,
         crate::http::routes::agents::create_agent,
+        crate::http::routes::agents::get_agent,
         crate::http::routes::agents::update_agent,
         crate::http::routes::agents::delete_agent,
         crate::http::routes::memories::list_memories,
@@ -166,6 +167,7 @@ mod tests {
         );
         assert!(json["paths"]["/api/agents"]["get"].is_object());
         assert!(json["paths"]["/api/agents"]["post"].is_object());
+        assert!(json["paths"]["/api/agents/{agent_id}"]["get"].is_object());
         assert!(json["paths"]["/api/agents/{agent_id}"]["put"].is_object());
         assert!(json["paths"]["/api/agents/{agent_id}"]["delete"].is_object());
         assert!(json["paths"]["/api/settings/ota"]["put"].is_object());

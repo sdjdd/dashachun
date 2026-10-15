@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::{get, put};
+use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::agent::AgentStore;
@@ -14,7 +14,10 @@ use crate::http::state::AgentsState;
 pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route("/", get(list_agents).post(create_agent))
-        .route("/{agent_id}", put(update_agent).delete(delete_agent))
+        .route(
+            "/{agent_id}",
+            get(get_agent).put(update_agent).delete(delete_agent),
+        )
         .merge(crate::http::routes::memories::routes())
         .merge(crate::http::routes::speakers::routes())
         .merge(crate::http::routes::conversations::routes())
@@ -66,6 +69,30 @@ pub(crate) async fn create_agent(
         )
         .await?;
     Ok((StatusCode::CREATED, Json(record.into())))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/agents/{agent_id}",
+    tag = "agents",
+    security(("cookieAuth" = [])),
+    params(("agent_id" = i64, Path, description = "Id of the agent to fetch")),
+    responses(
+        (status = 200, body = AgentResponse, description = "The caller's agent"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 404, body = ErrorResponse, description = "Agent not owned by the caller"),
+    ),
+)]
+pub(crate) async fn get_agent(
+    State(auth): State<AuthState>,
+    user: AuthUser,
+    Path(agent_id): Path<i64>,
+) -> Result<Json<AgentResponse>, AppError> {
+    let record = AgentStore::new(auth.pool.clone())
+        .find_for_user(agent_id, user.id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(record.into()))
 }
 
 #[utoipa::path(
