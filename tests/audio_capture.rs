@@ -25,14 +25,15 @@ async fn owned_agent(pool: &PgPool, user_id: i64, name: &str) -> i64 {
 }
 
 async fn message_row(pool: &PgPool, agent_id: i64, role: &str) -> i64 {
-    let session_id = format!("sess-{}", uuid::Uuid::new_v4().simple());
-    common::device_session(pool, &session_id, 1, agent_id).await;
-    sqlx::query_scalar("INSERT INTO messages (session_id, message) VALUES ($1, $2) RETURNING id")
-        .bind(&session_id)
-        .bind(serde_json::json!({ "role": role, "content": "你好" }))
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    let conversation_id = common::conversation(pool, 1, agent_id).await;
+    sqlx::query_scalar(
+        "INSERT INTO messages (conversation_id, message) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(conversation_id)
+    .bind(serde_json::json!({ "role": role, "content": "你好" }))
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn audio_row(pool: &PgPool, message_id: i64, bucket: &str, key: &str) {

@@ -52,7 +52,7 @@ impl SpeakerMatcher {
         let (tap, mut rx, _id_rx) = UtteranceCapture::channel();
         let (result_tx, result_rx) = oneshot::channel();
         let matcher = self.clone();
-        let session_id = session.id.clone();
+        let conversation_id = session.conversation_id;
         tokio::spawn(async move {
             let outcome = async {
                 let chunks = collect(&mut rx).await?;
@@ -70,7 +70,7 @@ impl SpeakerMatcher {
             match &outcome {
                 Some(Ok(identification)) if identification.matched => {
                     debug!(
-                        session_id,
+                        conversation_id,
                         name = %identification.name,
                         similarity = format_args!("{:.3}", identification.similarity),
                         "voiceprint identified"
@@ -78,13 +78,13 @@ impl SpeakerMatcher {
                 }
                 Some(Ok(identification)) => {
                     debug!(
-                        session_id,
+                        conversation_id,
                         name = %identification.name,
                         similarity = format_args!("{:.3}", identification.similarity),
                         "voiceprint below threshold"
                     )
                 }
-                Some(Err(err)) => warn!(session_id, %err, "voiceprint identification failed"),
+                Some(Err(err)) => warn!(conversation_id, %err, "voiceprint identification failed"),
                 None => {}
             }
             let _ = result_tx.send(outcome.and_then(|result| result.ok()));
@@ -306,7 +306,7 @@ mod tests {
         .unwrap();
 
         let session = AgentSession {
-            id: "test".into(),
+            conversation_id: 1,
             sample_rate: SAMPLE_RATE,
             channels: 1,
             frame_duration_ms: 60,

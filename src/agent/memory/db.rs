@@ -82,9 +82,17 @@ impl Memory for DbMemory {
         if text.is_empty() {
             return Ok(None);
         }
-        let message_id =
-            insert_message_row(&self.pool, &session.id, &ChatItem::user(text), speaker).await?;
-        debug!(session_id = %session.id, message_id, "utterance stored");
+        let message_id = insert_message_row(
+            &self.pool,
+            session.conversation_id,
+            &ChatItem::user(text),
+            speaker,
+        )
+        .await?;
+        debug!(
+            conversation_id = session.conversation_id,
+            message_id, "utterance stored"
+        );
         Ok(Some(message_id))
     }
 
@@ -95,15 +103,20 @@ impl Memory for DbMemory {
         let pool = self.pool.clone();
         let session = session.clone();
         tokio::spawn(async move {
-            match store_log_rows(&pool, &session.id, &items).await {
+            match store_log_rows(&pool, session.conversation_id, &items).await {
                 Ok(Some(message_id)) => {
                     if let Some(attach) = attach {
                         attach(message_id);
                     }
-                    debug!(session_id = %session.id, message_id, "turn stored");
+                    debug!(
+                        conversation_id = session.conversation_id,
+                        message_id, "turn stored"
+                    );
                 }
                 Ok(None) => {}
-                Err(err) => warn!(session_id = %session.id, %err, "failed to store turn items"),
+                Err(err) => {
+                    warn!(conversation_id = session.conversation_id, %err, "failed to store turn items")
+                }
             }
         });
     }
@@ -116,14 +129,26 @@ impl Memory for DbMemory {
         let session = session.clone();
         let text = text.to_string();
         tokio::spawn(async move {
-            match insert_message_row(&pool, &session.id, &ChatItem::assistant(text), None).await {
+            match insert_message_row(
+                &pool,
+                session.conversation_id,
+                &ChatItem::assistant(text),
+                None,
+            )
+            .await
+            {
                 Ok(message_id) => {
                     if let Some(attach) = attach {
                         attach(message_id);
                     }
-                    debug!(session_id = %session.id, message_id, "partial reply stored");
+                    debug!(
+                        conversation_id = session.conversation_id,
+                        message_id, "partial reply stored"
+                    );
                 }
-                Err(err) => warn!(session_id = %session.id, %err, "failed to store partial reply"),
+                Err(err) => {
+                    warn!(conversation_id = session.conversation_id, %err, "failed to store partial reply")
+                }
             }
         });
     }
@@ -135,15 +160,15 @@ impl Memory for DbMemory {
 /// for user rows (the assistant/tool writers pass `None`).
 async fn insert_message_row(
     executor: impl sqlx::PgExecutor<'_>,
-    session_id: &str,
+    conversation_id: i64,
     item: &ChatItem,
     speaker: Option<i64>,
 ) -> Result<i64, String> {
     let message = serde_json::to_value(item).map_err(|err| err.to_string())?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO messages (session_id, message, speaker_id) VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO messages (conversation_id, message, speaker_id) VALUES ($1, $2, $3) RETURNING id",
     )
-    .bind(session_id)
+    .bind(conversation_id)
     .bind(message)
     .bind(speaker)
     .fetch_one(executor)
@@ -160,7 +185,7 @@ async fn insert_message_row(
 /// point for the turn's audio capture.
 async fn store_log_rows(
     pool: &PgPool,
-    session_id: &str,
+    conversation_id: i64,
     items: &[ChatItem],
 ) -> Result<Option<i64>, String> {
     let mut tx = pool.begin().await.map_err(|err| err.to_string())?;
@@ -169,7 +194,7 @@ async fn store_log_rows(
         if matches!(item, ChatItem::System { .. } | ChatItem::User { .. }) {
             continue;
         }
-        last_id = Some(insert_message_row(&mut *tx, session_id, item, None).await?);
+        last_id = Some(insert_message_row(&mut *tx, conversation_id, item, None).await?);
     }
     tx.commit().await.map_err(|err| err.to_string())?;
     Ok(last_id)

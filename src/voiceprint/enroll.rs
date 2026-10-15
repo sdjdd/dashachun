@@ -63,9 +63,9 @@ pub async fn enroll(
     let rows = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.message->>'role' AS role, ma.bucket, ma.object_key \
          FROM messages m \
-         JOIN device_sessions ds ON ds.id = m.session_id \
+         JOIN conversations c ON c.id = m.conversation_id \
          LEFT JOIN message_audios ma ON ma.message_id = m.id \
-         WHERE ds.agent_id = $1 AND m.id = ANY($2) \
+         WHERE c.agent_id = $1 AND m.id = ANY($2) \
          ORDER BY m.id, ma.id",
     )
     .bind(agent_id)

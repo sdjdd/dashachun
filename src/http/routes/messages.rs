@@ -56,9 +56,9 @@ pub(crate) async fn message_audio(
     let audio: Option<(String, String)> = sqlx::query_as(
         "SELECT ma.bucket, ma.object_key \
          FROM messages m \
-         JOIN device_sessions ds ON ds.id = m.session_id \
+         JOIN conversations c ON c.id = m.conversation_id \
          JOIN message_audios ma ON ma.message_id = m.id \
-         WHERE ds.agent_id = $1 AND m.id = $2 \
+         WHERE c.agent_id = $1 AND m.id = $2 \
          ORDER BY ma.id \
          LIMIT 1",
     )

@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use sqlx::PgPool;
 
 use common::{
-    MemoryStorage, app, app_with_state, app_with_voiceprint, device_session, expect_json, register,
+    MemoryStorage, app, app_with_state, app_with_voiceprint, conversation, expect_json, register,
     request, send,
 };
 
@@ -74,15 +74,16 @@ fn tone(freqs: &[f32], seconds: usize) -> Vec<i16> {
 }
 
 async fn message_row(pool: &PgPool, agent_id: i64, role: &str) -> i64 {
-    let session_id = format!("sess-{}", uuid::Uuid::new_v4().simple());
-    device_session(pool, &session_id, 1, agent_id).await;
+    let conversation_id = conversation(pool, 1, agent_id).await;
     let message = serde_json::json!({"role": role, "content": "你好"});
-    sqlx::query_scalar("INSERT INTO messages (session_id, message) VALUES ($1, $2) RETURNING id")
-        .bind(&session_id)
-        .bind(message)
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    sqlx::query_scalar(
+        "INSERT INTO messages (conversation_id, message) VALUES ($1, $2) RETURNING id",
+    )
+    .bind(conversation_id)
+    .bind(message)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 /// Inserts a user message row plus its capture row, and puts the FLAC

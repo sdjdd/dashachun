@@ -67,25 +67,30 @@ async fn handle_device_connect(
         }
     };
 
-    // The session row is the ownership anchor for everything the connection
-    // writes, so a failure to record it rejects the upgrade. The id is
-    // assigned here — the same value the hello ack announces and every
-    // message row carries.
+    // The conversation row is the ownership anchor for everything the
+    // connection writes, so a failure to record it rejects the upgrade.
+    // The wire `session_id` is assigned here too — the value the hello ack
+    // announces and the device echoes — and recorded on the row for
+    // correlation; it never keys anything server-side.
     let session_id = Uuid::new_v4().to_string();
-    if let Err(err) =
-        device::session::create(state.devices.pool(), &session_id, record.id, agent_id).await
-    {
-        warn!(client_id, %err, "gateway rejected: session could not be recorded");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    let conversation_id =
+        match device::conversation::create(state.devices.pool(), &session_id, record.id, agent_id)
+            .await
+        {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(client_id, %err, "gateway rejected: conversation could not be recorded");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     let shutdown = state.shutdown_signal();
     let pool = state.devices.pool().clone();
     ws.on_upgrade(move |socket| async move {
-        Gateway::new(state, agent, shutdown, session_id.clone())
+        Gateway::new(state, agent, shutdown, session_id, conversation_id)
             .run(socket)
             .await;
-        device::session::end(&pool, &session_id).await;
+        device::conversation::end(&pool, conversation_id).await;
     })
 }
 

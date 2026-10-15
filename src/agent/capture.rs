@@ -67,7 +67,7 @@ impl Capture for AudioCapture {
         let pool = self.pool.clone();
         let client_id = self.client_id;
         let audio_storage = self.audio_storage.clone();
-        let session_id = session.id.clone();
+        let conversation_id = session.conversation_id;
         let sample_rate = session.sample_rate;
         let channels = session.channels;
         tokio::spawn(async move {
@@ -75,7 +75,7 @@ impl Capture for AudioCapture {
                 return;
             };
             let Some(message_id) = id_rx.recv().await else {
-                debug!(session_id, "utterance audio discarded: no message row");
+                debug!(conversation_id, "utterance audio discarded: no message row");
                 return;
             };
             match store_audio(
@@ -89,9 +89,9 @@ impl Capture for AudioCapture {
             )
             .await
             {
-                Ok(()) => debug!(session_id, message_id, "utterance audio stored"),
+                Ok(()) => debug!(conversation_id, message_id, "utterance audio stored"),
                 Err(err) => {
-                    warn!(session_id, message_id, %err, "failed to store utterance audio")
+                    warn!(conversation_id, message_id, %err, "failed to store utterance audio")
                 }
             }
         });
@@ -103,13 +103,13 @@ impl Capture for AudioCapture {
         let pool = self.pool.clone();
         let client_id = self.client_id;
         let audio_storage = self.audio_storage.clone();
-        let session_id = session.id.clone();
+        let conversation_id = session.conversation_id;
         tokio::spawn(async move {
             let Some(chunks) = collect(&mut rx).await else {
                 return;
             };
             let Some(message_id) = id_rx.recv().await else {
-                debug!(session_id, "reply audio discarded: no message row");
+                debug!(conversation_id, "reply audio discarded: no message row");
                 return;
             };
             match store_audio(
@@ -123,8 +123,8 @@ impl Capture for AudioCapture {
             )
             .await
             {
-                Ok(()) => debug!(session_id, message_id, "reply audio stored"),
-                Err(err) => warn!(session_id, message_id, %err, "failed to store reply audio"),
+                Ok(()) => debug!(conversation_id, message_id, "reply audio stored"),
+                Err(err) => warn!(conversation_id, message_id, %err, "failed to store reply audio"),
             }
         });
         capture

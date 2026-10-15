@@ -23,7 +23,7 @@ struct TurnDeps {
     llm: Arc<dyn Llm>,
     tools: Arc<ToolSet>,
     tts: Arc<dyn Tts>,
-    session_id: String,
+    conversation_id: i64,
 }
 
 enum TurnOutcome {
@@ -326,7 +326,7 @@ pub(super) async fn reply_stage(
                         }
                     }
                     ReplyEvent::SpeakError { message } => {
-                        warn!(session_id = %session.id, %message, "tts failed");
+                        warn!(conversation_id = %session.conversation_id, %message, "tts failed");
                         if reply
                             .cut(&agent.memory, &session, &out_tx, Cut::TtsFailed { message })
                             .await
@@ -350,7 +350,7 @@ pub(super) async fn reply_stage(
                         }
                     }
                     ReplyEvent::ReplyDone { reply: text, items } => {
-                        info!(session_id = %session.id, %text, "llm result");
+                        info!(conversation_id = %session.conversation_id, %text, "llm result");
                         // The turn's audio attaches through the sink the
                         // turn start pre-bound — exactly this turn's store
                         // call, immune to the event interleaving.
@@ -359,7 +359,7 @@ pub(super) async fn reply_stage(
                         agent.memory.append(&session, items).await;
                     }
                     ReplyEvent::Failed { message } => {
-                        warn!(session_id = %session.id, %message, "llm failed");
+                        warn!(conversation_id = %session.conversation_id, %message, "llm failed");
                         if reply
                             .cut(&agent.memory, &session, &out_tx, Cut::LlmFailed { message })
                             .await
@@ -390,7 +390,7 @@ fn spawn_turn(
         llm: agent.llm.clone(),
         tools: agent.tools.clone(),
         tts: agent.tts.clone(),
-        session_id: session.id.clone(),
+        conversation_id: session.conversation_id,
     };
     let handle = tokio::spawn(run_turn(
         deps,
@@ -419,16 +419,17 @@ async fn run_turn(
     // the same polite stop as a barge-in while the turn token itself stays
     // live, so the reply stage still drains the Failed mapping.
     let speak_token = token.child_token();
+    let conversation_id = deps.conversation_id;
     let mut speak = tokio::spawn(speak_stage(
         deps.tts.clone(),
         speak_rx,
         events.clone(),
         turn_id,
         speak_token.clone(),
-        deps.session_id.clone(),
+        conversation_id,
     ));
     let outcome = think_stage(&deps, history, prompt, &speak_tx, &events, turn_id, &token)
-        .instrument(tracing::info_span!("think", session_id = %deps.session_id))
+        .instrument(tracing::info_span!("think", conversation_id))
         .await;
     drop(speak_tx);
     match outcome {
@@ -487,7 +488,7 @@ async fn think_stage(
         };
         match ev {
             Ok(StreamEvent::Delta { text }) => {
-                trace!(session_id = %deps.session_id, text = %text, "llm delta");
+                trace!(conversation_id = %deps.conversation_id, text = %text, "llm delta");
                 if emit(
                     events,
                     turn_id,
@@ -610,7 +611,7 @@ async fn speak_stage(
     events: mpsc::Sender<(u64, ReplyEvent)>,
     turn_id: u64,
     cancel: CancellationToken,
-    session_id: String,
+    conversation_id: i64,
 ) {
     let text: TextStream = recv_stream(text_rx);
     let mut synth = tts.synthesize(text, cancel.clone());
@@ -643,7 +644,7 @@ async fn speak_stage(
             }
         };
         if events.send((turn_id, event)).await.is_err() {
-            debug!(session_id, "reply output closed");
+            debug!(conversation_id, "reply output closed");
             return;
         }
     }

@@ -84,11 +84,11 @@ async fn entry_memory_enforces_the_cap(pool: PgPool) {
 async fn a_new_session_starts_with_an_empty_window(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
     memory
-        .store_utterance(&session("s1"), "hello", None)
+        .store_utterance(&session(1), "hello", None)
         .await
         .unwrap();
     memory.log_items(
-        &session("s1"),
+        &session(1),
         vec![
             ChatItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_a".into(),
@@ -117,13 +117,10 @@ async fn the_window_caps_at_the_turns(pool: PgPool) {
     let memory = DbMemory::new(pool, vec![]);
     for turn in 1..=(HISTORY_TURNS + 5) {
         memory
-            .append(&session("s1"), vec![ChatItem::user(format!("u{turn}"))])
+            .append(&session(1), vec![ChatItem::user(format!("u{turn}"))])
             .await;
         memory
-            .append(
-                &session("s1"),
-                vec![ChatItem::assistant(format!("a{turn}"))],
-            )
+            .append(&session(1), vec![ChatItem::assistant(format!("a{turn}"))])
             .await;
     }
 
@@ -143,13 +140,13 @@ async fn appended_batches_are_announced_to_the_hooks(pool: PgPool) {
     let memory = DbMemory::new(pool, vec![hook.clone() as Arc<dyn MemoryHook>]);
 
     memory
-        .append(&session("s1"), vec![ChatItem::user("hello")])
+        .append(&session(1), vec![ChatItem::user("hello")])
         .await;
     memory
-        .append(&session("s1"), vec![ChatItem::assistant("hi there")])
+        .append(&session(1), vec![ChatItem::assistant("hi there")])
         .await;
     // An empty batch mutates nothing and announces nothing.
-    memory.append(&session("s1"), vec![]).await;
+    memory.append(&session(1), vec![]).await;
 
     assert_eq!(
         hook.appends(),
@@ -166,7 +163,7 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
 
     let message_id = memory
-        .store_utterance(&session("sess-1"), "hello there", None)
+        .store_utterance(&session(11), "hello there", None)
         .await
         .unwrap()
         .expect("a non-empty utterance stores a row");
@@ -189,7 +186,7 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
 
     // An empty utterance stores nothing and returns no id.
     let empty = memory
-        .store_utterance(&session("sess-1"), "", None)
+        .store_utterance(&session(11), "", None)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -207,11 +204,11 @@ async fn the_utterance_row_records_its_speaker(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
 
     memory
-        .store_utterance(&session("s1"), "identified", Some(7))
+        .store_utterance(&session(1), "identified", Some(7))
         .await
         .unwrap();
     memory
-        .store_utterance(&session("s1"), "unidentified", None)
+        .store_utterance(&session(1), "unidentified", None)
         .await
         .unwrap();
     common::wait_for_count(&pool, "messages", 2).await;
@@ -232,7 +229,7 @@ async fn the_utterance_row_records_its_speaker(pool: PgPool) {
         ]
     );
 
-    memory.log_items(&session("s1"), vec![ChatItem::assistant("hi")], None);
+    memory.log_items(&session(1), vec![ChatItem::assistant("hi")], None);
     common::wait_for_count(&pool, "messages", 3).await;
     let assistant_speaker: Option<i64> =
         sqlx::query_scalar("SELECT speaker_id FROM messages ORDER BY id DESC LIMIT 1")
@@ -249,7 +246,7 @@ async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
 
     memory.log_items(
-        &session("sess-2"),
+        &session(2),
         vec![
             ChatItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_x".into(),
@@ -298,7 +295,7 @@ async fn turn_messages_are_stored_one_row_per_message(pool: PgPool) {
 async fn multi_round_tool_exchange_stores_one_row_per_message(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
     memory.log_items(
-        &session("sess-9"),
+        &session(9),
         vec![
             ChatItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_a".into(),
@@ -343,7 +340,7 @@ async fn tool_only_turn_stores_rows_without_content(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
 
     memory.log_items(
-        &session("sess-10"),
+        &session(10),
         vec![
             ChatItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_x".into(),
@@ -384,11 +381,11 @@ async fn turns_without_storable_content_write_nothing(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
 
     memory.log_items(
-        &session("sess-3"),
+        &session(3),
         vec![ChatItem::system("system prompt")],
         Some(ids.sink()),
     );
-    memory.log_items(&session("sess-3"), vec![], Some(ids.sink()));
+    memory.log_items(&session(3), vec![], Some(ids.sink()));
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
@@ -405,9 +402,9 @@ async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
     let ids = Arc::new(IdSink::default());
     let memory = DbMemory::new(pool.clone(), vec![]);
 
-    memory.store_partial_reply(&session("sess-4"), "partially spoke", Some(ids.sink()));
+    memory.store_partial_reply(&session(4), "partially spoke", Some(ids.sink()));
     memory.log_items(
-        &session("sess-4"),
+        &session(4),
         vec![ChatItem::assistant("ok")],
         Some(ids.sink()),
     );
@@ -439,7 +436,7 @@ async fn partial_reply_row_is_written_and_announced(pool: PgPool) {
     assert_eq!(announced, stored);
 
     // An empty partial stores nothing.
-    memory.store_partial_reply(&session("sess-4"), "", None);
+    memory.store_partial_reply(&session(4), "", None);
     tokio::time::sleep(Duration::from_millis(100)).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM messages")
         .fetch_one(&pool)
@@ -571,14 +568,14 @@ async fn extractor_flushes_a_full_batch_into_entries(pool: PgPool) {
 
     for turn in 1..=(BATCH_ITEMS - 1) {
         memory
-            .append(&session("s1"), vec![ChatItem::user(format!("turn {turn}"))])
+            .append(&session(1), vec![ChatItem::user(format!("turn {turn}"))])
             .await;
     }
     // One tool turn: its exchange is plumbing — the utterance and the
     // spoken replies are what reach the dialogue.
     memory
         .append(
-            &session("s1"),
+            &session(1),
             vec![
                 ChatItem::assistant_tool_calls(vec![ToolCall {
                     id: "call_w".into(),
@@ -641,7 +638,7 @@ async fn a_failed_flush_stays_pending_and_retries_on_the_next_batch(pool: PgPool
 
     for turn in 1..=BATCH_ITEMS {
         memory
-            .append(&session("s1"), vec![ChatItem::user(format!("turn {turn}"))])
+            .append(&session(1), vec![ChatItem::user(format!("turn {turn}"))])
             .await;
     }
     // Round 1 fails; wait for it to have happened, nothing is recorded.
@@ -658,7 +655,7 @@ async fn a_failed_flush_stays_pending_and_retries_on_the_next_batch(pool: PgPool
     // The failed items stayed pending: one more item completes a new full
     // batch over all 13 and the retry lands the entry.
     memory
-        .append(&session("s1"), vec![ChatItem::user("turn 13")])
+        .append(&session(1), vec![ChatItem::user("turn 13")])
         .await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     while entries.list().await.is_empty() {
@@ -691,7 +688,7 @@ async fn teardown_flushes_the_remaining_items(pool: PgPool) {
         let memory = DbMemory::new(pool.clone(), vec![extractor.clone() as Arc<dyn MemoryHook>]);
         for turn in 1..=3 {
             memory
-                .append(&session("s1"), vec![ChatItem::user(format!("turn {turn}"))])
+                .append(&session(1), vec![ChatItem::user(format!("turn {turn}"))])
                 .await;
         }
     }

@@ -42,10 +42,10 @@ async fn utterance_audio_attaches_to_the_user_row(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let recording = audio.start_utterance(&common::session("sess-1"));
+    let recording = audio.start_utterance(&common::session(1));
     recording.push(&[0.5; 960]);
     let message_id = memory
-        .store_utterance(&common::session("sess-1"), "hello", None)
+        .store_utterance(&common::session(1), "hello", None)
         .await
         .unwrap()
         .unwrap();
@@ -85,12 +85,12 @@ async fn reply_audio_attaches_to_the_final_reply_row(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let recording = audio.start_reply(&common::session("sess-2"));
+    let recording = audio.start_reply(&common::session(2));
     recording.push(&[0.25; 960]);
     // The turn's rows are written in the background: the sink rides the
     // store call, so finishing before the commit lands still binds the id.
     memory.log_items(
-        &common::session("sess-2"),
+        &common::session(2),
         vec![
             ChatItem::assistant_tool_calls(vec![ToolCall {
                 id: "call_x".into(),
@@ -129,10 +129,10 @@ async fn partial_reply_audio_attaches_to_the_truncated_row(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let recording = audio.start_reply(&common::session("sess-3"));
+    let recording = audio.start_reply(&common::session(3));
     recording.push(&[0.25; 960]);
     memory.store_partial_reply(
-        &common::session("sess-3"),
+        &common::session(3),
         "partially spoke",
         Some(recording.attach_sink()),
     );
@@ -161,22 +161,18 @@ async fn dropped_captures_store_no_audio(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let utterance = audio.start_utterance(&common::session("sess-4"));
+    let utterance = audio.start_utterance(&common::session(4));
     utterance.push(&[0.5; 960]);
     drop(utterance);
     memory
-        .store_utterance(&common::session("sess-4"), "hello", None)
+        .store_utterance(&common::session(4), "hello", None)
         .await
         .unwrap();
 
-    let reply = audio.start_reply(&common::session("sess-4"));
+    let reply = audio.start_reply(&common::session(4));
     reply.push(&[0.25; 960]);
     drop(reply);
-    memory.log_items(
-        &common::session("sess-4"),
-        vec![ChatItem::assistant("ok")],
-        None,
-    );
+    memory.log_items(&common::session(4), vec![ChatItem::assistant("ok")], None);
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM message_audios")
@@ -199,10 +195,10 @@ async fn utterance_without_text_stores_no_row_and_no_audio(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let recording = audio.start_utterance(&common::session("sess-5"));
+    let recording = audio.start_utterance(&common::session(5));
     recording.push(&[0.5; 960]);
     let message_id = memory
-        .store_utterance(&common::session("sess-5"), "", None)
+        .store_utterance(&common::session(5), "", None)
         .await
         .unwrap();
     // No row, no id — there is nothing to attach, so finishing the capture
@@ -229,10 +225,10 @@ async fn utterance_without_text_stores_no_row_and_no_audio(pool: PgPool) {
 async fn no_sink_stores_no_audio_rows(pool: PgPool) {
     let (memory, audio, _client_id) = wired_memory(&pool, None).await;
 
-    let recording = audio.start_utterance(&common::session("sess-6"));
+    let recording = audio.start_utterance(&common::session(6));
     recording.push(&[0.5; 960]);
     let message_id = memory
-        .store_utterance(&common::session("sess-6"), "hello", None)
+        .store_utterance(&common::session(6), "hello", None)
         .await
         .unwrap()
         .unwrap();
@@ -264,20 +260,20 @@ async fn overlapping_utterance_captures_each_attach_to_their_own_row(pool: PgPoo
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let first = audio.start_utterance(&common::session("sess-7"));
+    let first = audio.start_utterance(&common::session(7));
     first.push(&[0.5; 960]); // 60 ms
-    let second = audio.start_utterance(&common::session("sess-7"));
+    let second = audio.start_utterance(&common::session(7));
     second.push(&[0.25; 480]); // 30 ms
 
     let first_id = memory
-        .store_utterance(&common::session("sess-7"), "first", None)
+        .store_utterance(&common::session(7), "first", None)
         .await
         .unwrap()
         .unwrap();
     first.attach(first_id);
     first.finish();
     let second_id = memory
-        .store_utterance(&common::session("sess-7"), "second", None)
+        .store_utterance(&common::session(7), "second", None)
         .await
         .unwrap()
         .unwrap();
@@ -311,18 +307,18 @@ async fn overlapping_reply_captures_each_attach_to_their_own_row(pool: PgPool) {
     let audio_storage = Arc::new(MemoryStorage::new("memory-bucket"));
     let (memory, audio, _client_id) = wired_memory(&pool, Some(audio_storage.clone())).await;
 
-    let first = audio.start_reply(&common::session("sess-8"));
+    let first = audio.start_reply(&common::session(8));
     first.push(&[0.5; 960]); // 60 ms
-    let second = audio.start_reply(&common::session("sess-8"));
+    let second = audio.start_reply(&common::session(8));
     second.push(&[0.25; 480]); // 30 ms
 
     memory.log_items(
-        &common::session("sess-8"),
+        &common::session(8),
         vec![ChatItem::assistant("one")],
         Some(first.attach_sink()),
     );
     memory.log_items(
-        &common::session("sess-8"),
+        &common::session(8),
         vec![ChatItem::assistant("two")],
         Some(second.attach_sink()),
     );

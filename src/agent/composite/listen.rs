@@ -70,7 +70,7 @@ pub(super) async fn listen_stage(
         Some(matcher) if session.sample_rate == SAMPLE_RATE => Some(matcher),
         Some(_) => {
             debug!(
-                session_id = %session.id,
+                conversation_id = %session.conversation_id,
                 "voiceprint identification skipped: the uplink is not 16 kHz"
             );
             None
@@ -96,13 +96,13 @@ pub(super) async fn listen_stage(
                         vad = match agent.vad.build(session.sample_rate) {
                             Ok(vad) => Some(vad),
                             Err(err) => {
-                                warn!(session_id = %session.id, %err, "failed to build vad");
+                                warn!(conversation_id = %session.conversation_id, %err, "failed to build vad");
                                 None
                             }
                         };
                     }
                     AgentInput::ListenStop => {
-                        info!(session_id = %session.id, "listen stop");
+                        info!(conversation_id = %session.conversation_id, "listen stop");
                         if let Some(vad) = vad.as_mut() {
                             let events = vad.flush();
                             handle_vad_events(
@@ -127,7 +127,7 @@ pub(super) async fn listen_stage(
                         .await;
                     }
                     AgentInput::Interrupt { reason } => {
-                        info!(session_id = %session.id, reason = ?reason, "interrupt");
+                        info!(conversation_id = %session.conversation_id, reason = ?reason, "interrupt");
                         epoch += 1;
                         if let Some(current) = slot.take() {
                             current.cancel();
@@ -171,7 +171,7 @@ pub(super) async fn listen_stage(
                     AsrUpdate::Final {
                         text, speaker, ..
                     } => {
-                        info!(session_id = %session.id, %text, "asr result");
+                        info!(conversation_id = %session.conversation_id, %text, "asr result");
                         if out_tx
                             .send(AgentOutput::Stt {
                                 text: text.clone(),
@@ -202,7 +202,7 @@ pub(super) async fn listen_stage(
                         }
                     }
                     AsrUpdate::Error { message, .. } => {
-                        warn!(session_id = %session.id, %message, "asr failed");
+                        warn!(conversation_id = %session.conversation_id, %message, "asr failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err() {
                             break;
                         }
@@ -254,7 +254,7 @@ async fn handle_vad_events(
     for event in events {
         match event {
             VadEvent::SpeechStart { at_ms } => {
-                info!(session_id = %deps.session.id, at_ms, "speech start");
+                info!(conversation_id = %deps.session.conversation_id, at_ms, "speech start");
                 *epoch += 1;
                 let capture = deps
                     .capture
@@ -282,7 +282,7 @@ async fn handle_vad_events(
                         tap.push(&samples);
                     }
                     if current.tx.send(samples).await.is_err() {
-                        debug!(session_id = %deps.session.id, "asr input closed, dropping frame");
+                        debug!(conversation_id = %deps.session.conversation_id, "asr input closed, dropping frame");
                     }
                 }
             }
@@ -387,7 +387,7 @@ async fn run_asr(
                         }
                         Ok(None) => {}
                         Err(err) => {
-                            warn!(session_id = %session.id, %err, "failed to store utterance");
+                            warn!(conversation_id = %session.conversation_id, %err, "failed to store utterance");
                         }
                     }
                 }
@@ -406,7 +406,7 @@ async fn run_asr(
             },
         };
         if asr_tx.send(message).await.is_err() {
-            debug!(session_id = %session.id, "asr output closed");
+            debug!(conversation_id = %session.conversation_id, "asr output closed");
             return;
         }
     }

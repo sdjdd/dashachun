@@ -264,26 +264,26 @@ pub async fn register(app: &TestApp, pool: &PgPool) -> (String, i64) {
 
 // memory / capture
 
-pub fn session(id: &str) -> AgentSession {
+pub fn session(conversation_id: i64) -> AgentSession {
     AgentSession {
-        id: id.into(),
+        conversation_id,
         sample_rate: 16000,
         channels: 1,
         frame_duration_ms: 60,
     }
 }
 
-/// The `device_sessions` row a stored message hangs off: the store queries
-/// scope rows by joining the session's agent snapshot, so every session id
-/// used in a test needs one of these.
-pub async fn device_session(pool: &PgPool, id: &str, device_id: i64, agent_id: i64) {
-    sqlx::query("INSERT INTO device_sessions (id, device_id, agent_id) VALUES ($1, $2, $3)")
-        .bind(id)
+/// The `conversations` row a stored message hangs off: the store queries
+/// scope rows by joining the conversation's agent snapshot, so tests that
+/// read messages back need one of these. Returns the row id.
+pub async fn conversation(pool: &PgPool, device_id: i64, agent_id: i64) -> i64 {
+    sqlx::query_scalar("INSERT INTO conversations (session_id, device_id, agent_id) VALUES ($1, $2, $3) RETURNING id")
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(device_id)
         .bind(agent_id)
-        .execute(pool)
+        .fetch_one(pool)
         .await
-        .unwrap();
+        .unwrap()
 }
 
 /// Records the batches the memory hands to the window hook, for hook

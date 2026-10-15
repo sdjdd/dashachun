@@ -25,6 +25,7 @@ pub struct Gateway {
     agent: Arc<dyn Agent>,
     shutdown: watch::Receiver<bool>,
     session_id: String,
+    conversation_id: i64,
     ping_interval: Duration,
     peer_idle_timeout: Duration,
 }
@@ -35,12 +36,14 @@ impl Gateway {
         agent: Arc<dyn Agent>,
         shutdown: watch::Receiver<bool>,
         session_id: String,
+        conversation_id: i64,
     ) -> Self {
         Self {
             state,
             agent,
             shutdown,
             session_id,
+            conversation_id,
             ping_interval: PING_INTERVAL,
             peer_idle_timeout: PEER_IDLE_TIMEOUT,
         }
@@ -52,6 +55,7 @@ impl Gateway {
         agent: Arc<dyn Agent>,
         shutdown: watch::Receiver<bool>,
         session_id: String,
+        conversation_id: i64,
         ping_interval: Duration,
         peer_idle_timeout: Duration,
     ) -> Self {
@@ -60,6 +64,7 @@ impl Gateway {
             agent,
             shutdown,
             session_id,
+            conversation_id,
             ping_interval,
             peer_idle_timeout,
         }
@@ -71,6 +76,7 @@ impl Gateway {
             agent,
             shutdown,
             session_id,
+            conversation_id,
             ping_interval,
             peer_idle_timeout,
         } = self;
@@ -108,6 +114,7 @@ impl Gateway {
             agent,
             state.config.server.playback_prebuffer_ms,
             session_id,
+            conversation_id,
         );
         let grace = Duration::from_millis(state.config.server.shutdown_grace_ms);
         let mut shutdown = shutdown;
@@ -293,6 +300,7 @@ mod tests {
                             agent,
                             shutdown,
                             "test-session".to_string(),
+                            1,
                             ping_interval,
                             peer_idle_timeout,
                         )

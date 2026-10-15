@@ -51,22 +51,25 @@ CREATE TABLE devices (
 CREATE INDEX devices_user_id_idx ON devices (user_id);
 CREATE INDEX devices_agent_id_idx ON devices (agent_id);
 
--- Device conversation sessions: one row per accepted gateway connection —
--- created by the upgrade route with the server-assigned `session_id` (the
--- wire id echoed by the device), closed when the device goes offline.
+-- Conversations: one row per accepted gateway connection — created by the
+-- upgrade route, closed when the device goes offline. `id` is the durable
+-- primary key the conversation's message rows hang off; `session_id` is
+-- the server-assigned wire id (the hello ack announces it and the device
+-- echoes it), recorded so device-side logs correlate with the row.
 -- `ended_at` stays NULL only when the server dies mid-session. `device_id`
--- and `agent_id` are the binding snapshot at hello: ownership of a session
--- never drifts when the device is re-bound afterwards. Integrity is
--- enforced in the app layer; no foreign keys.
-CREATE TABLE device_sessions (
-    id         TEXT PRIMARY KEY,
+-- and `agent_id` are the binding snapshot at hello: ownership of a
+-- conversation never drifts when the device is re-bound afterwards.
+-- Integrity is enforced in the app layer; no foreign keys.
+CREATE TABLE conversations (
+    id         BIGSERIAL PRIMARY KEY,
+    session_id TEXT NOT NULL,
     device_id  BIGINT NOT NULL,
     agent_id   BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at   TIMESTAMPTZ
 );
 
-CREATE INDEX device_sessions_device_id_idx ON device_sessions (device_id);
+CREATE INDEX conversations_device_id_idx ON conversations (device_id);
 
 -- The durable conversation log: one row per message, the JSON form of the
 -- agent's `ChatItem` in the AI SDK ModelMessage shape (`role` as the serde
@@ -79,16 +82,16 @@ CREATE INDEX device_sessions_device_id_idx ON device_sessions (device_id);
 -- ready in time) or the agent runs no identification. A deleted speaker
 -- leaves old rows pointing nowhere — consumers resolve the id against the
 -- agent's live roster and treat a miss as unidentified. Only user rows
--- carry it. Ownership derives through `device_sessions`; no foreign keys.
+-- carry it. Ownership derives through `conversations`; no foreign keys.
 CREATE TABLE messages (
-    id         BIGSERIAL PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    message    JSONB NOT NULL,
-    speaker_id BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id              BIGSERIAL PRIMARY KEY,
+    conversation_id BIGINT NOT NULL,
+    message         JSONB NOT NULL,
+    speaker_id      BIGINT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX messages_session_id_idx ON messages (session_id, created_at);
+CREATE INDEX messages_conversation_id_idx ON messages (conversation_id, created_at);
 
 -- FLAC capture (16-bit PCM, metadata blocks + frames) stored as one S3
 -- object per row, referenced by its `bucket` + `object_key`

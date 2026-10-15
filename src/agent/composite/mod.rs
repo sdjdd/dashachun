@@ -51,13 +51,13 @@ pub struct CompositeAgent {
 impl Agent for CompositeAgent {
     fn run(&self, session: AgentSession, input: AgentInputStream) -> AgentOutputStream {
         let (out_tx, out_rx) = mpsc::channel::<AgentOutput>(OUTPUT_CHANNEL_CAPACITY);
-        let session_id = session.id.clone();
-        info!(session_id, "agent started");
+        let conversation_id = session.conversation_id;
+        info!(conversation_id, "agent started");
         tokio::spawn({
             let agent = self.clone();
             async move {
                 drive(agent, session, input, out_tx).await;
-                info!(session_id, "agent stopped");
+                info!(conversation_id, "agent stopped");
             }
         });
         Box::pin(recv_stream(out_rx))

@@ -238,7 +238,7 @@ fn input_channel() -> (mpsc::Sender<AgentInput>, AgentInputStream) {
 
 fn session() -> AgentSession {
     AgentSession {
-        id: "test".into(),
+        conversation_id: 1,
         sample_rate: 16000,
         channels: 1,
         frame_duration_ms: 60,

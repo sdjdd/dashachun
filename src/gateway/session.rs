@@ -21,6 +21,7 @@ const AGENT_CHANNEL_CAPACITY: usize = 64;
 
 pub(super) struct Session {
     session_id: String,
+    conversation_id: i64,
     helloed: bool,
     tx: mpsc::Sender<Message>,
     decoder: Option<OpusDecoder>,
@@ -37,9 +38,11 @@ impl Session {
         agent: Arc<dyn Agent>,
         playback_prebuffer_ms: u32,
         session_id: String,
+        conversation_id: i64,
     ) -> Self {
         Self {
             session_id,
+            conversation_id,
             helloed: false,
             tx,
             decoder: None,
@@ -133,7 +136,7 @@ impl Session {
         send_json(&self.tx, &ServerHello::new(id.clone(), DOWNLINK.into())).await;
         self.helloed = true;
         let session = AgentSession {
-            id,
+            conversation_id: self.conversation_id,
             sample_rate: audio_params.sample_rate,
             channels: audio_params.channels as u16,
             frame_duration_ms: audio_params.frame_duration,
@@ -145,7 +148,7 @@ impl Session {
     fn start_agent(&mut self, session: AgentSession, encoder: OpusEncoder) {
         let (agent_tx, agent_rx) = mpsc::channel::<AgentInput>(AGENT_CHANNEL_CAPACITY);
         let input: crate::agent::AgentInputStream = crate::util::recv_stream(agent_rx);
-        let session_id = session.id.clone();
+        let session_id = self.session_id.clone();
         let output = self.agent.run(session, input);
         let tx = self.tx.clone();
         let player = spawn_player(
