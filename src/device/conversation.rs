@@ -60,6 +60,44 @@ pub async fn exists_for_agent(
     Ok(hit.is_some())
 }
 
+/// Deletes one conversation with everything scoped to it — the message rows
+/// and their capture rows — in one transaction. The conversation row itself
+/// is the ownership guard, mirroring the agent-delete cascade: the delete is
+/// scoped to the binding-snapshot agent, so a conversation opened under
+/// another agent (even the same user's) reports `false`. The capture
+/// objects are deliberately left in their bucket — audio retention is the
+/// storage's periodic-reaping concern, not an app-side delete; with the
+/// rows gone the app cannot reach the objects anyway.
+pub async fn delete(
+    pool: &PgPool,
+    agent_id: i64,
+    conversation_id: i64,
+) -> Result<bool, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let deleted = sqlx::query("DELETE FROM conversations WHERE id = $1 AND agent_id = $2")
+        .bind(conversation_id)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Ok(false);
+    }
+    sqlx::query(
+        "DELETE FROM message_audios ma USING messages m \
+          WHERE ma.message_id = m.id AND m.conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM messages WHERE conversation_id = $1")
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// Opens a conversation row for the accepted connection and returns its
 /// id. A failure rejects the upgrade — a conversation whose rows could
 /// not be recorded should not run.

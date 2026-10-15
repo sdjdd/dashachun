@@ -1,9 +1,10 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{delete, get};
 
 use crate::agent::AgentStore;
 use crate::agent::read_transcript;
@@ -20,6 +21,10 @@ use crate::state::ServerState;
 pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route("/{agent_id}/conversations", get(list_conversations))
+        .route(
+            "/{agent_id}/conversations/{conversation_id}",
+            delete(delete_conversation),
+        )
         .route(
             "/{agent_id}/conversations/{conversation_id}/messages",
             get(list_messages),
@@ -136,6 +141,44 @@ pub(crate) async fn list_messages(
             .collect(),
         has_more,
     }))
+}
+
+// The privacy deletion of the record: one conversation with its message
+// and capture rows goes in one transaction, the conversation row itself
+// scoped by the binding-snapshot agent as the ownership guard. The capture
+// objects are deliberately left in their bucket — audio retention is the
+// storage's periodic-reaping concern, not an app-side delete.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/{agent_id}/conversations/{conversation_id}",
+    tag = "conversations",
+    security(("cookieAuth" = [])),
+    params(
+        ("agent_id" = i64, Path, description = "Id of the agent owning the conversation"),
+        ("conversation_id" = i64, Path, description = "Id of the conversation to delete"),
+    ),
+    responses(
+        (status = 204, description = "Conversation deleted with its message and capture rows"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 404, body = ErrorResponse, description = "Agent not owned by the caller, or the conversation belongs to another agent"),
+    ),
+)]
+pub(crate) async fn delete_conversation(
+    State(auth): State<AuthState>,
+    user: AuthUser,
+    Path((agent_id, conversation_id)): Path<(i64, i64)>,
+) -> Result<StatusCode, AppError> {
+    if !AgentStore::new(auth.pool.clone())
+        .owns(agent_id, user.id)
+        .await?
+    {
+        return Err(AppError::NotFound);
+    }
+    if conversation::delete(&auth.pool, agent_id, conversation_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
 }
 
 // Playback serves the captured bytes verbatim through the server: the

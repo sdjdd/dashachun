@@ -39,6 +39,10 @@ fn ids(body: &serde_json::Value) -> Vec<i64> {
         .collect()
 }
 
+async fn row_count(pool: &PgPool, sql: &str) -> i64 {
+    sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+}
+
 #[sqlx::test]
 #[ignore]
 async fn conversations_list_scopes_and_paginates(pool: PgPool) {
@@ -292,4 +296,187 @@ async fn messages_list_scopes_and_paginates(pool: PgPool) {
     )
     .await;
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn conversation_delete_scopes_and_cascades(pool: PgPool) {
+    let app = common::app(pool.clone());
+    let (cookie, user_id) = register(&app, &pool).await;
+    let (_other_cookie, other_user) = register(&app, &pool).await;
+    let agent = owned_agent(&pool, user_id, "a").await;
+    let other_agent = owned_agent(&pool, user_id, "b").await;
+    let foreign_agent = owned_agent(&pool, other_user, "c").await;
+
+    let conv = common::conversation(&pool, 1, agent).await;
+    let keep = common::conversation(&pool, 1, agent).await;
+    let m1 = message_row(&pool, conv, "user", "你好").await;
+    let m2 = message_row(&pool, conv, "assistant", "你好！").await;
+    let _kept_message = message_row(&pool, keep, "user", "留下").await;
+    for message_id in [m1, m2] {
+        sqlx::query(
+            "INSERT INTO message_audios (message_id, bucket, object_key, sample_rate, channels, duration_ms) \
+             VALUES ($1, 'captures', $2, 16000, 1, 1000)",
+        )
+        .bind(message_id)
+        .bind(format!("{message_id}.flac"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let other_conv = common::conversation(&pool, 1, other_agent).await;
+    let foreign_conv = common::conversation(&pool, 1, foreign_agent).await;
+
+    // Unauthenticated deletes are rejected.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/conversations/{conv}"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // A foreign agent and its conversations stay invisible.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{foreign_agent}/conversations/{foreign_conv}"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // A conversation of the caller's other agent is out of scope even
+    // though both agents belong to the caller.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/conversations/{other_conv}"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // So is a foreign conversation offered under the caller's agent.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/conversations/{foreign_conv}"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // Unknown conversation.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/conversations/999999"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // The delete lands: the conversation row is the guard, the message and
+    // capture rows go with it.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/conversations/{conv}"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        row_count(
+            &pool,
+            &format!("SELECT count(*) FROM conversations WHERE id = {conv}")
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        row_count(
+            &pool,
+            &format!("SELECT count(*) FROM messages WHERE conversation_id = {conv}")
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        row_count(
+            &pool,
+            &format!("SELECT count(*) FROM message_audios WHERE message_id IN ({m1}, {m2})")
+        )
+        .await,
+        0
+    );
+
+    // The transcript reads are gone with the rows.
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/conversations/{conv}/messages"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // The sibling conversation keeps its row and its message.
+    assert_eq!(
+        row_count(
+            &pool,
+            &format!("SELECT count(*) FROM messages WHERE conversation_id = {keep}")
+        )
+        .await,
+        1
+    );
+    let body = expect_json(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/conversations"),
+            None,
+            Some(&cookie),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(ids(&body), vec![keep]);
+
+    // The row is gone — a repeat delete is 404, not idempotent 204.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/conversations/{conv}"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

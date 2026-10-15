@@ -1,13 +1,16 @@
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::{Json, Router, routing::get, routing::post};
+use axum::{Json, Router, routing::delete, routing::get, routing::post};
 use axum_extra::extract::cookie::SignedCookieJar;
+use uuid::Uuid;
 
 use crate::auth::{self, password, session};
 use crate::error::{AppError, ErrorResponse};
-use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
+use crate::http::dto::auth::{
+    ChangePasswordArgs, LoginArgs, RegisterArgs, SessionResponse, UserResponse,
+};
 use crate::http::extract::Validated;
 use crate::http::extract::auth::{AuthUser, ClientIp, user_agent};
 use crate::http::session::AuthState;
@@ -26,6 +29,8 @@ pub fn routes() -> Router<AuthState> {
         .route("/logout", post(logout))
         .route("/change-password", post(change_password))
         .route("/me", get(me))
+        .route("/sessions", get(list_sessions))
+        .route("/sessions/{session_id}", delete(delete_session))
 }
 
 async fn enforce(
@@ -204,4 +209,65 @@ pub(crate) async fn me(
         username: record.username,
         role: record.role,
     }))
+}
+
+// The account-safety window: which sessions hold the account and the power
+// to revoke any of them. `current` rides on the request's own session id —
+// the cookie is opaque to the UI, so this is how it finds itself in the
+// list (and offers "log out here" versus "log out everywhere else").
+#[utoipa::path(
+    get,
+    path = "/api/auth/sessions",
+    tag = "auth",
+    security(("cookieAuth" = [])),
+    responses(
+        (status = 200, body = [SessionResponse], description = "The account's unexpired sessions, most recently active first"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+    ),
+)]
+pub(crate) async fn list_sessions(
+    State(state): State<AuthState>,
+    user: AuthUser,
+) -> Result<Json<Vec<SessionResponse>>, AppError> {
+    let rows = session::list(&state.pool, user.id).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| SessionResponse {
+                current: row.id == user.session_id,
+                id: row.id,
+                ip: row.ip,
+                user_agent: row.user_agent,
+                created_at: row.created_at,
+                last_active_at: row.last_active_at,
+                expires_at: row.expires_at,
+            })
+            .collect(),
+    ))
+}
+
+// Revoking another account's session is 404 — the ownership is in the
+// DELETE itself. Revoking the current session is the caller's own logout:
+// the row dies, the cookie stays signed but answers nothing.
+#[utoipa::path(
+    delete,
+    path = "/api/auth/sessions/{session_id}",
+    tag = "auth",
+    security(("cookieAuth" = [])),
+    params(("session_id" = Uuid, Path, description = "Id of the session to revoke")),
+    responses(
+        (status = 204, description = "Session revoked"),
+        (status = 401, body = ErrorResponse, description = "Not authenticated"),
+        (status = 404, body = ErrorResponse, description = "Session not owned by the caller"),
+    ),
+)]
+pub(crate) async fn delete_session(
+    State(state): State<AuthState>,
+    user: AuthUser,
+    Path(session_id): Path<Uuid>,
+) -> Result<StatusCode, AppError> {
+    if session::delete_owned(&state.pool, user.id, session_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
 }

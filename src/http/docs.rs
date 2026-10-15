@@ -6,7 +6,9 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use crate::auth::Role;
 use crate::error::ErrorResponse;
 use crate::http::dto::agent::{AgentResponse, CreateAgentArgs, UpdateAgentArgs};
-use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
+use crate::http::dto::auth::{
+    ChangePasswordArgs, LoginArgs, RegisterArgs, SessionResponse, UserResponse,
+};
 use crate::http::dto::conversation::{ConversationPage, MessagePage};
 use crate::http::dto::device::{ActivateDeviceArgs, DeviceResponse};
 use crate::http::dto::memory::MemoryResponse;
@@ -29,6 +31,8 @@ use crate::settings::{AudioCaptureSettings, OtaSettings};
         crate::http::routes::auth::logout,
         crate::http::routes::auth::change_password,
         crate::http::routes::auth::me,
+        crate::http::routes::auth::list_sessions,
+        crate::http::routes::auth::delete_session,
         crate::http::routes::agents::list_agents,
         crate::http::routes::agents::create_agent,
         crate::http::routes::agents::update_agent,
@@ -53,6 +57,7 @@ use crate::settings::{AudioCaptureSettings, OtaSettings};
         crate::http::routes::speakers::update_speaker,
         crate::http::routes::speakers::delete_speaker,
         crate::http::routes::conversations::list_conversations,
+        crate::http::routes::conversations::delete_conversation,
         crate::http::routes::conversations::list_messages,
         crate::http::routes::conversations::message_audio,
     ),
@@ -63,6 +68,7 @@ use crate::settings::{AudioCaptureSettings, OtaSettings};
         LoginArgs,
         ChangePasswordArgs,
         UserResponse,
+        SessionResponse,
         CreateAgentArgs,
         UpdateAgentArgs,
         AgentResponse,
@@ -117,6 +123,8 @@ mod tests {
             "/api/auth/logout",
             "/api/auth/change-password",
             "/api/auth/me",
+            "/api/auth/sessions",
+            "/api/auth/sessions/{session_id}",
             "/api/agents",
             "/api/agents/{agent_id}",
             "/api/agents/{agent_id}/memories",
@@ -131,6 +139,7 @@ mod tests {
             "/api/agents/{agent_id}/speakers",
             "/api/agents/{agent_id}/speakers/{speaker_id}",
             "/api/agents/{agent_id}/conversations",
+            "/api/agents/{agent_id}/conversations/{conversation_id}",
             "/api/agents/{agent_id}/conversations/{conversation_id}/messages",
             "/api/agents/{agent_id}/conversations/{conversation_id}/messages/{message_id}/audio",
         ] {
@@ -139,7 +148,7 @@ mod tests {
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 21, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 24, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));
@@ -148,6 +157,13 @@ mod tests {
                 .is_array()
         );
         assert!(json["components"]["schemas"]["ErrorResponse"].is_object());
+        assert!(json["components"]["schemas"]["SessionResponse"].is_object());
+        assert!(json["paths"]["/api/auth/sessions"]["get"].is_object());
+        assert!(json["paths"]["/api/auth/sessions/{session_id}"]["delete"].is_object());
+        assert!(
+            json["paths"]["/api/agents/{agent_id}/conversations/{conversation_id}"]["delete"]
+                .is_object()
+        );
         assert!(json["paths"]["/api/agents"]["get"].is_object());
         assert!(json["paths"]["/api/agents"]["post"].is_object());
         assert!(json["paths"]["/api/agents/{agent_id}"]["put"].is_object());

@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 
-use sqlx::PgPool;
+use sqlx::{FromRow, PgPool};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -87,6 +88,47 @@ pub async fn delete_others(pool: &PgPool, user_id: i64, keep: Uuid) -> Result<()
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// A live login session as the read side hands it over: the contact
+/// metadata recorded at create (refreshed by the touch path) plus the
+/// lifecycle stamps.
+#[derive(Debug, FromRow)]
+pub struct SessionRecord {
+    pub id: Uuid,
+    pub ip: String,
+    pub user_agent: String,
+    pub created_at: OffsetDateTime,
+    pub last_active_at: OffsetDateTime,
+    pub expires_at: OffsetDateTime,
+}
+
+/// Lists the account's unexpired sessions, most recently active first. The
+/// per-account count is small, so there is no pagination.
+pub async fn list(pool: &PgPool, user_id: i64) -> Result<Vec<SessionRecord>, AppError> {
+    let rows = sqlx::query_as(
+        "SELECT id, ip, user_agent, created_at, last_active_at, expires_at \
+         FROM auth_sessions \
+         WHERE user_id = $1 AND expires_at > now() \
+         ORDER BY last_active_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Deletes one of the account's own sessions — the single-session form of
+/// [`delete_others`]. Revoking the current session is the caller's own
+/// logout: the row dies and the next request fails the lookup.
+pub async fn delete_owned(pool: &PgPool, user_id: i64, id: Uuid) -> Result<bool, AppError> {
+    let deleted = sqlx::query("DELETE FROM auth_sessions WHERE id = $1 AND user_id = $2")
+        .bind(id)
+        .bind(user_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(deleted > 0)
 }
 
 #[cfg(test)]

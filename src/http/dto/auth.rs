@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 use garde::Validate;
 
@@ -52,4 +54,19 @@ pub struct UserResponse {
     pub id: i64,
     pub username: String,
     pub role: Role,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SessionResponse {
+    pub id: Uuid,
+    pub ip: String,
+    pub user_agent: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub last_active_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+    /// Whether this is the session the request itself arrived on.
+    pub current: bool,
 }

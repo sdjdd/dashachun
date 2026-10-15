@@ -38,8 +38,8 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["normalize-path"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = { version = "1", features = ["v4"] }
-utoipa = { version = "6", features = ["axum_extras", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+utoipa = { version = "6", features = ["axum_extras", "time", "uuid"] }
 utoipa-scalar = { version = "0.4", features = ["axum"] }
 schemars = "1.2.2"
 emojis = "0.9.0"

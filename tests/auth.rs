@@ -379,3 +379,182 @@ async fn stale_activity_is_refreshed_with_the_latest_contact(pool: PgPool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+#[sqlx::test]
+#[ignore]
+async fn sessions_list_scopes_and_revokes(pool: PgPool) {
+    let app = app(pool.clone());
+    let username = common::test_name();
+    let creds = json!({"username": username, "password": "supersecret1"}).to_string();
+
+    // One account, three live sessions: register plus two logins.
+    let res = send(
+        &app,
+        request("POST", "/api/auth/register", Some(&creds), None),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let cookie1 = session_cookie(&res);
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
+        .bind(&username)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let login = || async {
+        let res = send(&app, request("POST", "/api/auth/login", Some(&creds), None)).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        session_cookie(&res)
+    };
+    let _cookie2 = login().await;
+    let cookie3 = login().await;
+
+    // Name the sessions in the DB so the assertions can pick them
+    // deterministically (the cookie is signed, so the raw value is not the
+    // session id); an expired row joins to prove the list filters it.
+    let ids: Vec<uuid::Uuid> =
+        sqlx::query_as("SELECT id FROM auth_sessions WHERE user_id = $1 ORDER BY created_at")
+            .bind(user_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(id,)| id)
+            .collect();
+    assert_eq!(ids.len(), 3);
+    for (id, ua) in ids.iter().zip(["first", "second", "third"]) {
+        sqlx::query("UPDATE auth_sessions SET user_agent = $2 WHERE id = $1")
+            .bind(id)
+            .bind(ua)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO auth_sessions (id, user_id, expires_at) \
+         VALUES ($1, $2, now() - interval '1 hour')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Unauthenticated reads and revokes are rejected.
+    let res = send(&app, request("GET", "/api/auth/sessions", None, None)).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/auth/sessions/{}", ids[0]),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // The list shows only the caller's live sessions; `current` marks the
+    // session the request itself arrived on.
+    let body = expect_json(
+        &app,
+        request("GET", "/api/auth/sessions", None, Some(&cookie1)),
+        StatusCode::OK,
+    )
+    .await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    let by_ua = |ua: &str| {
+        items
+            .iter()
+            .find(|item| item["user_agent"] == ua)
+            .unwrap_or_else(|| panic!("no session with user-agent {ua} in {items:?}"))
+    };
+    assert_eq!(by_ua("first")["id"], ids[0].to_string());
+    assert_eq!(by_ua("first")["current"], true);
+    assert_eq!(by_ua("second")["current"], false);
+    assert_eq!(by_ua("third")["current"], false);
+    for item in items {
+        assert!(item["ip"].is_string());
+        assert!(item["created_at"].as_str().is_some());
+        assert!(item["last_active_at"].as_str().is_some());
+        assert!(item["expires_at"].as_str().is_some());
+    }
+
+    // Another account's session is not revocable and stays live.
+    let (foreign_cookie, foreign_id) = common::register(&app, &pool).await;
+    let foreign_session: (uuid::Uuid,) =
+        sqlx::query_as("SELECT id FROM auth_sessions WHERE user_id = $1")
+            .bind(foreign_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/auth/sessions/{}", foreign_session.0),
+            None,
+            Some(&cookie1),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = send(
+        &app,
+        request("GET", "/api/auth/me", None, Some(&foreign_cookie)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Revoking one of the caller's other sessions kills exactly that
+    // cookie.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/auth/sessions/{}", ids[1]),
+            None,
+            Some(&cookie1),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let res = send(&app, request("GET", "/api/auth/me", None, Some(&_cookie2))).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let body = expect_json(
+        &app,
+        request("GET", "/api/auth/sessions", None, Some(&cookie1)),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(body.as_array().unwrap().len(), 2);
+
+    // Revoking the current session is a self-logout: the row dies and the
+    // next request fails the lookup.
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/auth/sessions/{}", ids[0]),
+            None,
+            Some(&cookie1),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let res = send(&app, request("GET", "/api/auth/me", None, Some(&cookie1))).await;
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // The last session survives, still listed for its own cookie.
+    let body = expect_json(
+        &app,
+        request("GET", "/api/auth/sessions", None, Some(&cookie3)),
+        StatusCode::OK,
+    )
+    .await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], ids[2].to_string());
+    assert_eq!(items[0]["current"], true);
+}
