@@ -208,6 +208,7 @@ pub struct TranscriptMessage {
     pub id: i64,
     pub message: serde_json::Value,
     pub speaker_id: Option<i64>,
+    pub has_audio: bool,
     pub created_at: OffsetDateTime,
 }
 
@@ -222,10 +223,12 @@ pub async fn read_transcript(
     limit: i64,
 ) -> Result<Vec<TranscriptMessage>, sqlx::Error> {
     sqlx::query_as(
-        "SELECT id, message, speaker_id, created_at \
-         FROM messages \
-         WHERE conversation_id = $1 AND ($2::BIGINT IS NULL OR id < $2) \
-         ORDER BY id DESC \
+        "SELECT m.id, m.message, m.speaker_id, \
+         EXISTS (SELECT 1 FROM message_audios ma WHERE ma.message_id = m.id) AS has_audio, \
+         m.created_at \
+         FROM messages m \
+         WHERE m.conversation_id = $1 AND ($2::BIGINT IS NULL OR m.id < $2) \
+         ORDER BY m.id DESC \
          LIMIT $3",
     )
     .bind(conversation_id)

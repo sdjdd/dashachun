@@ -64,6 +64,10 @@ pub struct MessageResponse {
     /// row id, NULL when the utterance identified no one; dangling after
     /// a speaker delete, resolve against the live roster.
     pub speaker_id: Option<i64>,
+    /// Whether a capture row exists for the message — gates the playback
+    /// button (and the speaker-enrollment picker) without probing the
+    /// audio endpoint.
+    pub has_audio: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -80,6 +84,7 @@ impl From<TranscriptMessage> for MessageResponse {
                 .to_owned(),
             message: row.message,
             speaker_id: row.speaker_id,
+            has_audio: row.has_audio,
             created_at: row.created_at,
         }
     }

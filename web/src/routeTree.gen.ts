@@ -17,6 +17,7 @@ import { Route as AuthRegisterRouteImport } from './routes/_auth/register'
 import { Route as AppAgentsIndexRouteImport } from './routes/_app/agents/index'
 import { Route as AppAgentsAgentIdRouteImport } from './routes/_app/agents/$agentId'
 import { Route as AppAgentsAgentIdIndexRouteImport } from './routes/_app/agents/$agentId.index'
+import { Route as AppAgentsAgentIdConversationsRouteImport } from './routes/_app/agents/$agentId.conversations'
 import { Route as AppAgentsAgentIdDevicesRouteImport } from './routes/_app/agents/$agentId.devices'
 import { Route as AppAgentsAgentIdMemoriesRouteImport } from './routes/_app/agents/$agentId.memories'
 
@@ -58,6 +59,12 @@ const AppAgentsAgentIdIndexRoute = AppAgentsAgentIdIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppAgentsAgentIdRoute,
 } as any)
+const AppAgentsAgentIdConversationsRoute =
+  AppAgentsAgentIdConversationsRouteImport.update({
+    id: '/conversations',
+    path: '/conversations',
+    getParentRoute: () => AppAgentsAgentIdRoute,
+  } as any)
 const AppAgentsAgentIdDevicesRoute = AppAgentsAgentIdDevicesRouteImport.update({
   id: '/devices',
   path: '/devices',
@@ -76,6 +83,7 @@ export interface FileRoutesByFullPath {
   '/register': typeof AuthRegisterRoute
   '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
   '/agents/': typeof AppAgentsIndexRoute
+  '/agents/$agentId/conversations': typeof AppAgentsAgentIdConversationsRoute
   '/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
   '/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
   '/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
@@ -85,6 +93,7 @@ export interface FileRoutesByTo {
   '/login': typeof AuthLoginRoute
   '/register': typeof AuthRegisterRoute
   '/agents': typeof AppAgentsIndexRoute
+  '/agents/$agentId/conversations': typeof AppAgentsAgentIdConversationsRoute
   '/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
   '/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
   '/agents/$agentId': typeof AppAgentsAgentIdIndexRoute
@@ -98,6 +107,7 @@ export interface FileRoutesById {
   '/_app/': typeof AppIndexRoute
   '/_app/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
   '/_app/agents/': typeof AppAgentsIndexRoute
+  '/_app/agents/$agentId/conversations': typeof AppAgentsAgentIdConversationsRoute
   '/_app/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
   '/_app/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
   '/_app/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
@@ -110,6 +120,7 @@ export interface FileRouteTypes {
     | '/register'
     | '/agents/$agentId'
     | '/agents/'
+    | '/agents/$agentId/conversations'
     | '/agents/$agentId/devices'
     | '/agents/$agentId/memories'
     | '/agents/$agentId/'
@@ -119,6 +130,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/register'
     | '/agents'
+    | '/agents/$agentId/conversations'
     | '/agents/$agentId/devices'
     | '/agents/$agentId/memories'
     | '/agents/$agentId'
@@ -131,6 +143,7 @@ export interface FileRouteTypes {
     | '/_app/'
     | '/_app/agents/$agentId'
     | '/_app/agents/'
+    | '/_app/agents/$agentId/conversations'
     | '/_app/agents/$agentId/devices'
     | '/_app/agents/$agentId/memories'
     | '/_app/agents/$agentId/'
@@ -199,6 +212,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAgentsAgentIdIndexRouteImport
       parentRoute: typeof AppAgentsAgentIdRoute
     }
+    '/_app/agents/$agentId/conversations': {
+      id: '/_app/agents/$agentId/conversations'
+      path: '/conversations'
+      fullPath: '/agents/$agentId/conversations'
+      preLoaderRoute: typeof AppAgentsAgentIdConversationsRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
     '/_app/agents/$agentId/devices': {
       id: '/_app/agents/$agentId/devices'
       path: '/devices'
@@ -217,12 +237,14 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppAgentsAgentIdRouteChildren {
+  AppAgentsAgentIdConversationsRoute: typeof AppAgentsAgentIdConversationsRoute
   AppAgentsAgentIdDevicesRoute: typeof AppAgentsAgentIdDevicesRoute
   AppAgentsAgentIdMemoriesRoute: typeof AppAgentsAgentIdMemoriesRoute
   AppAgentsAgentIdIndexRoute: typeof AppAgentsAgentIdIndexRoute
 }
 
 const AppAgentsAgentIdRouteChildren: AppAgentsAgentIdRouteChildren = {
+  AppAgentsAgentIdConversationsRoute: AppAgentsAgentIdConversationsRoute,
   AppAgentsAgentIdDevicesRoute: AppAgentsAgentIdDevicesRoute,
   AppAgentsAgentIdMemoriesRoute: AppAgentsAgentIdMemoriesRoute,
   AppAgentsAgentIdIndexRoute: AppAgentsAgentIdIndexRoute,

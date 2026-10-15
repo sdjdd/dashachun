@@ -187,6 +187,14 @@ async fn messages_list_scopes_and_paginates(pool: PgPool) {
         .unwrap();
     let other_conv = common::conversation(&pool, 1, other_agent).await;
     let _other = message_row(&pool, other_conv, "user", "别处").await;
+    sqlx::query(
+        "INSERT INTO message_audios (message_id, bucket, object_key, sample_rate, channels, duration_ms) \
+         VALUES ($1, 'captures', 'm1.flac', 16000, 1, 1000)",
+    )
+    .bind(m1)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     // Unauthenticated reads are rejected.
     let res = send(
@@ -218,12 +226,16 @@ async fn messages_list_scopes_and_paginates(pool: PgPool) {
     assert_eq!(items[0]["role"], "user");
     assert_eq!(items[0]["speaker_id"], 7);
     assert_eq!(items[0]["message"]["content"], "我是谁");
+    assert_eq!(items[0]["has_audio"], false);
     assert_eq!(items[1]["id"], m3);
     assert_eq!(items[1]["role"], "tool");
     assert_eq!(items[1]["message"]["content"], "{\"ok\":true}");
     assert_eq!(items[1]["speaker_id"], serde_json::Value::Null);
+    assert_eq!(items[1]["has_audio"], false);
     assert_eq!(items[2]["id"], m2);
+    assert_eq!(items[2]["has_audio"], false);
     assert_eq!(items[3]["id"], m1);
+    assert_eq!(items[3]["has_audio"], true);
     assert!(items[0]["created_at"].as_str().is_some());
     assert_eq!(body["has_more"], false);
 
