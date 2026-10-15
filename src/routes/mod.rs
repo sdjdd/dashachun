@@ -6,4 +6,4 @@ pub mod gateway;
 pub mod messages;
 pub mod ota;
 pub mod providers;
-pub mod voiceprints;
+pub mod speakers;

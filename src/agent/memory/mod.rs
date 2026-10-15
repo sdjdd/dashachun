@@ -64,8 +64,16 @@ pub trait Memory: Send + Sync {
     async fn append(&self, session: &AgentSession, items: Vec<ChatItem>);
 
     /// Writes the user message row for a final utterance and notifies the
-    /// hooks once it commits. Empty text stores nothing.
-    async fn store_utterance(&self, session: &AgentSession, text: &str) -> Result<(), String>;
+    /// hooks once it commits. Empty text stores nothing. `speaker` is the
+    /// utterance's attribution — the matched speakers row id, `None` when
+    /// the utterance identified no one or the agent runs no
+    /// identification — persisted on the row for the transcript's readers.
+    async fn store_utterance(
+        &self,
+        session: &AgentSession,
+        text: &str,
+        speaker: Option<i64>,
+    ) -> Result<(), String>;
 
     /// Writes the turn's assistant and tool messages in one background
     /// transaction and notifies the hooks once it commits — the hook

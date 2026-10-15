@@ -70,12 +70,18 @@ CREATE INDEX device_sessions_device_id_idx ON device_sessions (device_id);
 -- tag; user rows carry the utterance, assistant rows text and/or tool-call
 -- requests, tool rows one result each — `ORDER BY id` rebuilds the
 -- conversation). `System` messages are never stored (the agent prepends its
--- prompt every turn). Ownership derives through `device_sessions`; no
--- foreign keys.
+-- prompt every turn). `speaker_id` is the attribution the voiceprint
+-- identification matched for a user row: the matched `speakers` row id,
+-- NULL when the utterance identified no one (below threshold, failed, not
+-- ready in time) or the agent runs no identification. A deleted speaker
+-- leaves old rows pointing nowhere — consumers resolve the id against the
+-- agent's live roster and treat a miss as unidentified. Only user rows
+-- carry it. Ownership derives through `device_sessions`; no foreign keys.
 CREATE TABLE messages (
     id         BIGSERIAL PRIMARY KEY,
     session_id TEXT NOT NULL,
     message    JSONB NOT NULL,
+    speaker_id BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -102,27 +108,29 @@ CREATE TABLE message_audios (
 
 CREATE INDEX message_audios_message_id_idx ON message_audios (message_id);
 
--- Per-agent speaker voiceprints: one row per (agent, label). `embedding`
--- holds the element-wise SUM of the L2-normalized per-segment vectors —
--- cosine is scale-invariant, so scoring the sum equals scoring the mean,
--- and enrolling more audio is a pure vector addition (the source audio is
--- never retained). The 192 dimension is the pinned CAM++ model's output
--- width (src/voiceprint); candidates are enumerated per agent, so there is
--- no ANN index by design. Integrity is enforced in the app layer; no
--- foreign keys.
-CREATE TABLE voiceprints (
-    id           BIGSERIAL PRIMARY KEY,
-    agent_id     BIGINT NOT NULL,
-    label        TEXT NOT NULL,
-    description  TEXT NOT NULL DEFAULT '',
-    embedding    REAL[] NOT NULL CHECK (cardinality(embedding) = 192),
+-- Per-agent speakers: one row per (agent, name) — an enrolled speaker
+-- identity whose `embedding` holds the element-wise SUM of the
+-- L2-normalized per-segment voiceprint vectors (cosine is scale-invariant,
+-- so scoring the sum equals scoring the mean, and enrolling more audio is
+-- a pure vector addition; the source audio is never retained). The row id
+-- is the stable speaker id the rest of the system speaks: the prompt's
+-- roster, the messages' `speaker_id`. The 192 dimension is the pinned
+-- CAM++ model's output width (src/voiceprint); candidates are enumerated
+-- per agent, so there is no ANN index by design. Integrity is enforced in
+-- the app layer; no foreign keys.
+CREATE TABLE speakers (
+    id          BIGSERIAL PRIMARY KEY,
+    agent_id    BIGINT NOT NULL,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    embedding   REAL[] NOT NULL CHECK (cardinality(embedding) = 192),
     sample_count INT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (agent_id, label)
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (agent_id, name)
 );
 
-CREATE INDEX voiceprints_agent_id_idx ON voiceprints (agent_id);
+CREATE INDEX speakers_agent_id_idx ON speakers (agent_id);
 
 -- Entry-based user memory: short durable facts the LLM maintains through the
 -- memory tools, injected into the system prompt each turn. `mem_no` is

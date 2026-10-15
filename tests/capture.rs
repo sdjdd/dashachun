@@ -44,7 +44,7 @@ async fn utterance_audio_attaches_to_the_user_row_through_the_hook(pool: PgPool)
     let recording = audio.start_utterance(&common::session("sess-1"));
     recording.push(&[0.5; 960]);
     memory
-        .store_utterance(&common::session("sess-1"), "hello")
+        .store_utterance(&common::session("sess-1"), "hello", None)
         .await
         .unwrap();
     // The hook fired inside store_utterance, so by the time the capture is
@@ -157,7 +157,7 @@ async fn dropped_captures_store_no_audio(pool: PgPool) {
     utterance.push(&[0.5; 960]);
     drop(utterance);
     memory
-        .store_utterance(&common::session("sess-4"), "hello")
+        .store_utterance(&common::session("sess-4"), "hello", None)
         .await
         .unwrap();
 
@@ -190,7 +190,7 @@ async fn utterance_without_text_stores_no_row_and_no_audio(pool: PgPool) {
     let recording = audio.start_utterance(&common::session("sess-5"));
     recording.push(&[0.5; 960]);
     memory
-        .store_utterance(&common::session("sess-5"), "")
+        .store_utterance(&common::session("sess-5"), "", None)
         .await
         .unwrap();
     // No row, no hook, so finishing the capture stores nothing either.
@@ -218,7 +218,7 @@ async fn no_sink_stores_no_audio_rows(pool: PgPool) {
     let recording = audio.start_utterance(&common::session("sess-6"));
     recording.push(&[0.5; 960]);
     memory
-        .store_utterance(&common::session("sess-6"), "hello")
+        .store_utterance(&common::session("sess-6"), "hello", None)
         .await
         .unwrap();
     recording.finish();

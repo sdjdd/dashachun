@@ -1,11 +1,11 @@
 //! Session-side identification: the per-connection matcher over one
-//! agent's enrolled voiceprints. `AgentFactory::build` constructs it once
+//! agent's enrolled speakers. `AgentFactory::build` constructs it once
 //! per device session from the boot-loaded model and a single read of the
-//! agent's voiceprints — an agent without enrollments (or without the
+//! agent's speakers — an agent without enrollments (or without the
 //! model) gets no matcher and runs no identification at all. The listening
 //! stage opens a tap per utterance ([`SpeakerMatcher::tap`], driven exactly
 //! like an audio capture); the collected 16 kHz speech is embedded off the
-//! async runtime and scored against the enrolled labels. The outcome is a
+//! async runtime and scored against the enrolled names. The outcome is a
 //! debug log line plus the [`Identification`] itself, which the listening
 //! stage resolves into the reply turn's speaker attribution; a threshold
 //! setting comes later.
@@ -19,7 +19,7 @@ use crate::agent::{AgentSession, UtteranceCapture, collect};
 use crate::voiceprint::{EnrolledEmbedding, MATCH_THRESHOLD, Voiceprint, VoiceprintError, cosine};
 
 /// The per-connection speaker matcher: the shared CAM++ model plus the
-/// agent's enrolled voiceprints as they were when the device connected —
+/// agent's enrolled speakers as they were when the device connected —
 /// enrollments made later join at the next session, never mid-session.
 #[derive(Clone)]
 pub struct SpeakerMatcher {
@@ -29,7 +29,7 @@ pub struct SpeakerMatcher {
 
 impl SpeakerMatcher {
     /// Builds the matcher from the model slot and the agent's enrolled
-    /// voiceprints; `None` for an empty candidate set — the caller skips
+    /// speakers; `None` for an empty candidate set — the caller skips
     /// the whole pipeline instead of running an empty matcher.
     pub fn new(model: Arc<Mutex<Voiceprint>>, candidates: Vec<EnrolledEmbedding>) -> Option<Self> {
         if candidates.is_empty() {
@@ -43,8 +43,10 @@ impl SpeakerMatcher {
     /// like an audio capture (dropping it discards the utterance — barge-in,
     /// session teardown); on finish the collected 16 kHz PCM is quantized,
     /// embedded off the async runtime and scored. The outcome is a debug
-    /// log line plus the identification on the tap's result channel.
-    pub fn tap(&self, session: &AgentSession) -> SpeakerTap {
+    /// log line plus the identification on the returned result channel —
+    /// held by the caller from the start (the listening stage hands it to
+    /// the utterance's ASR task, which resolves it at the final).
+    pub fn tap(&self, session: &AgentSession) -> (SpeakerTap, SpeakerResult) {
         let (tap, mut rx) = UtteranceCapture::channel();
         let (result_tx, result_rx) = oneshot::channel();
         let matcher = self.clone();
@@ -67,7 +69,7 @@ impl SpeakerMatcher {
                 Some(Ok(identification)) if identification.matched => {
                     debug!(
                         session_id,
-                        label = %identification.label,
+                        name = %identification.name,
                         similarity = format_args!("{:.3}", identification.similarity),
                         "voiceprint identified"
                     )
@@ -75,7 +77,7 @@ impl SpeakerMatcher {
                 Some(Ok(identification)) => {
                     debug!(
                         session_id,
-                        label = %identification.label,
+                        name = %identification.name,
                         similarity = format_args!("{:.3}", identification.similarity),
                         "voiceprint below threshold"
                     )
@@ -85,14 +87,11 @@ impl SpeakerMatcher {
             }
             let _ = result_tx.send(outcome.and_then(|result| result.ok()));
         });
-        SpeakerTap {
-            capture: tap,
-            result: result_rx,
-        }
+        (SpeakerTap { capture: tap }, result_rx)
     }
 
     /// Embeds one utterance of 16 kHz mono s16le PCM and scores it against
-    /// the enrolled voiceprints: the best cosine wins.
+    /// the enrolled speakers: the best cosine wins.
     pub async fn identify(&self, pcm: &[i16]) -> Result<Identification, VoiceprintError> {
         let embedding = self.embed(pcm).await?;
         Ok(score(&self.candidates, &embedding))
@@ -108,25 +107,29 @@ impl SpeakerMatcher {
 }
 
 /// The outcome of one identification: the best-scoring candidate's row id
-/// (the stable speaker id), its label, its description, its cosine
+/// (the stable speaker id), its name, its description, its cosine
 /// similarity and whether it cleared the match threshold.
 #[derive(Debug)]
 pub struct Identification {
     pub id: i64,
-    pub label: String,
+    pub name: String,
     pub description: String,
     pub similarity: f32,
     pub matched: bool,
 }
 
+/// The result channel of one identification tap: resolves to the outcome
+/// once the finished segment is embedded and scored — `None` when the
+/// collection produced nothing or the identification failed.
+pub type SpeakerResult = oneshot::Receiver<Option<Identification>>;
+
 /// The driver-side handle of one identification tap: the capture side
-/// (pushed and finished exactly like an audio capture) plus the result
-/// channel the listening stage resolves when the utterance's ASR final
-/// turns into a turn. Dropping the tap without finishing discards the
-/// utterance — the result channel then never carries a value.
+/// (pushed and finished exactly like an audio capture). The result channel
+/// comes out of [`SpeakerMatcher::tap`] next to this handle; dropping the
+/// tap without finishing discards the utterance — the result channel then
+/// never carries a value.
 pub struct SpeakerTap {
     capture: UtteranceCapture,
-    result: oneshot::Receiver<Option<Identification>>,
 }
 
 impl SpeakerTap {
@@ -135,13 +138,12 @@ impl SpeakerTap {
         self.capture.push(samples);
     }
 
-    /// Ends the tap — the speech segment is complete — and returns the
-    /// result channel; the identification task sends at most one
-    /// `Some(identification)` (a matched or unmatched outcome), `None`
-    /// standing for a failed identification.
-    pub fn finish(self) -> oneshot::Receiver<Option<Identification>> {
+    /// Ends the tap — the speech segment is complete. The identification
+    /// task then embeds and scores, sending at most one value on the
+    /// result channel: `Some(identification)` (a matched or unmatched
+    /// outcome) or `None` for a failed identification.
+    pub fn finish(self) {
         self.capture.finish();
-        self.result
     }
 }
 
@@ -153,7 +155,7 @@ fn score(candidates: &[EnrolledEmbedding], embedding: &[f32]) -> Identification 
         .map(|candidate| {
             (
                 candidate.id,
-                candidate.label.clone(),
+                candidate.name.clone(),
                 candidate.description.clone(),
                 cosine(embedding, &candidate.embedding),
             )
@@ -162,7 +164,7 @@ fn score(candidates: &[EnrolledEmbedding], embedding: &[f32]) -> Identification 
         .expect("a matcher is only built with at least one candidate");
     Identification {
         id: best.0,
-        label: best.1,
+        name: best.1,
         description: best.2,
         similarity: best.3,
         matched: best.3 >= MATCH_THRESHOLD,
@@ -186,13 +188,13 @@ mod tests {
         vec![
             EnrolledEmbedding {
                 id: 1,
-                label: "a".into(),
+                name: "a".into(),
                 description: "desc a".into(),
                 embedding: vec![1.0, 0.0],
             },
             EnrolledEmbedding {
                 id: 2,
-                label: "b".into(),
+                name: "b".into(),
                 description: String::new(),
                 embedding: vec![0.0, 1.0],
             },
@@ -203,18 +205,18 @@ mod tests {
     fn scores_the_best_candidate_over_the_threshold() {
         let identification = score(&candidates(), &[0.9, 0.1]);
         assert_eq!(identification.id, 1);
-        assert_eq!(identification.label, "a");
+        assert_eq!(identification.name, "a");
         assert_eq!(identification.description, "desc a");
         assert!(identification.matched);
         assert!(identification.similarity > 0.99);
     }
 
     #[test]
-    fn below_threshold_keeps_the_best_label_but_not_matched() {
+    fn below_threshold_keeps_the_best_name_but_not_matched() {
         // -1.0 against "a", 0.0 against "b": the best score exists but is
         // nowhere near the threshold — the attribution stays undecided.
         let identification = score(&candidates(), &[-1.0, 0.0]);
-        assert_eq!(identification.label, "b");
+        assert_eq!(identification.name, "b");
         assert_eq!(identification.similarity, 0.0);
         assert!(!identification.matched);
     }
@@ -255,13 +257,13 @@ mod tests {
         let candidates = vec![
             EnrolledEmbedding {
                 id: 1,
-                label: "张三".into(),
+                name: "张三".into(),
                 description: "同事".into(),
                 embedding: speech_embedding,
             },
             EnrolledEmbedding {
                 id: 2,
-                label: "李四".into(),
+                name: "李四".into(),
                 description: String::new(),
                 embedding: noise_embedding,
             },
@@ -269,12 +271,12 @@ mod tests {
         let matcher = SpeakerMatcher::new(model, candidates).unwrap();
 
         let identified = matcher.identify(&speech).await.unwrap();
-        assert_eq!(identified.label, "张三");
+        assert_eq!(identified.name, "张三");
         assert!(identified.matched);
         assert!(identified.similarity > 0.9);
 
         let other = matcher.identify(&noise).await.unwrap();
-        assert_eq!(other.label, "李四");
+        assert_eq!(other.name, "李四");
         assert!(other.matched);
     }
 
@@ -294,7 +296,7 @@ mod tests {
             model,
             vec![EnrolledEmbedding {
                 id: 1,
-                label: "张三".into(),
+                name: "张三".into(),
                 description: "同事".into(),
                 embedding: speech_embedding,
             }],
@@ -307,12 +309,13 @@ mod tests {
             channels: 1,
             frame_duration_ms: 60,
         };
-        let tap = matcher.tap(&session);
+        let (tap, result) = matcher.tap(&session);
         let samples: Vec<f32> = speech.iter().map(|&s| f32::from(s) / 32768.0).collect();
         tap.push(&samples);
-        let result = tap.finish().await.expect("the identification task sends");
+        tap.finish();
+        let result = result.await.expect("the identification task sends");
         let identification = result.expect("the utterance embedded and scored");
-        assert_eq!(identification.label, "张三");
+        assert_eq!(identification.name, "张三");
         assert!(identification.matched);
     }
 }

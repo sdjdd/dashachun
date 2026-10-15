@@ -10,84 +10,81 @@ use crate::error::{AppError, ErrorResponse};
 use crate::extract::Validated;
 use crate::routes::agents::AgentsState;
 use crate::state::ServerState;
-use crate::voiceprint::VoiceprintStore;
-use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, VoiceprintResponse};
+use crate::voiceprint::SpeakerStore;
+use crate::voiceprint::dto::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
 use crate::voiceprint::enroll;
 
 pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route(
-            "/{agent_id}/voiceprints",
-            get(list_voiceprints).post(create_voiceprint),
+            "/{agent_id}/speakers",
+            get(list_speakers).post(create_speaker),
         )
         .route(
-            "/{agent_id}/voiceprints/{voiceprint_id}",
-            put(update_voiceprint).delete(delete_voiceprint),
+            "/{agent_id}/speakers/{speaker_id}",
+            put(update_speaker).delete(delete_speaker),
         )
 }
 
 #[utoipa::path(
     get,
-    path = "/api/agents/{agent_id}/voiceprints",
-    tag = "voiceprints",
+    path = "/api/agents/{agent_id}/speakers",
+    tag = "speakers",
     security(("cookieAuth" = [])),
-    params(("agent_id" = i64, Path, description = "Id of the agent owning the voiceprints")),
+    params(("agent_id" = i64, Path, description = "Id of the agent owning the speakers")),
     responses(
-        (status = 200, body = [VoiceprintResponse], description = "The agent's voiceprints, without the embeddings"),
+        (status = 200, body = [SpeakerResponse], description = "The agent's speakers, without the embeddings"),
         (status = 401, body = ErrorResponse, description = "Not authenticated"),
         (status = 404, body = ErrorResponse, description = "Agent not owned by the caller"),
     ),
 )]
-pub(crate) async fn list_voiceprints(
+pub(crate) async fn list_speakers(
     State(auth): State<AuthState>,
     user: AuthUser,
     Path(agent_id): Path<i64>,
-) -> Result<Json<Vec<VoiceprintResponse>>, AppError> {
+) -> Result<Json<Vec<SpeakerResponse>>, AppError> {
     if !AgentStore::new(auth.pool.clone())
         .owns(agent_id, user.id)
         .await?
     {
         return Err(AppError::NotFound);
     }
-    let voiceprints = VoiceprintStore::new(auth.pool.clone())
+    let speakers = SpeakerStore::new(auth.pool.clone())
         .list_for_agent(agent_id, user.id)
         .await?;
     Ok(Json(
-        voiceprints
-            .into_iter()
-            .map(VoiceprintResponse::from)
-            .collect(),
+        speakers.into_iter().map(SpeakerResponse::from).collect(),
     ))
 }
 
 // Enrollment: the audio of the named user messages (captured by the audio
 // feature) is fetched from the storage, decoded, embedded, and appended
-// into the label's vector sum. Guards escalate with specificity —
+// into the name's vector sum. Guards escalate with specificity —
 // ownership 404, disabled audio capture 400, rejected messages 400 with
 // per-message reasons, missing model 503 — so request-side problems are
 // reported even while the feature is off.
 #[utoipa::path(
     post,
-    path = "/api/agents/{agent_id}/voiceprints",
-    tag = "voiceprints",
+    path = "/api/agents/{agent_id}/speakers",
+    tag = "speakers",
     security(("cookieAuth" = [])),
-    request_body = CreateVoiceprintArgs,
-    params(("agent_id" = i64, Path, description = "Id of the agent to enroll the voiceprint under")),
+    request_body = CreateSpeakerArgs,
+    params(("agent_id" = i64, Path, description = "Id of the agent to enroll the speaker under")),
     responses(
-        (status = 201, body = VoiceprintResponse, description = "Voiceprint created or appended"),
+        (status = 201, body = SpeakerResponse, description = "Speaker created or appended"),
         (status = 400, body = ErrorResponse, description = "Invalid payload, audio capture disabled, or rejected message ids"),
         (status = 401, body = ErrorResponse, description = "Not authenticated"),
         (status = 404, body = ErrorResponse, description = "Agent not owned by the caller"),
         (status = 503, body = ErrorResponse, description = "Voiceprint model not loaded"),
     ),
 )]
-pub(crate) async fn create_voiceprint(
+pub(crate) async fn create_speaker(
     State(auth): State<AuthState>,
     State(server): State<ServerState>,
     user: AuthUser,
     Path(agent_id): Path<i64>,
-    Validated(args): Validated<CreateVoiceprintArgs>,
-) -> Result<(StatusCode, Json<VoiceprintResponse>), AppError> {
+    Validated(args): Validated<CreateSpeakerArgs>,
+) -> Result<(StatusCode, Json<SpeakerResponse>), AppError> {
     if !AgentStore::new(auth.pool.clone())
         .owns(agent_id, user.id)
         .await?
@@ -100,7 +97,7 @@ pub(crate) async fn create_voiceprint(
         server.voiceprint(),
         agent_id,
         user.id,
-        &args.label,
+        &args.name,
         args.description.as_deref(),
         &args.message_ids,
     )
@@ -110,39 +107,39 @@ pub(crate) async fn create_voiceprint(
 
 #[utoipa::path(
     put,
-    path = "/api/agents/{agent_id}/voiceprints/{voiceprint_id}",
-    tag = "voiceprints",
+    path = "/api/agents/{agent_id}/speakers/{speaker_id}",
+    tag = "speakers",
     security(("cookieAuth" = [])),
-    request_body = UpdateVoiceprintArgs,
+    request_body = UpdateSpeakerArgs,
     params(
-        ("agent_id" = i64, Path, description = "Id of the agent owning the voiceprint"),
-        ("voiceprint_id" = i64, Path, description = "Id of the voiceprint"),
+        ("agent_id" = i64, Path, description = "Id of the agent owning the speaker"),
+        ("speaker_id" = i64, Path, description = "Id of the speaker"),
     ),
     responses(
-        (status = 200, body = VoiceprintResponse, description = "Label and/or description updated"),
+        (status = 200, body = SpeakerResponse, description = "Name and/or description updated"),
         (status = 400, body = ErrorResponse, description = "Invalid payload or an empty patch"),
         (status = 401, body = ErrorResponse, description = "Not authenticated"),
-        (status = 404, body = ErrorResponse, description = "Voiceprint not owned by the caller"),
-        (status = 409, body = ErrorResponse, description = "New label already taken on this agent"),
+        (status = 404, body = ErrorResponse, description = "Speaker not owned by the caller"),
+        (status = 409, body = ErrorResponse, description = "New name already taken on this agent"),
     ),
 )]
-pub(crate) async fn update_voiceprint(
+pub(crate) async fn update_speaker(
     State(auth): State<AuthState>,
     user: AuthUser,
-    Path((agent_id, voiceprint_id)): Path<(i64, i64)>,
-    Validated(args): Validated<UpdateVoiceprintArgs>,
-) -> Result<Json<VoiceprintResponse>, AppError> {
-    if args.label.is_none() && args.description.is_none() {
+    Path((agent_id, speaker_id)): Path<(i64, i64)>,
+    Validated(args): Validated<UpdateSpeakerArgs>,
+) -> Result<Json<SpeakerResponse>, AppError> {
+    if args.name.is_none() && args.description.is_none() {
         return Err(AppError::BadRequest(
-            "at least one of label or description is required".into(),
+            "at least one of name or description is required".into(),
         ));
     }
-    let record = VoiceprintStore::new(auth.pool.clone())
+    let record = SpeakerStore::new(auth.pool.clone())
         .update(
             agent_id,
-            voiceprint_id,
+            speaker_id,
             user.id,
-            args.label.as_deref(),
+            args.name.as_deref(),
             args.description.as_deref(),
         )
         .await?
@@ -152,26 +149,26 @@ pub(crate) async fn update_voiceprint(
 
 #[utoipa::path(
     delete,
-    path = "/api/agents/{agent_id}/voiceprints/{voiceprint_id}",
-    tag = "voiceprints",
+    path = "/api/agents/{agent_id}/speakers/{speaker_id}",
+    tag = "speakers",
     security(("cookieAuth" = [])),
     params(
-        ("agent_id" = i64, Path, description = "Id of the agent owning the voiceprint"),
-        ("voiceprint_id" = i64, Path, description = "Id of the voiceprint"),
+        ("agent_id" = i64, Path, description = "Id of the agent owning the speaker"),
+        ("speaker_id" = i64, Path, description = "Id of the speaker"),
     ),
     responses(
-        (status = 204, description = "Voiceprint deleted"),
+        (status = 204, description = "Speaker deleted"),
         (status = 401, body = ErrorResponse, description = "Not authenticated"),
-        (status = 404, body = ErrorResponse, description = "Voiceprint not owned by the caller"),
+        (status = 404, body = ErrorResponse, description = "Speaker not owned by the caller"),
     ),
 )]
-pub(crate) async fn delete_voiceprint(
+pub(crate) async fn delete_speaker(
     State(auth): State<AuthState>,
     user: AuthUser,
-    Path((agent_id, voiceprint_id)): Path<(i64, i64)>,
+    Path((agent_id, speaker_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, AppError> {
-    if VoiceprintStore::new(auth.pool.clone())
-        .delete(agent_id, voiceprint_id, user.id)
+    if SpeakerStore::new(auth.pool.clone())
+        .delete(agent_id, speaker_id, user.id)
         .await?
     {
         Ok(StatusCode::NO_CONTENT)

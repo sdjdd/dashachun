@@ -10,7 +10,7 @@ use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
 use crate::error::ErrorResponse;
 use crate::provider::dto::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
 use crate::settings::AudioCaptureSettings;
-use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, VoiceprintResponse};
+use crate::voiceprint::dto::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -39,10 +39,10 @@ use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, Voicepr
         crate::routes::providers::activate_provider,
         crate::routes::audio_capture::get_capture,
         crate::routes::audio_capture::put_capture,
-        crate::routes::voiceprints::list_voiceprints,
-        crate::routes::voiceprints::create_voiceprint,
-        crate::routes::voiceprints::update_voiceprint,
-        crate::routes::voiceprints::delete_voiceprint,
+        crate::routes::speakers::list_speakers,
+        crate::routes::speakers::create_speaker,
+        crate::routes::speakers::update_speaker,
+        crate::routes::speakers::delete_speaker,
         crate::routes::messages::message_audio,
     ),
     components(schemas(
@@ -60,9 +60,9 @@ use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, Voicepr
         UpdateProviderArgs,
         ProviderResponse,
         AudioCaptureSettings,
-        CreateVoiceprintArgs,
-        UpdateVoiceprintArgs,
-        VoiceprintResponse,
+        CreateSpeakerArgs,
+        UpdateSpeakerArgs,
+        SpeakerResponse,
     )),
     modifiers(&CookieAuthAddon),
 )]
@@ -109,8 +109,8 @@ mod tests {
             "/api/providers/{id}",
             "/api/providers/{id}/activate",
             "/api/settings/audio-capture",
-            "/api/agents/{agent_id}/voiceprints",
-            "/api/agents/{agent_id}/voiceprints/{voiceprint_id}",
+            "/api/agents/{agent_id}/speakers",
+            "/api/agents/{agent_id}/speakers/{speaker_id}",
             "/api/agents/{agent_id}/messages/{message_id}/audio",
         ] {
             assert!(

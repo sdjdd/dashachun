@@ -12,7 +12,7 @@ use crate::state::ServerState;
 
 /// The agent REST routes need both halves: session auth and the server
 /// whose audio-storage and voiceprint-model slots the enrollment POST reads
-/// (the voiceprints sub-routes merge in here, so one state shape carries
+/// (the speakers sub-routes merge in here, so one state shape carries
 /// both).
 #[derive(Clone)]
 pub struct AgentsState {
@@ -35,7 +35,7 @@ impl FromRef<AgentsState> for ServerState {
 pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route("/", post(create_agent))
-        .merge(crate::routes::voiceprints::routes())
+        .merge(crate::routes::speakers::routes())
         .merge(crate::routes::messages::routes())
 }
 

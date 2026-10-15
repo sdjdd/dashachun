@@ -72,11 +72,17 @@ impl Memory for DbMemory {
         }
     }
 
-    async fn store_utterance(&self, session: &AgentSession, text: &str) -> Result<(), String> {
+    async fn store_utterance(
+        &self,
+        session: &AgentSession,
+        text: &str,
+        speaker: Option<i64>,
+    ) -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
         }
-        let message_id = insert_message_row(&self.pool, &session.id, &ChatItem::user(text)).await?;
+        let message_id =
+            insert_message_row(&self.pool, &session.id, &ChatItem::user(text), speaker).await?;
         for hook in &self.hooks {
             hook.utterance_stored(session, message_id);
         }
@@ -114,7 +120,7 @@ impl Memory for DbMemory {
         let session = session.clone();
         let text = text.to_string();
         tokio::spawn(async move {
-            match insert_message_row(&pool, &session.id, &ChatItem::assistant(text)).await {
+            match insert_message_row(&pool, &session.id, &ChatItem::assistant(text), None).await {
                 Ok(message_id) => {
                     for hook in &hooks {
                         hook.turn_stored(&session, message_id);
@@ -129,18 +135,21 @@ impl Memory for DbMemory {
 
 /// Inserts one message row — the JSON form of `item` — and returns its id.
 /// The executor is generic so the same helper serves the awaited single
-/// inserts and the transactional turn batch.
+/// inserts and the transactional turn batch. `speaker` only ever arrives
+/// for user rows (the assistant/tool writers pass `None`).
 async fn insert_message_row(
     executor: impl sqlx::PgExecutor<'_>,
     session_id: &str,
     item: &ChatItem,
+    speaker: Option<i64>,
 ) -> Result<i64, String> {
     let message = serde_json::to_value(item).map_err(|err| err.to_string())?;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO messages (session_id, message) VALUES ($1, $2) RETURNING id",
+        "INSERT INTO messages (session_id, message, speaker_id) VALUES ($1, $2, $3) RETURNING id",
     )
     .bind(session_id)
     .bind(message)
+    .bind(speaker)
     .fetch_one(executor)
     .await
     .map_err(|err| err.to_string())?;
@@ -164,7 +173,7 @@ async fn store_log_rows(
         if matches!(item, ChatItem::System { .. } | ChatItem::User { .. }) {
             continue;
         }
-        last_id = Some(insert_message_row(&mut *tx, session_id, item).await?);
+        last_id = Some(insert_message_row(&mut *tx, session_id, item, None).await?);
     }
     tx.commit().await.map_err(|err| err.to_string())?;
     Ok(last_id)

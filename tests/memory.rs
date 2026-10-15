@@ -84,7 +84,7 @@ async fn entry_memory_enforces_the_cap(pool: PgPool) {
 async fn a_new_session_starts_with_an_empty_window(pool: PgPool) {
     let memory = DbMemory::new(pool.clone(), vec![]);
     memory
-        .store_utterance(&session("s1"), "hello")
+        .store_utterance(&session("s1"), "hello", None)
         .await
         .unwrap();
     memory.log_items(
@@ -172,7 +172,7 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
     );
 
     memory
-        .store_utterance(&session("sess-1"), "hello there")
+        .store_utterance(&session("sess-1"), "hello there", None)
         .await
         .unwrap();
 
@@ -195,7 +195,7 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
 
     // An empty utterance writes nothing and announces nothing.
     memory
-        .store_utterance(&session("sess-1"), "")
+        .store_utterance(&session("sess-1"), "", None)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -205,6 +205,47 @@ async fn utterance_row_is_written_and_announced(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(count, 1);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn the_utterance_row_records_its_speaker(pool: PgPool) {
+    let memory = DbMemory::new(pool.clone(), vec![]);
+
+    memory
+        .store_utterance(&session("s1"), "identified", Some(7))
+        .await
+        .unwrap();
+    memory
+        .store_utterance(&session("s1"), "unidentified", None)
+        .await
+        .unwrap();
+    common::wait_for_count(&pool, "messages", 2).await;
+
+    // The speaker rides the row: the matched speakers id on identified
+    // utterances, NULL — not a sentinel — when nothing was identified.
+    // Turn rows never carry one; only store_utterance writes a speaker.
+    let speakers: Vec<(String, Option<i64>)> =
+        sqlx::query_as("SELECT message->>'content', speaker_id FROM messages ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        speakers,
+        vec![
+            ("identified".to_owned(), Some(7)),
+            ("unidentified".to_owned(), None),
+        ]
+    );
+
+    memory.log_items(&session("s1"), vec![ChatItem::assistant("hi")]);
+    common::wait_for_count(&pool, "messages", 3).await;
+    let assistant_speaker: Option<i64> =
+        sqlx::query_scalar("SELECT speaker_id FROM messages ORDER BY id DESC LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(assistant_speaker, None);
 }
 
 #[sqlx::test]

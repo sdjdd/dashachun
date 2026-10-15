@@ -1,11 +1,11 @@
-//! Enrollment: the flow from selected user-message audio to a per-label
-//! voiceprint. The caller names captured messages; the flow verifies each
+//! Enrollment: the flow from selected user-message audio to a per-name
+//! speaker. The caller names captured messages; the flow verifies each
 //! one belongs to the caller's agent and is a user message with a capture
 //! row, fetches the FLAC objects through the storage port (the row's
 //! bucket, never the current one), decodes and gates them (16 kHz mono
 //! 16-bit, 1–60 s per segment), embeds every segment with the boot-loaded
 //! CAM++ model, and appends the L2-normalized vectors element-wise into the
-//! label's sum. Request-side problems escalate before capability problems
+//! name's sum. Request-side problems escalate before capability problems
 //! — ownership, disabled audio capture, and rejected messages (with
 //! per-message reasons) all answer before the model slot — and enrollment
 //! is all-or-nothing: any rejected message fails the whole request, nothing
@@ -20,9 +20,7 @@ use tokio::sync::Mutex;
 
 use crate::agent::AudioStorage;
 use crate::error::AppError;
-use crate::voiceprint::{
-    EMBEDDING_DIM, SAMPLE_RATE, Voiceprint, VoiceprintRecord, VoiceprintStore,
-};
+use crate::voiceprint::{EMBEDDING_DIM, SAMPLE_RATE, SpeakerRecord, SpeakerStore, Voiceprint};
 
 const MIN_SEGMENT_SAMPLES: usize = SAMPLE_RATE as usize;
 const MAX_SEGMENT_SAMPLES: usize = 60 * SAMPLE_RATE as usize;
@@ -35,7 +33,7 @@ struct MessageRow {
     object_key: Option<String>,
 }
 
-/// Runs the enrollment for `label` under `agent_id`. `storage` and `model`
+/// Runs the enrollment for `name` under `agent_id`. `storage` and `model`
 /// come from the [`crate::state::ServerState`] slots; a missing storage is
 /// 400 (no audio can ever be read), a missing model 503 (the feature is
 /// off). The agent's ownership is the caller's responsibility — it is
@@ -47,10 +45,10 @@ pub async fn enroll(
     model: Option<Arc<Mutex<Voiceprint>>>,
     agent_id: i64,
     user_id: i64,
-    label: &str,
+    name: &str,
     description: Option<&str>,
     message_ids: &[i64],
-) -> Result<VoiceprintRecord, AppError> {
+) -> Result<SpeakerRecord, AppError> {
     let storage =
         storage.ok_or_else(|| AppError::BadRequest("audio capture is not enabled".into()))?;
 
@@ -135,8 +133,8 @@ pub async fn enroll(
     .await
     .map_err(|err| AppError::Internal(format!("embedding task failed: {err}")))??;
 
-    VoiceprintStore::new(pool.clone())
-        .create_or_append(agent_id, user_id, label, description, sum, sample_count)
+    SpeakerStore::new(pool.clone())
+        .create_or_append(agent_id, user_id, name, description, sum, sample_count)
         .await
 }
 

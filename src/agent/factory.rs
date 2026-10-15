@@ -15,7 +15,7 @@ use crate::device::DeviceRecord;
 use crate::error::AppError;
 use crate::provider::{ProviderRegistry, ProviderSpec};
 use crate::vad::VadFactory;
-use crate::voiceprint::{SpeakerMatcher, Voiceprint, VoiceprintStore};
+use crate::voiceprint::{SpeakerMatcher, SpeakerStore, Voiceprint};
 
 /// One generation of the shared provider bundle plus the per-device
 /// configuration source. Built through the [`ProviderRegistry`] from three
@@ -120,7 +120,7 @@ impl AgentFactory {
             audio_storage,
         ));
         // The voiceprint feature plugs in here like the audio capture: the
-        // model is the boot slot, the agent's enrolled voiceprints are read
+        // model is the boot slot, the agent's enrolled speakers are read
         // once per session — as the matcher's candidates and, from the same
         // snapshot, as the prompt's known-speakers roster (a roster entry
         // exists exactly when the matcher can identify it). An agent
@@ -129,26 +129,26 @@ impl AgentFactory {
         // join at the next session.
         let (speaker_matcher, speakers) = match &self.voiceprint {
             Some(model) => {
-                let voiceprints = VoiceprintStore::new(self.pool.clone())
+                let enrolled = SpeakerStore::new(self.pool.clone())
                     .embeddings_for_agent(agent_id)
                     .await?;
-                let speakers = voiceprints
+                let speakers = enrolled
                     .iter()
-                    .map(|voiceprint| Speaker {
-                        id: voiceprint.id,
-                        name: voiceprint.label.clone(),
-                        description: voiceprint.description.clone(),
+                    .map(|speaker| Speaker {
+                        id: speaker.id,
+                        name: speaker.name.clone(),
+                        description: speaker.description.clone(),
                     })
                     .collect();
-                if !voiceprints.is_empty() {
+                if !enrolled.is_empty() {
                     tracing::info!(
                         agent_id,
-                        voiceprints = voiceprints.len(),
+                        speakers = enrolled.len(),
                         "voiceprint identification enabled"
                     );
                 }
                 (
-                    SpeakerMatcher::new(model.clone(), voiceprints).map(Arc::new),
+                    SpeakerMatcher::new(model.clone(), enrolled).map(Arc::new),
                     speakers,
                 )
             }

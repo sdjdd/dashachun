@@ -1,6 +1,6 @@
-//! The voiceprints suite: store CRUD, ownership scoping, and the
+//! The speakers suite: store CRUD, ownership scoping, and the
 //! element-wise append semantics, plus the REST surface over the same
-//! store. Run with `cargo test --test voiceprints -- --ignored`.
+//! store. Run with `cargo test --test speakers -- --ignored`.
 
 mod common;
 
@@ -16,7 +16,7 @@ use common::{
 
 use dashachun::agent::{AgentStore, AudioStorage};
 use dashachun::error::AppError;
-use dashachun::voiceprint::{DEFAULT_MODEL_PATH, Voiceprint, VoiceprintStore};
+use dashachun::voiceprint::{DEFAULT_MODEL_PATH, SpeakerStore, Voiceprint};
 
 fn vec192(value: f32) -> Vec<f32> {
     vec![value; 192]
@@ -30,9 +30,9 @@ async fn owned_agent(pool: &PgPool, user_id: i64, name: &str) -> i64 {
         .id
 }
 
-async fn seed(pool: &PgPool, agent_id: i64, user_id: i64, label: &str) -> i64 {
-    VoiceprintStore::new(pool.clone())
-        .create_or_append(agent_id, user_id, label, None, vec192(0.5), 1)
+async fn seed(pool: &PgPool, agent_id: i64, user_id: i64, name: &str) -> i64 {
+    SpeakerStore::new(pool.clone())
+        .create_or_append(agent_id, user_id, name, None, vec192(0.5), 1)
         .await
         .unwrap()
         .id
@@ -135,7 +135,7 @@ async fn audio_row(pool: &PgPool, message_id: i64, bucket: &str, key: &str) {
 #[sqlx::test]
 #[ignore]
 async fn append_sums_elementwise_and_accumulates_sample_count(pool: PgPool) {
-    let store = VoiceprintStore::new(pool.clone());
+    let store = SpeakerStore::new(pool.clone());
     let agent = owned_agent(&pool, 1, "a").await;
     let first = store
         .create_or_append(agent, 1, "张三", Some("主人"), vec192(0.5), 2)
@@ -152,7 +152,7 @@ async fn append_sums_elementwise_and_accumulates_sample_count(pool: PgPool) {
     assert_eq!(second.sample_count, 5);
     assert_eq!(second.description, "主人");
 
-    let embedding: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM voiceprints WHERE id = $1")
+    let embedding: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM speakers WHERE id = $1")
         .bind(first.id)
         .fetch_one(&pool)
         .await
@@ -163,7 +163,7 @@ async fn append_sums_elementwise_and_accumulates_sample_count(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn create_or_append_on_an_agent_you_do_not_own_is_not_found(pool: PgPool) {
-    let store = VoiceprintStore::new(pool.clone());
+    let store = SpeakerStore::new(pool.clone());
     let agent = owned_agent(&pool, 2, "a").await;
     let cross_user = store
         .create_or_append(agent, 1, "张三", None, vec192(0.5), 1)
@@ -179,8 +179,8 @@ async fn create_or_append_on_an_agent_you_do_not_own_is_not_found(pool: PgPool) 
 
 #[sqlx::test]
 #[ignore]
-async fn same_label_coexists_across_agents_and_lists_are_scoped(pool: PgPool) {
-    let store = VoiceprintStore::new(pool.clone());
+async fn same_name_coexists_across_agents_and_lists_are_scoped(pool: PgPool) {
+    let store = SpeakerStore::new(pool.clone());
     let mine = owned_agent(&pool, 1, "mine").await;
     let theirs = owned_agent(&pool, 2, "theirs").await;
     store
@@ -208,28 +208,28 @@ async fn same_label_coexists_across_agents_and_lists_are_scoped(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore]
-async fn update_renames_and_conflicts_on_a_taken_label(pool: PgPool) {
-    let store = VoiceprintStore::new(pool.clone());
+async fn update_renames_and_conflicts_on_a_taken_name(pool: PgPool) {
+    let store = SpeakerStore::new(pool.clone());
     let agent = owned_agent(&pool, 1, "a").await;
     let first = store
-        .create_or_append(agent, 1, "a-label", None, vec192(0.5), 1)
+        .create_or_append(agent, 1, "a-name", None, vec192(0.5), 1)
         .await
         .unwrap();
     store
-        .create_or_append(agent, 1, "b-label", None, vec192(0.5), 1)
+        .create_or_append(agent, 1, "b-name", None, vec192(0.5), 1)
         .await
         .unwrap();
 
     let renamed = store
-        .update(agent, first.id, 1, Some("c-label"), Some("新描述"))
+        .update(agent, first.id, 1, Some("c-name"), Some("新描述"))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(renamed.label, "c-label");
+    assert_eq!(renamed.name, "c-name");
     assert_eq!(renamed.description, "新描述");
 
     let err = store
-        .update(agent, first.id, 1, Some("b-label"), None)
+        .update(agent, first.id, 1, Some("b-name"), None)
         .await
         .unwrap_err();
     assert!(matches!(err, AppError::Conflict(_)));
@@ -239,7 +239,7 @@ async fn update_renames_and_conflicts_on_a_taken_label(pool: PgPool) {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(kept.label, "c-label");
+    assert_eq!(kept.name, "c-name");
     assert_eq!(kept.description, "新描述");
 
     let foreign = store
@@ -252,7 +252,7 @@ async fn update_renames_and_conflicts_on_a_taken_label(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn delete_is_scoped_by_ownership(pool: PgPool) {
-    let store = VoiceprintStore::new(pool.clone());
+    let store = SpeakerStore::new(pool.clone());
     let agent = owned_agent(&pool, 1, "a").await;
     let record = store
         .create_or_append(agent, 1, "张三", None, vec192(0.5), 1)
@@ -277,7 +277,7 @@ async fn list_scopes_by_ownership_and_hides_the_embedding(pool: PgPool) {
         &app,
         request(
             "GET",
-            &format!("/api/agents/{agent}/voiceprints"),
+            &format!("/api/agents/{agent}/speakers"),
             None,
             Some(&cookie),
         ),
@@ -286,7 +286,7 @@ async fn list_scopes_by_ownership_and_hides_the_embedding(pool: PgPool) {
     .await;
     assert_eq!(body.as_array().unwrap().len(), 1);
     let entry = &body[0];
-    assert_eq!(entry["label"], "张三");
+    assert_eq!(entry["name"], "张三");
     assert_eq!(entry["agent_id"], agent);
     assert_eq!(entry["sample_count"], 1);
     assert!(entry["embedding"].is_null());
@@ -298,7 +298,7 @@ async fn list_scopes_by_ownership_and_hides_the_embedding(pool: PgPool) {
         &app,
         request(
             "GET",
-            &format!("/api/agents/{agent}/voiceprints"),
+            &format!("/api/agents/{agent}/speakers"),
             None,
             Some(&other_cookie),
         ),
@@ -308,19 +308,14 @@ async fn list_scopes_by_ownership_and_hides_the_embedding(pool: PgPool) {
 
     let res = send(
         &app,
-        request("GET", "/api/agents/999999/voiceprints", None, Some(&cookie)),
+        request("GET", "/api/agents/999999/speakers", None, Some(&cookie)),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
     let res = send(
         &app,
-        request(
-            "GET",
-            &format!("/api/agents/{agent}/voiceprints"),
-            None,
-            None,
-        ),
+        request("GET", &format!("/api/agents/{agent}/speakers"), None, None),
     )
     .await;
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -332,13 +327,13 @@ async fn create_rejects_invalid_payloads_and_reports_disabled_audio_capture(pool
     let app = app(pool.clone());
     let (cookie, user_id) = register(&app, &pool).await;
     let agent = owned_agent(&pool, user_id, "a").await;
-    let path = format!("/api/agents/{agent}/voiceprints");
+    let path = format!("/api/agents/{agent}/speakers");
 
     for payload in [
         r#"{}"#,
-        r#"{"label":"","message_ids":[1]}"#,
-        r#"{"label":"张三","message_ids":[]}"#,
-        r#"{"label":"张三","message_ids":[1,2,3,4,5,6,7,8,9,10,11]}"#,
+        r#"{"name":"","message_ids":[1]}"#,
+        r#"{"name":"张三","message_ids":[]}"#,
+        r#"{"name":"张三","message_ids":[1,2,3,4,5,6,7,8,9,10,11]}"#,
     ] {
         let res = send(&app, request("POST", &path, Some(payload), Some(&cookie))).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST, "payload: {payload}");
@@ -349,7 +344,7 @@ async fn create_rejects_invalid_payloads_and_reports_disabled_audio_capture(pool
         request(
             "POST",
             &path,
-            Some(r#"{"label":"张三","message_ids":[1]}"#),
+            Some(r#"{"name":"张三","message_ids":[1]}"#),
             Some(&cookie),
         ),
         StatusCode::BAD_REQUEST,
@@ -370,8 +365,8 @@ async fn create_rejects_invalid_payloads_and_reports_disabled_audio_capture(pool
         &app,
         request(
             "POST",
-            &format!("/api/agents/{foreign_agent}/voiceprints"),
-            Some(r#"{"label":"x","message_ids":[1]}"#),
+            &format!("/api/agents/{foreign_agent}/speakers"),
+            Some(r#"{"name":"x","message_ids":[1]}"#),
             Some(&cookie),
         ),
     )
@@ -381,8 +376,8 @@ async fn create_rejects_invalid_payloads_and_reports_disabled_audio_capture(pool
         &app,
         request(
             "POST",
-            &format!("/api/agents/{agent}/voiceprints"),
-            Some(r#"{"label":"x","message_ids":[1]}"#),
+            &format!("/api/agents/{agent}/speakers"),
+            Some(r#"{"name":"x","message_ids":[1]}"#),
             Some(&other_cookie),
         ),
     )
@@ -411,9 +406,9 @@ async fn create_400s_on_out_of_scope_and_uncaptured_messages(pool: PgPool) {
         &app,
         request(
             "POST",
-            &format!("/api/agents/{agent}/voiceprints"),
+            &format!("/api/agents/{agent}/speakers"),
             Some(&format!(
-                r#"{{"label":"张三","message_ids":[{uncaptured},{assistant},{cross_agent},{foreign},999999]}}"#
+                r#"{{"name":"张三","message_ids":[{uncaptured},{assistant},{cross_agent},{foreign},999999]}}"#
             )),
             Some(&cookie),
         ),
@@ -429,8 +424,8 @@ async fn create_400s_on_out_of_scope_and_uncaptured_messages(pool: PgPool) {
         &app,
         request(
             "POST",
-            &format!("/api/agents/{agent}/voiceprints"),
-            Some(r#"{"label":"x","message_ids":[1]}"#),
+            &format!("/api/agents/{agent}/speakers"),
+            Some(r#"{"name":"x","message_ids":[1]}"#),
             Some(&other_cookie),
         ),
     )
@@ -447,7 +442,7 @@ async fn create_400s_on_missing_objects_and_undecodable_audio(pool: PgPool) {
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent = owned_agent(&pool, user_id, "a").await;
-    let path = format!("/api/agents/{agent}/voiceprints");
+    let path = format!("/api/agents/{agent}/speakers");
 
     let missing = message_row(&pool, agent, "user").await;
     audio_row(&pool, missing, "bucket", "never-stored.flac").await;
@@ -461,7 +456,7 @@ async fn create_400s_on_missing_objects_and_undecodable_audio(pool: PgPool) {
             "POST",
             &path,
             Some(&format!(
-                r#"{{"label":"张三","message_ids":[{missing},{broken}]}}"#
+                r#"{{"name":"张三","message_ids":[{missing},{broken}]}}"#
             )),
             Some(&cookie),
         ),
@@ -496,8 +491,8 @@ async fn create_503s_when_the_audio_is_valid_but_the_model_is_absent(pool: PgPoo
         &app,
         request(
             "POST",
-            &format!("/api/agents/{agent}/voiceprints"),
-            Some(&format!(r#"{{"label":"张三","message_ids":[{id}]}}"#)),
+            &format!("/api/agents/{agent}/speakers"),
+            Some(&format!(r#"{{"name":"张三","message_ids":[{id}]}}"#)),
             Some(&cookie),
         ),
     )
@@ -519,7 +514,7 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
 
     let (cookie, user_id) = register(&app, &pool).await;
     let agent = owned_agent(&pool, user_id, "a").await;
-    let path = format!("/api/agents/{agent}/voiceprints");
+    let path = format!("/api/agents/{agent}/speakers");
 
     let first = tone(&[220.0, 440.0, 660.0], 1);
     let second = tone(&[300.0, 900.0], 1);
@@ -532,7 +527,7 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
             "POST",
             &path,
             Some(&format!(
-                r#"{{"label":"张三","description":"主人","message_ids":[{m1}]}}"#
+                r#"{{"name":"张三","description":"主人","message_ids":[{m1}]}}"#
             )),
             Some(&cookie),
         ),
@@ -549,7 +544,7 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
         let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
         embedding.iter().map(|v| v / norm).collect()
     };
-    let stored: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM voiceprints WHERE id = $1")
+    let stored: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM speakers WHERE id = $1")
         .bind(vp_id)
         .fetch_one(&pool)
         .await
@@ -564,18 +559,17 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
         request(
             "POST",
             &path,
-            Some(&format!(r#"{{"label":"李四","message_ids":[{m1}]}}"#)),
+            Some(&format!(r#"{{"name":"李四","message_ids":[{m1}]}}"#)),
             Some(&cookie),
         ),
         StatusCode::CREATED,
     )
     .await;
-    let same_audio: Vec<f32> =
-        sqlx::query_scalar("SELECT embedding FROM voiceprints WHERE id = $1")
-            .bind(body["id"].as_i64().unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let same_audio: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM speakers WHERE id = $1")
+        .bind(body["id"].as_i64().unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let dot: f32 = stored.iter().zip(&same_audio).map(|(a, b)| a * b).sum();
     assert!(dot > 0.999, "same audio must score identical: {dot}");
 
@@ -584,7 +578,7 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
         request(
             "POST",
             &path,
-            Some(&format!(r#"{{"label":"张三","message_ids":[{m2}]}}"#)),
+            Some(&format!(r#"{{"name":"张三","message_ids":[{m2}]}}"#)),
             Some(&cookie),
         ),
         StatusCode::CREATED,
@@ -603,7 +597,7 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
         }
         sum
     };
-    let appended: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM voiceprints WHERE id = $1")
+    let appended: Vec<f32> = sqlx::query_scalar("SELECT embedding FROM speakers WHERE id = $1")
         .bind(vp_id)
         .fetch_one(&pool)
         .await
@@ -616,7 +610,7 @@ async fn create_enrolls_and_appends_over_rest(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn embeddings_for_agent_reads_the_identification_vectors(pool: PgPool) {
-    let store = VoiceprintStore::new(pool.clone());
+    let store = SpeakerStore::new(pool.clone());
     let mine = owned_agent(&pool, 1, "mine").await;
     let theirs = owned_agent(&pool, 2, "theirs").await;
     store
@@ -632,7 +626,7 @@ async fn embeddings_for_agent_reads_the_identification_vectors(pool: PgPool) {
     // and the vector the REST surface hides.
     let embeddings = store.embeddings_for_agent(mine).await.unwrap();
     assert_eq!(embeddings.len(), 1);
-    assert_eq!(embeddings[0].label, "张三");
+    assert_eq!(embeddings[0].name, "张三");
     assert_eq!(embeddings[0].description, "同事");
     assert_eq!(embeddings[0].embedding, vec192(0.5));
 
@@ -653,7 +647,7 @@ async fn update_and_delete_over_rest_are_scoped_by_ownership(pool: PgPool) {
     let agent = owned_agent(&pool, user_id, "a").await;
     let first = seed(&pool, agent, user_id, "first").await;
     seed(&pool, agent, user_id, "second").await;
-    let path = format!("/api/agents/{agent}/voiceprints/{first}");
+    let path = format!("/api/agents/{agent}/speakers/{first}");
 
     let body = expect_json(
         &app,
@@ -666,12 +660,12 @@ async fn update_and_delete_over_rest_are_scoped_by_ownership(pool: PgPool) {
         StatusCode::OK,
     )
     .await;
-    assert_eq!(body["label"], "first");
+    assert_eq!(body["name"], "first");
     assert_eq!(body["description"], "新的描述");
 
     for payload in [
         r#"{}"#,
-        r#"{"label":""}"#,
+        r#"{"name":""}"#,
         &format!(r#"{{"description":"{}"}}"#, "长".repeat(201)),
     ] {
         let res = send(&app, request("PUT", &path, Some(payload), Some(&cookie))).await;
@@ -680,13 +674,13 @@ async fn update_and_delete_over_rest_are_scoped_by_ownership(pool: PgPool) {
 
     let res = send(
         &app,
-        request("PUT", &path, Some(r#"{"label":"second"}"#), Some(&cookie)),
+        request("PUT", &path, Some(r#"{"name":"second"}"#), Some(&cookie)),
     )
     .await;
     assert_eq!(res.status(), StatusCode::CONFLICT);
 
     let (other_cookie, _) = register(&app, &pool).await;
-    for (method, payload) in [("PUT", Some(r#"{"label":"stolen"}"#)), ("DELETE", None)] {
+    for (method, payload) in [("PUT", Some(r#"{"name":"stolen"}"#)), ("DELETE", None)] {
         let res = send(&app, request(method, &path, payload, Some(&other_cookie))).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method}");
     }
@@ -697,7 +691,7 @@ async fn update_and_delete_over_rest_are_scoped_by_ownership(pool: PgPool) {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     let res = send(
         &app,
-        request("PUT", &path, Some(r#"{"label":"third"}"#), Some(&cookie)),
+        request("PUT", &path, Some(r#"{"name":"third"}"#), Some(&cookie)),
     )
     .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);

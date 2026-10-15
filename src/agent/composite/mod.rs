@@ -41,7 +41,7 @@ pub struct CompositeAgent {
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
     pub speaker_matcher: Option<Arc<SpeakerMatcher>>,
-    /// The roster behind the matcher: the agent's enrolled voiceprints as
+    /// The roster behind the matcher: the agent's enrolled speakers as
     /// they were when the device connected, as prompt data. Both derive
     /// from the same factory snapshot — a roster entry exists exactly when
     /// the matcher can identify it.

@@ -3,12 +3,12 @@ use utoipa::ToSchema;
 
 use garde::Validate;
 
-use super::store::VoiceprintRecord;
+use super::store::SpeakerRecord;
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
-pub struct CreateVoiceprintArgs {
+pub struct CreateSpeakerArgs {
     #[garde(length(min = 1, max = 64))]
-    pub label: String,
+    pub name: String,
     #[garde(length(max = 200))]
     pub description: Option<String>,
     #[garde(length(min = 1, max = 10))]
@@ -16,18 +16,18 @@ pub struct CreateVoiceprintArgs {
 }
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
-pub struct UpdateVoiceprintArgs {
+pub struct UpdateSpeakerArgs {
     #[garde(length(min = 1, max = 64))]
-    pub label: Option<String>,
+    pub name: Option<String>,
     #[garde(length(max = 200))]
     pub description: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct VoiceprintResponse {
+pub struct SpeakerResponse {
     pub id: i64,
     pub agent_id: i64,
-    pub label: String,
+    pub name: String,
     pub description: String,
     pub sample_count: i32,
     #[serde(with = "time::serde::rfc3339")]
@@ -36,12 +36,12 @@ pub struct VoiceprintResponse {
     pub updated_at: time::OffsetDateTime,
 }
 
-impl From<VoiceprintRecord> for VoiceprintResponse {
-    fn from(record: VoiceprintRecord) -> Self {
+impl From<SpeakerRecord> for SpeakerResponse {
+    fn from(record: SpeakerRecord) -> Self {
         Self {
             id: record.id,
             agent_id: record.agent_id,
-            label: record.label,
+            name: record.name,
             description: record.description,
             sample_count: record.sample_count,
             created_at: record.created_at,

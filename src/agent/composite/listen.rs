@@ -1,15 +1,15 @@
 //! The listening leg: the device input, the VAD and the per-utterance ASR
 //! tasks for the whole session. Forwards `Stt`/`Mcp`/`Error` directly and
 //! hands every final utterance to the reply stage together with a fresh
-//! turn token and the utterance's voiceprint attribution, cancelling the
-//! previous one first.
+//! turn token and the utterance's voiceprint attribution — resolved by the
+//! ASR task itself, so the row it stores carries the same speaker the turn
+//! is labeled with — cancelling the previous one first.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -20,26 +20,34 @@ use crate::agent::{
 };
 use crate::util::recv_stream;
 use crate::vad::{Vad, VadEvent};
-use crate::voiceprint::{Identification, SAMPLE_RATE, SpeakerMatcher, SpeakerTap};
+use crate::voiceprint::{SAMPLE_RATE, SpeakerMatcher, SpeakerResult, SpeakerTap};
 
 /// How long the ASR final waits for the tap's identification before the
-/// turn starts unlabeled. The tap finishes at `SpeechEnd` and the embed
-/// takes tens of milliseconds, so the result is usually already resolved
-/// when the final arrives — the wait only bounds a rare tail (a long
-/// segment, the model mutex held by an enrollment); an expiry starts the
-/// turn without attribution, which still logs.
+/// utterance stores unlabeled and the turn starts unlabeled. The tap
+/// finishes at `SpeechEnd` and the embed takes tens of milliseconds, so
+/// the result is usually already resolved when the final arrives — the
+/// wait only bounds a rare tail (a long segment, the model mutex held by
+/// an enrollment); an expiry stores and starts the turn without
+/// attribution, which still logs.
 const SPEAKER_WAIT: Duration = Duration::from_millis(250);
 
-/// The identification outcome of the utterance between `SpeechEnd` and its
-/// ASR final.
-type PendingSpeaker = oneshot::Receiver<Option<Identification>>;
-
 /// What one per-utterance ASR task reports back to the listening stage,
-/// tagged with its epoch so superseded results are dropped.
+/// tagged with its epoch so superseded results are dropped. The final
+/// carries the speaker the task resolved (and stored) for its utterance.
 enum AsrUpdate {
-    Partial { epoch: u64, text: String },
-    Final { epoch: u64, text: String },
-    Error { epoch: u64, message: String },
+    Partial {
+        epoch: u64,
+        text: String,
+    },
+    Final {
+        epoch: u64,
+        text: String,
+        speaker: Option<i64>,
+    },
+    Error {
+        epoch: u64,
+        message: String,
+    },
 }
 
 pub(super) async fn listen_stage(
@@ -54,9 +62,8 @@ pub(super) async fn listen_stage(
     let mut slot: Option<AsrSlot> = None;
     let mut epoch: u64 = 0;
     let mut live_turn: Option<CancellationToken> = None;
-    let mut pending_speaker: Option<PendingSpeaker> = None;
     // The identification pipeline is a per-session capability: the matcher
-    // exists only when the agent has enrolled voiceprints and the model
+    // exists only when the agent has enrolled speakers and the model
     // loaded, and the frontend only speaks 16 kHz — anything else runs
     // without it (the repo has no resampler).
     let speaker = match agent.speaker_matcher.as_ref() {
@@ -83,7 +90,6 @@ pub(super) async fn listen_stage(
                         if let Some(turn) = live_turn.take() {
                             turn.cancel();
                         }
-                        pending_speaker = None;
                         if utterances.send(ListenEvent::Reset).await.is_err() {
                             break;
                         }
@@ -104,7 +110,6 @@ pub(super) async fn listen_stage(
                                 listen_deps(&session, &agent, &asr_tx, speaker),
                                 &mut epoch,
                                 &mut slot,
-                                &mut pending_speaker,
                             )
                             .await;
                         }
@@ -118,7 +123,6 @@ pub(super) async fn listen_stage(
                             listen_deps(&session, &agent, &asr_tx, speaker),
                             &mut epoch,
                             &mut slot,
-                            &mut pending_speaker,
                         )
                         .await;
                     }
@@ -131,7 +135,6 @@ pub(super) async fn listen_stage(
                         if let Some(turn) = live_turn.take() {
                             turn.cancel();
                         }
-                        pending_speaker = None;
                         if utterances.send(ListenEvent::Interrupt).await.is_err() {
                             break;
                         }
@@ -165,7 +168,9 @@ pub(super) async fn listen_stage(
                             break;
                         }
                     }
-                    AsrUpdate::Final { text, .. } => {
+                    AsrUpdate::Final {
+                        text, speaker, ..
+                    } => {
                         info!(session_id = %session.id, %text, "asr result");
                         if out_tx
                             .send(AgentOutput::Stt {
@@ -180,8 +185,6 @@ pub(super) async fn listen_stage(
                         if text.is_empty() {
                             continue;
                         }
-                        let speaker =
-                            resolve_speaker(pending_speaker.take(), speaker.is_some()).await;
                         let turn = CancellationToken::new();
                         if let Some(previous) = live_turn.replace(turn.clone()) {
                             previous.cancel();
@@ -247,21 +250,28 @@ async fn handle_vad_events(
     deps: ListenDeps<'_>,
     epoch: &mut u64,
     slot: &mut Option<AsrSlot>,
-    pending_speaker: &mut Option<PendingSpeaker>,
 ) {
     for event in events {
         match event {
             VadEvent::SpeechStart { at_ms } => {
                 info!(session_id = %deps.session.id, at_ms, "speech start");
                 *epoch += 1;
-                // The previous utterance is superseded: whatever its tap
-                // produced is no longer reachable by an ASR final.
-                *pending_speaker = None;
                 let capture = deps
                     .capture
                     .map(|capture| capture.start_utterance(deps.session));
-                let tap = deps.speaker.map(|speaker| speaker.tap(deps.session));
-                *slot = Some(spawn_asr(&deps, *epoch, capture, tap));
+                // The tap's capture side rides the slot (pushed samples,
+                // finished at SpeechEnd); its result channel goes straight
+                // to the ASR task, which resolves it at the final — so a
+                // final whose turn was superseded still stores with the
+                // speaker it identified.
+                let (tap, speaker_rx) = match deps.speaker {
+                    Some(speaker) => {
+                        let (tap, rx) = speaker.tap(deps.session);
+                        (Some(tap), Some(rx))
+                    }
+                    None => (None, None),
+                };
+                *slot = Some(spawn_asr(&deps, *epoch, capture, tap, speaker_rx));
             }
             VadEvent::Speech { samples } => {
                 if let Some(current) = slot.as_ref() {
@@ -278,7 +288,7 @@ async fn handle_vad_events(
             }
             VadEvent::SpeechEnd { .. } => {
                 if let Some(current) = slot.take() {
-                    *pending_speaker = current.detach();
+                    current.detach();
                 }
             }
         }
@@ -298,12 +308,13 @@ impl AsrSlot {
     /// Lets the task run to its final on its own and closes the utterance:
     /// the capture finishes inside the task (it learns its message id
     /// there), the voiceprint tap finishes here — the speech segment is
-    /// complete, identification does not wait for the ASR final — and the
-    /// tap's result channel returns to the stage, which resolves it when
-    /// this utterance's final turns into a turn.
-    fn detach(mut self) -> Option<PendingSpeaker> {
+    /// complete, identification does not wait for the ASR final; the tap's
+    /// result channel is already in the task's hands.
+    fn detach(mut self) {
         self.task.detach();
-        self.tap.take().map(SpeakerTap::finish)
+        if let Some(tap) = self.tap.take() {
+            tap.finish();
+        }
     }
 
     fn cancel(self) {
@@ -316,6 +327,7 @@ fn spawn_asr(
     epoch: u64,
     capture: Option<UtteranceCapture>,
     tap: Option<SpeakerTap>,
+    speaker_rx: Option<SpeakerResult>,
 ) -> AsrSlot {
     let (tx, rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
     let audio: AudioStream = recv_stream(rx);
@@ -329,6 +341,7 @@ fn spawn_asr(
         cancel.clone(),
         deps.memory.clone(),
         capture.clone(),
+        speaker_rx,
     ));
     AsrSlot {
         tx,
@@ -348,6 +361,7 @@ async fn run_asr(
     cancel: CancellationToken,
     memory: Arc<dyn Memory>,
     capture: Option<UtteranceCapture>,
+    speaker_rx: Option<SpeakerResult>,
 ) {
     let mut events = asr.transcribe(audio, cancel.clone());
     while let Some(result) = events.next().await {
@@ -357,9 +371,13 @@ async fn run_asr(
                 // The utterance is real speech even when the turn was
                 // superseded, so the row is stored regardless of the cancel
                 // token; the capture learns its message id through the
-                // memory's hook, not from here.
+                // memory's hook, not from here. The speaker resolves before
+                // the store: the row carries the same attribution the turn
+                // is labeled with.
+                let mut speaker = None;
                 if !cancel.is_cancelled() && !text.is_empty() {
-                    match memory.store_utterance(&session, &text).await {
+                    speaker = resolve_speaker(speaker_rx).await;
+                    match memory.store_utterance(&session, &text, speaker).await {
                         Ok(()) => {
                             if let Some(capture) = capture {
                                 capture.finish();
@@ -370,7 +388,13 @@ async fn run_asr(
                         }
                     }
                 }
-                let _ = asr_tx.send(AsrUpdate::Final { epoch, text }).await;
+                let _ = asr_tx
+                    .send(AsrUpdate::Final {
+                        epoch,
+                        text,
+                        speaker,
+                    })
+                    .await;
                 return;
             }
             Err(err) => AsrUpdate::Error {
@@ -386,15 +410,13 @@ async fn run_asr(
 }
 
 /// Resolves the tap's identification at the utterance's ASR final: the
-/// matched speaker's voiceprint row id, the label the reply stage prefixes
-/// the context's user message with. `None` when this utterance matched
-/// nothing (or the identification failed or was not ready in time) — the
-/// context marks the message `unknown` — and when the session runs no
-/// identification at all, where the turn's prompt carries no roster either.
-async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> Option<i64> {
-    if !configured {
-        return None;
-    }
+/// matched speaker's speakers row id, the one the row is stored with and
+/// the reply stage prefixes the context's user message with. `None` when
+/// this utterance matched nothing (or the identification failed or was
+/// not ready in time) — the context marks the message `unknown` — and
+/// when the session runs no identification at all, where the turn's prompt
+/// carries no roster either.
+async fn resolve_speaker(pending: Option<SpeakerResult>) -> Option<i64> {
     let identified = match pending {
         Some(result) => tokio::time::timeout(SPEAKER_WAIT, result)
             .await
@@ -410,17 +432,19 @@ async fn resolve_speaker(pending: Option<PendingSpeaker>, configured: bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::voiceprint::Identification;
+    use tokio::sync::oneshot;
 
-    fn pending(value: Option<Identification>) -> PendingSpeaker {
+    fn pending(value: Option<Identification>) -> SpeakerResult {
         let (tx, rx) = oneshot::channel();
         tx.send(value).unwrap();
         rx
     }
 
-    fn identification(id: i64, label: &str, matched: bool) -> Option<Identification> {
+    fn identification(id: i64, name: &str, matched: bool) -> Option<Identification> {
         Some(Identification {
             id,
-            label: label.into(),
+            name: name.into(),
             description: "同事".into(),
             similarity: 0.9,
             matched,
@@ -430,7 +454,7 @@ mod tests {
     #[tokio::test]
     async fn a_matched_identification_resolves_to_the_speaker_id() {
         assert_eq!(
-            resolve_speaker(Some(pending(identification(7, "张三", true))), true).await,
+            resolve_speaker(Some(pending(identification(7, "张三", true)))).await,
             Some(7)
         );
     }
@@ -438,28 +462,22 @@ mod tests {
     #[tokio::test]
     async fn below_threshold_or_failed_identifications_stay_unmarked() {
         assert_eq!(
-            resolve_speaker(Some(pending(identification(7, "张三", false))), true).await,
+            resolve_speaker(Some(pending(identification(7, "张三", false)))).await,
             None
         );
         // The identification failed: the sender dropped without a value.
         let (tx, rx) = oneshot::channel();
         drop(tx);
-        assert_eq!(resolve_speaker(Some(rx), true).await, None);
+        assert_eq!(resolve_speaker(Some(rx)).await, None);
 
         // The result never arrived in time: the wait expires.
         let (_tx, rx) = oneshot::channel::<Option<Identification>>();
-        assert_eq!(resolve_speaker(Some(rx), true).await, None);
+        assert_eq!(resolve_speaker(Some(rx)).await, None);
     }
 
     #[tokio::test]
-    async fn a_configured_session_without_a_result_stays_unmarked() {
-        // The ASR final landed before the segment closed — no pending tap
-        // result, but the session runs identification.
-        assert_eq!(resolve_speaker(None, true).await, None);
-    }
-
-    #[tokio::test]
-    async fn without_identification_the_turn_carries_no_speaker() {
-        assert_eq!(resolve_speaker(None, false).await, None);
+    async fn a_session_without_identification_stays_unmarked() {
+        // No tap was ever opened — the session runs no identification.
+        assert_eq!(resolve_speaker(None).await, None);
     }
 }

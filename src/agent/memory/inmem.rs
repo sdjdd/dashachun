@@ -16,6 +16,7 @@ use super::{Memory, Turn, trim};
 pub struct InMemMemory {
     turns: Mutex<Vec<Turn>>,
     utterances: Mutex<Vec<String>>,
+    speakers: Mutex<Vec<Option<i64>>>,
     logged_turns: Mutex<Vec<Vec<ChatItem>>>,
     partials: Mutex<Vec<String>>,
 }
@@ -24,6 +25,12 @@ impl InMemMemory {
     /// The utterance texts passed to [`Memory::store_utterance`], in order.
     pub fn stored_utterances(&self) -> Vec<String> {
         self.utterances.lock().unwrap().clone()
+    }
+
+    /// The speakers passed to [`Memory::store_utterance`], in order —
+    /// parallel to [`Self::stored_utterances`].
+    pub fn stored_speakers(&self) -> Vec<Option<i64>> {
+        self.speakers.lock().unwrap().clone()
     }
 
     /// The item batches passed to [`Memory::log_items`], in order.
@@ -63,9 +70,15 @@ impl Memory for InMemMemory {
         trim(&mut turns);
     }
 
-    async fn store_utterance(&self, _session: &AgentSession, text: &str) -> Result<(), String> {
+    async fn store_utterance(
+        &self,
+        _session: &AgentSession,
+        text: &str,
+        speaker: Option<i64>,
+    ) -> Result<(), String> {
         if !text.is_empty() {
             self.utterances.lock().unwrap().push(text.to_string());
+            self.speakers.lock().unwrap().push(speaker);
         }
         Ok(())
     }
@@ -214,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn empty_store_calls_record_nothing() {
         let memory = InMemMemory::default();
-        memory.store_utterance(&session(), "").await.unwrap();
+        memory.store_utterance(&session(), "", None).await.unwrap();
         memory.log_items(&session(), vec![]);
         memory.store_partial_reply(&session(), "");
 

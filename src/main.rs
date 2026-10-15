@@ -234,7 +234,7 @@ fn build_voiceprint() -> Option<Arc<tokio::sync::Mutex<Voiceprint>>> {
             tracing::warn!(
                 %path,
                 %err,
-                "voiceprint model not loaded; enrollment and identification are off (POST voiceprints answers 503) — run `just model` or point VOICEPRINT_MODEL at the file"
+                "voiceprint model not loaded; enrollment and identification are off (POST speakers answers 503) — run `just model` or point VOICEPRINT_MODEL at the file"
             );
             None
         }

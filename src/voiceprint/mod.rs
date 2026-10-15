@@ -5,9 +5,10 @@
 //! the per-utterance mel-mean normalization live here, matching the
 //! sherpa-onnx `3d-speaker` export contract. Two consumers are live:
 //! enrollment over captured conversation audio (`store.rs`, `enroll.rs`,
-//! the `/api/agents/{agent_id}/voiceprints` REST) and session-side
+//! the `/api/agents/{agent_id}/speakers` REST — the durable speaker
+//! identities) and session-side
 //! identification (`identify.rs` — a per-utterance attribution whose matched
-//! label the listening stage resolves into the reply turn's system prompt,
+//! name the listening stage resolves into the reply turn's system prompt,
 //! alongside the debug log line); a threshold setting comes later — the
 //! integration notes live in this directory's README.md.
 
@@ -18,8 +19,8 @@ mod enroll;
 mod identify;
 
 pub use enroll::enroll;
-pub use identify::{Identification, SpeakerMatcher, SpeakerTap};
-pub use store::{EnrolledEmbedding, VoiceprintRecord, VoiceprintStore};
+pub use identify::{Identification, SpeakerMatcher, SpeakerResult, SpeakerTap};
+pub use store::{EnrolledEmbedding, SpeakerRecord, SpeakerStore};
 
 use std::path::Path;
 
