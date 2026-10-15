@@ -36,6 +36,7 @@ pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route("/", post(create_agent))
         .merge(crate::routes::voiceprints::routes())
+        .merge(crate::routes::messages::routes())
 }
 
 #[utoipa::path(

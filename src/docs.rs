@@ -43,6 +43,7 @@ use crate::voiceprint::dto::{CreateVoiceprintArgs, UpdateVoiceprintArgs, Voicepr
         crate::routes::voiceprints::create_voiceprint,
         crate::routes::voiceprints::update_voiceprint,
         crate::routes::voiceprints::delete_voiceprint,
+        crate::routes::messages::message_audio,
     ),
     components(schemas(
         ErrorResponse,
@@ -110,13 +111,14 @@ mod tests {
             "/api/settings/audio-capture",
             "/api/agents/{agent_id}/voiceprints",
             "/api/agents/{agent_id}/voiceprints/{voiceprint_id}",
+            "/api/agents/{agent_id}/messages/{message_id}/audio",
         ] {
             assert!(
                 paths.contains(&expected.to_owned()),
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 15, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 16, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));
