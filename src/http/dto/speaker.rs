@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use garde::Validate;
 
-use super::store::SpeakerRecord;
+use crate::voiceprint::SpeakerRecord;
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateSpeakerArgs {

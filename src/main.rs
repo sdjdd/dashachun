@@ -6,10 +6,10 @@ use arc_swap::ArcSwapOption;
 
 use dashachun::agent::tool::{GetDateTime, GetWeather};
 use dashachun::agent::{AgentFactory, AgentStore, AudioStorage, ToolSet};
-use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, AuthConfig, DeviceConfig, OssConfig, ServerConfig};
 use dashachun::device::DeviceStore;
 use dashachun::error::AppError;
+use dashachun::http::session::AuthState;
 use dashachun::oss::Oss;
 use dashachun::provider::store::ProviderStore;
 use dashachun::provider::{ProviderRegistry, ProviderSpec};
@@ -149,7 +149,7 @@ async fn main() {
     );
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
-    let app = dashachun::app(state, auth);
+    let app = dashachun::http::app(state, auth);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
     tracing::info!("listening on {bind_addr}");

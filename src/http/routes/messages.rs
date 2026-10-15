@@ -5,10 +5,10 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 
 use crate::agent::AgentStore;
-use crate::auth::extract::AuthUser;
-use crate::auth::state::AuthState;
 use crate::error::{AppError, ErrorResponse};
-use crate::routes::agents::AgentsState;
+use crate::http::extract::auth::AuthUser;
+use crate::http::session::AuthState;
+use crate::http::state::AgentsState;
 use crate::state::ServerState;
 
 pub fn routes() -> Router<AgentsState> {

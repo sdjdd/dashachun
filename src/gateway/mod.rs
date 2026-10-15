@@ -1,4 +1,5 @@
 mod player;
+pub mod protocol;
 mod session;
 
 use std::sync::Arc;

@@ -2,7 +2,6 @@
 //! [`crate::agent`] trait boundary types — never the agent's internal wiring.
 
 pub mod asr;
-pub mod dto;
 pub mod llm;
 pub mod registry;
 pub mod store;

@@ -4,14 +4,14 @@ use axum::routing::{get, put};
 use axum::{Json, Router};
 
 use crate::agent::AgentStore;
-use crate::auth::extract::AuthUser;
-use crate::auth::state::AuthState;
 use crate::error::{AppError, ErrorResponse};
-use crate::extract::Validated;
-use crate::routes::agents::AgentsState;
+use crate::http::dto::speaker::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
+use crate::http::extract::Validated;
+use crate::http::extract::auth::AuthUser;
+use crate::http::session::AuthState;
+use crate::http::state::AgentsState;
 use crate::state::ServerState;
 use crate::voiceprint::SpeakerStore;
-use crate::voiceprint::dto::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
 use crate::voiceprint::enroll;
 
 pub fn routes() -> Router<AgentsState> {

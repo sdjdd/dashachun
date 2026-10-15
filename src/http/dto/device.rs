@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use garde::Validate;
 
-use super::DeviceRecord;
+use crate::device::DeviceRecord;
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct ActivateDeviceArgs {

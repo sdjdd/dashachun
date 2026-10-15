@@ -3,14 +3,14 @@ use utoipa::Modify;
 use utoipa::OpenApi;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 
-use crate::agent::dto::{AgentResponse, CreateAgentArgs};
 use crate::auth::Role;
-use crate::auth::dto::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
-use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
 use crate::error::ErrorResponse;
-use crate::provider::dto::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
+use crate::http::dto::agent::{AgentResponse, CreateAgentArgs};
+use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
+use crate::http::dto::device::{ActivateDeviceArgs, DeviceResponse};
+use crate::http::dto::provider::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
+use crate::http::dto::speaker::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
 use crate::settings::AudioCaptureSettings;
-use crate::voiceprint::dto::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -22,28 +22,28 @@ use crate::voiceprint::dto::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerAr
                        POST /api/auth/login first.",
     ),
     paths(
-        crate::routes::auth::register,
-        crate::routes::auth::login,
-        crate::routes::auth::logout,
-        crate::routes::auth::change_password,
-        crate::routes::auth::me,
-        crate::routes::agents::create_agent,
-        crate::routes::devices::list_devices,
-        crate::routes::devices::activate_device,
-        crate::routes::devices::unbind_device,
-        crate::routes::providers::list_providers,
-        crate::routes::providers::create_provider,
-        crate::routes::providers::get_provider,
-        crate::routes::providers::update_provider,
-        crate::routes::providers::delete_provider,
-        crate::routes::providers::activate_provider,
-        crate::routes::audio_capture::get_capture,
-        crate::routes::audio_capture::put_capture,
-        crate::routes::speakers::list_speakers,
-        crate::routes::speakers::create_speaker,
-        crate::routes::speakers::update_speaker,
-        crate::routes::speakers::delete_speaker,
-        crate::routes::messages::message_audio,
+        crate::http::routes::auth::register,
+        crate::http::routes::auth::login,
+        crate::http::routes::auth::logout,
+        crate::http::routes::auth::change_password,
+        crate::http::routes::auth::me,
+        crate::http::routes::agents::create_agent,
+        crate::http::routes::devices::list_devices,
+        crate::http::routes::devices::activate_device,
+        crate::http::routes::devices::unbind_device,
+        crate::http::routes::providers::list_providers,
+        crate::http::routes::providers::create_provider,
+        crate::http::routes::providers::get_provider,
+        crate::http::routes::providers::update_provider,
+        crate::http::routes::providers::delete_provider,
+        crate::http::routes::providers::activate_provider,
+        crate::http::routes::audio_capture::get_capture,
+        crate::http::routes::audio_capture::put_capture,
+        crate::http::routes::speakers::list_speakers,
+        crate::http::routes::speakers::create_speaker,
+        crate::http::routes::speakers::update_speaker,
+        crate::http::routes::speakers::delete_speaker,
+        crate::http::routes::messages::message_audio,
     ),
     components(schemas(
         ErrorResponse,

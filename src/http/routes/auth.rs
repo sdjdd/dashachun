@@ -5,12 +5,12 @@ use axum::http::StatusCode;
 use axum::{Json, Router, routing::get, routing::post};
 use axum_extra::extract::cookie::SignedCookieJar;
 
-use crate::auth::dto::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
-use crate::auth::extract::{AuthUser, ClientIp};
-use crate::auth::state::AuthState;
 use crate::auth::{self, password, session};
 use crate::error::{AppError, ErrorResponse};
-use crate::extract::Validated;
+use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
+use crate::http::extract::Validated;
+use crate::http::extract::auth::{AuthUser, ClientIp};
+use crate::http::session::AuthState;
 use crate::ratelimit::Decision;
 
 /// Rate limits are a fixed window per (endpoint, client IP).

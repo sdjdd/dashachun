@@ -1,30 +1,14 @@
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::{Json, Router, routing::delete, routing::get, routing::post};
 use uuid::Uuid;
 
-use crate::auth::extract::AuthUser;
-use crate::auth::state::AuthState;
 use crate::device::BindOutcome;
-use crate::device::DeviceStore;
-use crate::device::dto::{ActivateDeviceArgs, DeviceResponse};
 use crate::error::{AppError, ErrorResponse};
-use crate::extract::Validated;
-
-/// The device REST routes need both halves: session auth and the device
-/// store (whose Redis handle the shared `ServerState` copy also carries,
-/// so the two never diverge).
-#[derive(Clone)]
-pub struct DevicesState {
-    pub auth: AuthState,
-    pub devices: DeviceStore,
-}
-
-impl FromRef<DevicesState> for AuthState {
-    fn from_ref(state: &DevicesState) -> Self {
-        state.auth.clone()
-    }
-}
+use crate::http::dto::device::{ActivateDeviceArgs, DeviceResponse};
+use crate::http::extract::Validated;
+use crate::http::extract::auth::AuthUser;
+use crate::http::state::DevicesState;
 
 pub fn routes() -> Router<DevicesState> {
     Router::new()

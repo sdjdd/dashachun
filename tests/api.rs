@@ -11,7 +11,7 @@ const CLIENT_ID: &str = "00000000-0000-0000-0000-000000000000";
 
 fn app(pool: PgPool) -> common::TestApp {
     let auth = common::auth_state(pool.clone());
-    dashachun::app(
+    dashachun::http::app(
         common::test_state(pool, Some("ws://configured/gateway".into())),
         auth,
     )
@@ -58,7 +58,7 @@ async fn ota_uses_configured_websocket_url(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn ota_derives_websocket_url_from_host(pool: PgPool) {
-    let app = dashachun::app(
+    let app = dashachun::http::app(
         common::test_state(pool.clone(), None),
         common::auth_state(pool),
     );
@@ -69,7 +69,7 @@ async fn ota_derives_websocket_url_from_host(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
-    let app = dashachun::app(
+    let app = dashachun::http::app(
         common::test_state(pool.clone(), None),
         common::auth_state(pool),
     );
@@ -83,7 +83,7 @@ async fn ota_derives_wss_from_forwarded_proto_https(pool: PgPool) {
 #[sqlx::test]
 #[ignore]
 async fn ota_forwarded_proto_http_keeps_ws(pool: PgPool) {
-    let app = dashachun::app(
+    let app = dashachun::http::app(
         common::test_state(pool.clone(), None),
         common::auth_state(pool),
     );
@@ -143,7 +143,7 @@ async fn shutdown_closes_websocket_and_serve_returns(pool: PgPool) {
     let state = common::test_state(pool, None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
-    let app = dashachun::app(state, auth);
+    let app = dashachun::http::app(state, auth);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -206,7 +206,7 @@ async fn hello_with_unsupported_audio_format_is_rejected(pool: PgPool) {
     let state = common::test_state(pool, None);
     let shutdown_tx = state.shutdown_sender();
     let shutdown_rx = state.shutdown_signal();
-    let app = dashachun::app(state, auth);
+    let app = dashachun::http::app(state, auth);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

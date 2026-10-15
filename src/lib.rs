@@ -1,74 +1,29 @@
-use std::net::SocketAddr;
-use std::time::Duration;
-
-use axum::Router;
-use axum::routing::get;
-use tokio::sync::watch;
-use tower::Layer;
-use tower_http::normalize_path::{NormalizePath, NormalizePathLayer};
-use utoipa::OpenApi;
-use utoipa_scalar::{Scalar, Servable};
-
-use crate::auth::state::AuthState;
-use crate::state::ServerState;
-
 pub mod agent;
 pub mod audio;
 pub mod auth;
 pub mod config;
 pub mod device;
-pub mod docs;
-pub mod dto;
 pub mod error;
-pub mod extract;
 pub mod gateway;
+pub mod http;
 pub mod oss;
 pub mod provider;
 pub mod ratelimit;
-pub mod routes;
 pub mod settings;
 pub mod state;
 pub mod util;
 pub mod vad;
 pub mod voiceprint;
 
-pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
-    let providers = routes::providers::routes().with_state(routes::providers::ProvidersState {
-        auth: auth.clone(),
-        server: server.clone(),
-    });
-    let devices = routes::devices::routes().with_state(routes::devices::DevicesState {
-        auth: auth.clone(),
-        devices: server.devices.clone(),
-    });
-    let audio_capture =
-        routes::audio_capture::routes().with_state(routes::audio_capture::AudioCaptureState {
-            auth: auth.clone(),
-            server: server.clone(),
-        });
-    let agents = routes::agents::routes().with_state(routes::agents::AgentsState {
-        auth: auth.clone(),
-        server: server.clone(),
-    });
-    let router = Router::new()
-        .route("/", get(async || "王老师，你看我鞋好看不"))
-        .nest("/gateway", routes::gateway::routes())
-        .nest("/api/ota", routes::ota::routes())
-        .with_state(server)
-        .nest("/api/providers", providers)
-        .nest("/api/auth", routes::auth::routes().with_state(auth.clone()))
-        .nest("/api/agents", agents)
-        .nest("/api/devices", devices)
-        .nest("/api/settings/audio-capture", audio_capture)
-        .merge(Scalar::with_url("/scalar", docs::ApiDoc::openapi()))
-        .route("/api/openapi.json", get(docs::spec));
+use std::net::SocketAddr;
+use std::time::Duration;
 
-    NormalizePathLayer::trim_trailing_slash().layer(router)
-}
+use tokio::sync::watch;
+use tower_http::normalize_path::NormalizePath;
 
 pub async fn serve(
     listener: tokio::net::TcpListener,
-    app: NormalizePath<Router>,
+    app: NormalizePath<axum::Router>,
     shutdown: watch::Receiver<bool>,
     _grace: Duration,
 ) {

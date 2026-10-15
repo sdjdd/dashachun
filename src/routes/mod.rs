@@ -1,9 +1,0 @@
-pub mod agents;
-pub mod audio_capture;
-pub mod auth;
-pub mod devices;
-pub mod gateway;
-pub mod messages;
-pub mod ota;
-pub mod providers;
-pub mod speakers;

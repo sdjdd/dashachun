@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use garde::Validate;
 
-use super::AgentRecord;
+use crate::agent::AgentRecord;
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateAgentArgs {

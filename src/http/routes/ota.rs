@@ -5,12 +5,10 @@ use axum::{Json, Router, extract::State, routing::post};
 use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::{
-    dto::ota::{Activation, Firmware, OtaRequest, OtaResponse, ServerTime, Websocket},
-    error::AppError,
-    extract::{ClientId, DeviceId},
-    state::ServerState,
-};
+use crate::error::AppError;
+use crate::http::dto::ota::{Activation, Firmware, OtaRequest, OtaResponse, ServerTime, Websocket};
+use crate::http::extract::{ClientId, DeviceId};
+use crate::state::ServerState;
 
 pub fn routes() -> Router<ServerState> {
     Router::new()

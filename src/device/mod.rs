@@ -9,7 +9,6 @@ use uuid::Uuid;
 use crate::agent::AgentStore;
 use crate::error::AppError;
 
-pub mod dto;
 pub mod session;
 
 const MAX_CODE_ATTEMPTS: u32 = 8;

@@ -1,5 +1,7 @@
+pub mod auth;
 pub mod validated;
 
+pub use auth::{AdminUser, AuthUser, ClientIp};
 pub use validated::Validated;
 
 use axum::extract::FromRequestParts;

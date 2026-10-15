@@ -1,3 +1,9 @@
+//! The device websocket protocol's message types (`xiaozhi-esp32` wire
+//! format, documented in protocol.md): the hellos' audio params, the
+//! inbound control messages and the outbound stt/llm/tts messages. Consumed
+//! by the gateway session/player and parsed by the upgrade route's
+//! `Gateway`.
+
 use serde::{Deserialize, Serialize};
 
 use crate::audio::DownlinkAudio;

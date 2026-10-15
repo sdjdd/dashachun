@@ -1,7 +1,6 @@
 mod asr;
 mod capture;
 mod composite;
-pub mod dto;
 mod emotion;
 mod factory;
 mod generate;

@@ -129,7 +129,7 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     let shutdown_rx = state.shutdown_signal();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let served = dashachun::app(state, common::auth_state(pool.clone()));
+    let served = dashachun::http::app(state, common::auth_state(pool.clone()));
     let server = tokio::spawn(dashachun::serve(
         listener,
         served,
@@ -199,7 +199,7 @@ async fn connect_gateway(
 #[ignore]
 async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
     let (devices, prefix) = common::test_device_store(pool.clone());
-    let app = dashachun::app(
+    let app = dashachun::http::app(
         common::test_state_with_devices(pool.clone(), None, devices),
         common::auth_state(pool.clone()),
     );

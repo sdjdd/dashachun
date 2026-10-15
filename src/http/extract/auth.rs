@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 
-use super::{Role, session, state::AuthState};
+use crate::auth::{Role, session};
+use crate::http::session::AuthState;
 
 pub struct AuthUser {
     pub id: i64,
@@ -61,7 +62,7 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
         let state = AuthState::from_ref(state);
-        let role = super::user_role(&state.pool, user.id).await?;
+        let role = crate::auth::user_role(&state.pool, user.id).await?;
         if role != Role::Admin {
             return Err(AppError::Forbidden);
         }

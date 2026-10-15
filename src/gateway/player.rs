@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 use tracing::{debug, trace};
 
-use crate::dto::ws::TtsMessage;
+use crate::gateway::protocol::TtsMessage;
 
 use super::send_json;
 

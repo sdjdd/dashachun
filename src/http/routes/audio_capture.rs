@@ -1,37 +1,18 @@
 use std::sync::Arc;
 
-use axum::extract::{FromRef, State};
+use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::agent::AudioStorage;
-use crate::auth::extract::AdminUser;
-use crate::auth::state::AuthState;
 use crate::config::OssConfig;
 use crate::error::{AppError, ErrorResponse};
+use crate::http::extract::auth::AdminUser;
+use crate::http::session::AuthState;
+use crate::http::state::AudioCaptureState;
 use crate::oss::Oss;
 use crate::settings::{self, AudioCaptureSettings};
 use crate::state::ServerState;
-
-/// Router state for the audio-capture settings API: session auth plus the
-/// server handle whose storage slot the apply path swaps.
-#[derive(Clone)]
-pub struct AudioCaptureState {
-    pub auth: AuthState,
-    pub server: ServerState,
-}
-
-impl FromRef<AudioCaptureState> for AuthState {
-    fn from_ref(state: &AudioCaptureState) -> Self {
-        state.auth.clone()
-    }
-}
-
-impl FromRef<AudioCaptureState> for ServerState {
-    fn from_ref(state: &AudioCaptureState) -> Self {
-        state.server.clone()
-    }
-}
 
 pub fn routes() -> Router<AudioCaptureState> {
     Router::new().route("/", get(get_capture).put(put_capture))

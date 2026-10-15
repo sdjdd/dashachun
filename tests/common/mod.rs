@@ -22,9 +22,9 @@ pub type TestApp = tower_http::normalize_path::NormalizePath<axum::Router>;
 use dashachun::agent::{
     AgentFactory, AgentSession, AgentStore, AudioStorage, ChatItem, MemoryHook, OnCommit, ToolSet,
 };
-use dashachun::auth::state::AuthState;
 use dashachun::config::{AppConfig, DeviceConfig, ServerConfig};
 use dashachun::device::DeviceStore;
+use dashachun::http::session::AuthState;
 use dashachun::provider::{ProviderRegistry, ProviderSpec};
 use dashachun::ratelimit::RedisLimiter;
 use dashachun::settings::OtaSettings;
@@ -182,7 +182,7 @@ pub fn app_with_voiceprint(
 ) -> (TestApp, ServerState) {
     let state = test_state_with_voiceprint(pool.clone(), None, voiceprint);
     let auth = auth_state(pool);
-    (dashachun::app(state.clone(), auth), state)
+    (dashachun::http::app(state.clone(), auth), state)
 }
 
 /// Like [`app_with_state`], but with a caller-supplied provider registry
@@ -190,7 +190,7 @@ pub fn app_with_voiceprint(
 pub fn app_with_registry(pool: PgPool, registry: ProviderRegistry) -> (TestApp, ServerState) {
     let state = test_state_with_registry(pool.clone(), None, registry);
     let auth = auth_state(pool);
-    (dashachun::app(state.clone(), auth), state)
+    (dashachun::http::app(state.clone(), auth), state)
 }
 
 /// The full app with a Host-derived gateway URL.

@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent::{Agent, AgentInput, AgentOutputStream, AgentSession};
 use crate::audio::{DOWNLINK, OpusDecoder, OpusEncoder};
-use crate::dto::ws::{
+use crate::gateway::protocol::{
     Abort, ClientHello, InboundMessage, Listen, LlmMessage, Mcp, ServerHello, SttMessage,
     TtsMessage,
 };

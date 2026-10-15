@@ -1,42 +1,22 @@
 use std::sync::Arc;
 
-use axum::extract::{FromRef, Path, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use sqlx::PgPool;
 
 use crate::agent::{AgentFactory, AgentStore};
-use crate::auth::extract::AdminUser;
-use crate::auth::state::AuthState;
 use crate::error::{AppError, ErrorResponse};
-use crate::extract::Validated;
+use crate::http::dto::provider::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
+use crate::http::extract::Validated;
+use crate::http::extract::auth::AdminUser;
+use crate::http::session::AuthState;
+use crate::http::state::ProvidersState;
 use crate::provider::ProviderSpec;
-use crate::provider::dto::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
 use crate::provider::store::{ProviderRecord, ProviderStore};
 use crate::settings;
 use crate::state::ServerState;
-
-/// Router state for the provider admin API: session auth plus the server
-/// wiring (registry, shared VAD/tools and the hot-swap slot) that
-/// activation needs to assemble and publish a new agent generation.
-#[derive(Clone)]
-pub struct ProvidersState {
-    pub auth: AuthState,
-    pub server: ServerState,
-}
-
-impl FromRef<ProvidersState> for AuthState {
-    fn from_ref(state: &ProvidersState) -> Self {
-        state.auth.clone()
-    }
-}
-
-impl FromRef<ProvidersState> for ServerState {
-    fn from_ref(state: &ProvidersState) -> Self {
-        state.server.clone()
-    }
-}
 
 pub fn routes() -> Router<ProvidersState> {
     Router::new()

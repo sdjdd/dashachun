@@ -1,3 +1,8 @@
+//! The cookie session state of the HTTP surface: the signed-cookie key,
+//! the session TTL and cookie attributes, the client-IP rate limiter and
+//! the proxy-trust switch. Account storage and password/session operations
+//! live in the domain module (`crate::auth`).
+
 use axum_extra::extract::cookie::{Cookie, Key, SameSite};
 use sqlx::PgPool;
 use uuid::Uuid;

@@ -8,8 +8,8 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use common::{app, body_json, expect_json, request, send, session_cookie};
-use dashachun::auth::state::AuthState;
-use dashachun::routes::auth::LOGIN_LIMIT;
+use dashachun::http::routes::auth::LOGIN_LIMIT;
+use dashachun::http::session::AuthState;
 
 fn post_from(path: &str, body: &str, ip: &str) -> Request<Body> {
     Request::builder()
@@ -195,7 +195,7 @@ async fn the_rate_limit_is_per_client_ip(pool: PgPool) {
         limiter: common::test_limiter(),
         trust_proxy: true,
     };
-    let app = dashachun::app(common::test_state(pool, None), auth);
+    let app = dashachun::http::app(common::test_state(pool, None), auth);
     let body = r#"{"username":"ghost","password":"supersecret1"}"#;
     for _ in 0..LOGIN_LIMIT {
         let res = send(&app, post_from("/api/auth/login", body, "203.0.113.7")).await;

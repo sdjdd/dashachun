@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use garde::Validate;
 
-use super::store::ProviderRecord;
+use crate::provider::store::ProviderRecord;
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateProviderArgs {

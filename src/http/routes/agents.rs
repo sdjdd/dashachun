@@ -1,42 +1,20 @@
-use axum::extract::{FromRef, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::{Json, Router, routing::post};
 
 use crate::agent::AgentStore;
-use crate::agent::dto::{AgentResponse, CreateAgentArgs};
-use crate::auth::extract::AuthUser;
-use crate::auth::state::AuthState;
 use crate::error::{AppError, ErrorResponse};
-use crate::extract::Validated;
-use crate::state::ServerState;
-
-/// The agent REST routes need both halves: session auth and the server
-/// whose audio-storage and voiceprint-model slots the enrollment POST reads
-/// (the speakers sub-routes merge in here, so one state shape carries
-/// both).
-#[derive(Clone)]
-pub struct AgentsState {
-    pub auth: AuthState,
-    pub server: ServerState,
-}
-
-impl FromRef<AgentsState> for AuthState {
-    fn from_ref(state: &AgentsState) -> Self {
-        state.auth.clone()
-    }
-}
-
-impl FromRef<AgentsState> for ServerState {
-    fn from_ref(state: &AgentsState) -> Self {
-        state.server.clone()
-    }
-}
+use crate::http::dto::agent::{AgentResponse, CreateAgentArgs};
+use crate::http::extract::Validated;
+use crate::http::extract::auth::AuthUser;
+use crate::http::session::AuthState;
+use crate::http::state::AgentsState;
 
 pub fn routes() -> Router<AgentsState> {
     Router::new()
         .route("/", post(create_agent))
-        .merge(crate::routes::speakers::routes())
-        .merge(crate::routes::messages::routes())
+        .merge(crate::http::routes::speakers::routes())
+        .merge(crate::http::routes::messages::routes())
 }
 
 #[utoipa::path(

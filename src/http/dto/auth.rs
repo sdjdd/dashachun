@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use garde::Validate;
 
-use super::Role;
+use crate::auth::Role;
 
 #[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RegisterArgs {

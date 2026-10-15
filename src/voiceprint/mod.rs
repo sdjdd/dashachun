@@ -14,7 +14,6 @@
 
 mod store;
 
-pub mod dto;
 mod enroll;
 mod identify;
 
