@@ -51,6 +51,7 @@ export const copy = {
       devices: "设备",
       memories: "记忆",
       conversations: "会话",
+      speakers: "说话人",
     },
     fields: {
       name: "名称",
@@ -113,6 +114,50 @@ export const copy = {
       deleteConfirm: "确认删除",
       errors: {
         notFound: "该记忆条目不存在或已被删除",
+      },
+    },
+    speakers: {
+      listTitle: "已注册说话人",
+      listDescription: "用会话录音注册说话人，之后的对话可以识别出是谁在说话",
+      empty: "还没有注册说话人",
+      emptyHint: "点击右上角「注册说话人」，从会话录音中挑选声音样本",
+      enroll: "注册说话人",
+      enrollSubmit: "注册",
+      enrollDescription:
+        "填写称呼，并从会话转录中挑选 1-10 条这位说话人的用户消息录音；称呼已存在时，录音会追加到该说话人。",
+      nameLabel: "称呼",
+      namePlaceholder: "例如：爸爸",
+      descriptionLabel: "备注",
+      descriptionPlaceholder: "补充说明这位说话人是谁",
+      descriptionOptional: "选填",
+      pickerTitle: "选择录音消息",
+      pickerConversations: "会话",
+      pickerMessages: "带录音的用户消息",
+      pickerSelectConversation: "选择一个会话查看消息",
+      pickerEmpty: "还没有会话记录",
+      pickerNoMessages: "该会话没有带录音的用户消息",
+      selectedCount: (n: number) => `已选 ${n}/10 条`,
+      samples: (n: number) => `${n} 段录音`,
+      edit: "编辑",
+      editTitle: "编辑说话人",
+      editSubmit: "保存",
+      deleteTitle: "删除说话人",
+      deleteDescription: (name: string) =>
+        `确认删除说话人「${name}」？历史对话中的标注将显示为未识别，且无法恢复。`,
+      deleteConfirm: "确认删除",
+      errors: {
+        notFound: "该说话人不存在或已被删除",
+        nameTaken: "该称呼已被使用",
+        captureDisabled: "音频存储未启用，无法注册说话人",
+        modelMissing: "声纹模型未加载，暂时无法注册说话人",
+        rejected: (ids: number[]) =>
+          `消息 ${ids.map((id) => `#${id}`).join("、")} 无法用于注册：可能不是用户消息、没有录音或录音不可用`,
+        pickRange: "请挑选 1-10 条带录音的用户消息",
+      },
+      validation: {
+        nameRequired: "请输入称呼",
+        nameLength: "称呼长度为 1-64 个字符",
+        descriptionLength: "备注最长 200 个字符",
       },
     },
     conversations: {

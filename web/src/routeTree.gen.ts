@@ -20,6 +20,7 @@ import { Route as AppAgentsAgentIdIndexRouteImport } from './routes/_app/agents/
 import { Route as AppAgentsAgentIdConversationsRouteImport } from './routes/_app/agents/$agentId.conversations'
 import { Route as AppAgentsAgentIdDevicesRouteImport } from './routes/_app/agents/$agentId.devices'
 import { Route as AppAgentsAgentIdMemoriesRouteImport } from './routes/_app/agents/$agentId.memories'
+import { Route as AppAgentsAgentIdSpeakersRouteImport } from './routes/_app/agents/$agentId.speakers'
 
 const AppRouteRoute = AppRouteRouteImport.update({
   id: '/_app',
@@ -76,6 +77,12 @@ const AppAgentsAgentIdMemoriesRoute =
     path: '/memories',
     getParentRoute: () => AppAgentsAgentIdRoute,
   } as any)
+const AppAgentsAgentIdSpeakersRoute =
+  AppAgentsAgentIdSpeakersRouteImport.update({
+    id: '/speakers',
+    path: '/speakers',
+    getParentRoute: () => AppAgentsAgentIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
@@ -86,6 +93,7 @@ export interface FileRoutesByFullPath {
   '/agents/$agentId/conversations': typeof AppAgentsAgentIdConversationsRoute
   '/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
   '/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
+  '/agents/$agentId/speakers': typeof AppAgentsAgentIdSpeakersRoute
   '/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
 }
 export interface FileRoutesByTo {
@@ -96,6 +104,7 @@ export interface FileRoutesByTo {
   '/agents/$agentId/conversations': typeof AppAgentsAgentIdConversationsRoute
   '/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
   '/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
+  '/agents/$agentId/speakers': typeof AppAgentsAgentIdSpeakersRoute
   '/agents/$agentId': typeof AppAgentsAgentIdIndexRoute
 }
 export interface FileRoutesById {
@@ -110,6 +119,7 @@ export interface FileRoutesById {
   '/_app/agents/$agentId/conversations': typeof AppAgentsAgentIdConversationsRoute
   '/_app/agents/$agentId/devices': typeof AppAgentsAgentIdDevicesRoute
   '/_app/agents/$agentId/memories': typeof AppAgentsAgentIdMemoriesRoute
+  '/_app/agents/$agentId/speakers': typeof AppAgentsAgentIdSpeakersRoute
   '/_app/agents/$agentId/': typeof AppAgentsAgentIdIndexRoute
 }
 export interface FileRouteTypes {
@@ -123,6 +133,7 @@ export interface FileRouteTypes {
     | '/agents/$agentId/conversations'
     | '/agents/$agentId/devices'
     | '/agents/$agentId/memories'
+    | '/agents/$agentId/speakers'
     | '/agents/$agentId/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -133,6 +144,7 @@ export interface FileRouteTypes {
     | '/agents/$agentId/conversations'
     | '/agents/$agentId/devices'
     | '/agents/$agentId/memories'
+    | '/agents/$agentId/speakers'
     | '/agents/$agentId'
   id:
     | '__root__'
@@ -146,6 +158,7 @@ export interface FileRouteTypes {
     | '/_app/agents/$agentId/conversations'
     | '/_app/agents/$agentId/devices'
     | '/_app/agents/$agentId/memories'
+    | '/_app/agents/$agentId/speakers'
     | '/_app/agents/$agentId/'
   fileRoutesById: FileRoutesById
 }
@@ -233,6 +246,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAgentsAgentIdMemoriesRouteImport
       parentRoute: typeof AppAgentsAgentIdRoute
     }
+    '/_app/agents/$agentId/speakers': {
+      id: '/_app/agents/$agentId/speakers'
+      path: '/speakers'
+      fullPath: '/agents/$agentId/speakers'
+      preLoaderRoute: typeof AppAgentsAgentIdSpeakersRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
   }
 }
 
@@ -240,6 +260,7 @@ interface AppAgentsAgentIdRouteChildren {
   AppAgentsAgentIdConversationsRoute: typeof AppAgentsAgentIdConversationsRoute
   AppAgentsAgentIdDevicesRoute: typeof AppAgentsAgentIdDevicesRoute
   AppAgentsAgentIdMemoriesRoute: typeof AppAgentsAgentIdMemoriesRoute
+  AppAgentsAgentIdSpeakersRoute: typeof AppAgentsAgentIdSpeakersRoute
   AppAgentsAgentIdIndexRoute: typeof AppAgentsAgentIdIndexRoute
 }
 
@@ -247,6 +268,7 @@ const AppAgentsAgentIdRouteChildren: AppAgentsAgentIdRouteChildren = {
   AppAgentsAgentIdConversationsRoute: AppAgentsAgentIdConversationsRoute,
   AppAgentsAgentIdDevicesRoute: AppAgentsAgentIdDevicesRoute,
   AppAgentsAgentIdMemoriesRoute: AppAgentsAgentIdMemoriesRoute,
+  AppAgentsAgentIdSpeakersRoute: AppAgentsAgentIdSpeakersRoute,
   AppAgentsAgentIdIndexRoute: AppAgentsAgentIdIndexRoute,
 }
 

@@ -71,6 +71,9 @@ function AgentDetailLayout() {
         <Link to="/agents/$agentId/conversations" params={{ agentId }} className={tabLink}>
           {copy.agents.tabs.conversations}
         </Link>
+        <Link to="/agents/$agentId/speakers" params={{ agentId }} className={tabLink}>
+          {copy.agents.tabs.speakers}
+        </Link>
       </nav>
 
       <Outlet />
