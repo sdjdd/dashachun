@@ -20,7 +20,8 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   agentSchema,
   describeAgentError,
-  useAgents,
+  isAgentNotFound,
+  useAgent,
   useDeleteAgent,
   useUpdateAgent,
 } from "@/lib/agents";
@@ -35,33 +36,24 @@ export const Route = createFileRoute("/_app/agents/$agentId")({
 function AgentDetailPage() {
   const { agentId } = Route.useParams();
   const id = Number(agentId);
-  const agents = useAgents();
+  const agent = useAgent(id);
 
-  if (agents.isPending) {
+  if (!Number.isSafeInteger(id) || id <= 0 || isAgentNotFound(agent.error)) {
+    return <NotFoundView />;
+  }
+  if (agent.isPending) {
     return (
       <div className="grid place-items-center py-24 text-muted-foreground">
         <LoaderCircle className="animate-spin" />
       </div>
     );
   }
-  if (agents.isError) {
+  if (agent.isError) {
     return (
       <div className="grid place-items-center gap-3 py-24">
-        <p className="text-sm text-destructive">{describeAgentError(agents.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => agents.refetch()}>
+        <p className="text-sm text-destructive">{describeAgentError(agent.error)}</p>
+        <Button variant="outline" size="sm" onClick={() => agent.refetch()}>
           {copy.agents.retry}
-        </Button>
-      </div>
-    );
-  }
-
-  const agent = agents.data.find((a) => a.id === id);
-  if (!agent) {
-    return (
-      <div className="grid place-items-center gap-3 py-24">
-        <p className="text-sm text-muted-foreground">{copy.agents.notFound}</p>
-        <Button variant="outline" size="sm" render={<Link to="/agents" />}>
-          {copy.agents.back}
         </Button>
       </div>
     );
@@ -77,14 +69,25 @@ function AgentDetailPage() {
           <ArrowLeft className="size-4" />
           {copy.agents.back}
         </Link>
-        <h1 className="text-xl font-semibold">{agent.name}</h1>
+        <h1 className="text-xl font-semibold">{agent.data.name}</h1>
         <p className="text-sm text-muted-foreground">
-          {copy.agents.createdAt} {new Date(agent.created_at).toLocaleDateString("zh-CN")}
+          {copy.agents.createdAt} {new Date(agent.data.created_at).toLocaleDateString("zh-CN")}
         </p>
       </div>
 
-      <AgentEditCard agent={agent} />
-      <DangerZoneCard agent={agent} />
+      <AgentEditCard agent={agent.data} />
+      <DangerZoneCard agent={agent.data} />
+    </div>
+  );
+}
+
+function NotFoundView() {
+  return (
+    <div className="grid place-items-center gap-3 py-24">
+      <p className="text-sm text-muted-foreground">{copy.agents.notFound}</p>
+      <Button variant="outline" size="sm" render={<Link to="/agents" />}>
+        {copy.agents.back}
+      </Button>
     </div>
   );
 }

@@ -33,6 +33,18 @@ export function useAgents() {
   return useQuery(agentsQuery);
 }
 
+export function agentQuery(id: number) {
+  return {
+    queryKey: ["agents", id] as const,
+    queryFn: () => api<Agent>(`/api/agents/${id}`),
+  };
+}
+
+export function useAgent(id: number) {
+  const valid = Number.isSafeInteger(id) && id > 0;
+  return useQuery({ ...agentQuery(id), enabled: valid });
+}
+
 export function useCreateAgent() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -55,6 +67,7 @@ export function useUpdateAgent() {
       queryClient.setQueryData<Agent[]>(agentsQuery.queryKey, (old) =>
         old?.map((a) => (a.id === agent.id ? agent : a)),
       );
+      queryClient.setQueryData(agentQuery(agent.id).queryKey, agent);
     },
   });
 }
@@ -77,4 +90,8 @@ export function describeAgentError(err: unknown): string {
     return err.message;
   }
   return copy.common.network;
+}
+
+export function isAgentNotFound(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404;
 }
