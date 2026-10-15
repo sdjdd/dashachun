@@ -22,16 +22,12 @@ use utoipa_scalar::{Scalar, Servable};
 use crate::state::ServerState;
 
 use self::session::AuthState;
-use self::state::{AgentsState, AudioCaptureState, DevicesState, ProvidersState};
+use self::state::{AgentsState, AudioCaptureState, ProvidersState};
 
 pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
     let providers = routes::providers::routes().with_state(ProvidersState {
         auth: auth.clone(),
         server: server.clone(),
-    });
-    let devices = routes::devices::routes().with_state(DevicesState {
-        auth: auth.clone(),
-        devices: server.devices.clone(),
     });
     let audio_capture = routes::audio_capture::routes().with_state(AudioCaptureState {
         auth: auth.clone(),
@@ -49,7 +45,6 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         .nest("/api/providers", providers)
         .nest("/api/auth", routes::auth::routes().with_state(auth.clone()))
         .nest("/api/agents", agents)
-        .nest("/api/devices", devices)
         .nest("/api/settings/audio-capture", audio_capture)
         .merge(Scalar::with_url("/scalar", docs::ApiDoc::openapi()))
         .route("/api/openapi.json", get(docs::spec));

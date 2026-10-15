@@ -15,6 +15,7 @@ pub fn routes() -> Router<AgentsState> {
         .route("/", post(create_agent))
         .merge(crate::http::routes::speakers::routes())
         .merge(crate::http::routes::messages::routes())
+        .merge(crate::http::routes::devices::routes())
 }
 
 #[utoipa::path(

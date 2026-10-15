@@ -5,15 +5,15 @@
 
 use axum::extract::FromRef;
 
-use crate::device::DeviceStore;
 use crate::state::ServerState;
 
 use super::session::AuthState;
 
 /// The agent REST routes need both halves: session auth and the server
 /// whose audio-storage and voiceprint-model slots the enrollment POST reads
-/// (the speakers and message-audio sub-routes merge in here, so one state
-/// shape carries both).
+/// and whose device store the device sub-routes read (the speakers,
+/// message-audio and device sub-routes merge in here, so one state shape
+/// carries both).
 #[derive(Clone)]
 pub struct AgentsState {
     pub auth: AuthState,
@@ -29,21 +29,6 @@ impl FromRef<AgentsState> for AuthState {
 impl FromRef<AgentsState> for ServerState {
     fn from_ref(state: &AgentsState) -> Self {
         state.server.clone()
-    }
-}
-
-/// The device REST routes need both halves: session auth and the device
-/// store (whose Redis handle the shared `ServerState` copy also carries,
-/// so the two never diverge).
-#[derive(Clone)]
-pub struct DevicesState {
-    pub auth: AuthState,
-    pub devices: DeviceStore,
-}
-
-impl FromRef<DevicesState> for AuthState {
-    fn from_ref(state: &DevicesState) -> Self {
-        state.auth.clone()
     }
 }
 

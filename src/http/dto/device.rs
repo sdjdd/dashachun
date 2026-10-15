@@ -9,8 +9,6 @@ use crate::device::DeviceRecord;
 pub struct ActivateDeviceArgs {
     #[garde(pattern(r"^[0-9]{6}$"))]
     pub code: String,
-    #[garde(range(min = 1))]
-    pub agent_id: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

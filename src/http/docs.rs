@@ -102,9 +102,8 @@ mod tests {
             "/api/auth/change-password",
             "/api/auth/me",
             "/api/agents",
-            "/api/devices",
-            "/api/devices/activate",
-            "/api/devices/{client_id}",
+            "/api/agents/{agent_id}/devices",
+            "/api/agents/{agent_id}/devices/{client_id}",
             "/api/providers",
             "/api/providers/{id}",
             "/api/providers/{id}/activate",
@@ -118,11 +117,14 @@ mod tests {
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 16, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 15, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));
-        assert!(json["paths"]["/api/devices/{client_id}"]["delete"]["parameters"].is_array());
+        assert!(
+            json["paths"]["/api/agents/{agent_id}/devices/{client_id}"]["delete"]["parameters"]
+                .is_array()
+        );
         assert!(json["components"]["schemas"]["ErrorResponse"].is_object());
         assert_eq!(
             json["components"]["securitySchemes"]["cookieAuth"]["type"],

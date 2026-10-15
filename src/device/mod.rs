@@ -245,25 +245,25 @@ impl DeviceStore {
         Ok(BindOutcome::Conflict)
     }
 
-    pub async fn list_for_user(&self, user_id: i64) -> Result<Vec<DeviceRecord>, AppError> {
+    pub async fn list_for_agent(&self, agent_id: i64) -> Result<Vec<DeviceRecord>, AppError> {
         let records = sqlx::query_as::<_, DeviceRecord>(&format!(
-            "SELECT {DEVICE_COLUMNS} FROM devices WHERE user_id = $1 ORDER BY created_at DESC"
+            "SELECT {DEVICE_COLUMNS} FROM devices WHERE agent_id = $1 ORDER BY created_at DESC"
         ))
-        .bind(user_id)
+        .bind(agent_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(records)
     }
 
-    pub async fn unbind(&self, user_id: i64, client_id: Uuid) -> Result<bool, AppError> {
+    pub async fn unbind(&self, agent_id: i64, client_id: Uuid) -> Result<bool, AppError> {
         let affected = sqlx::query(
             "UPDATE devices \
                 SET user_id = NULL, token_hash = NULL, activated_at = NULL, \
                     agent_id = NULL \
-              WHERE client_id = $1 AND user_id = $2",
+              WHERE client_id = $2 AND agent_id = $1",
         )
+        .bind(agent_id)
         .bind(client_id)
-        .bind(user_id)
         .execute(&self.pool)
         .await?
         .rows_affected();

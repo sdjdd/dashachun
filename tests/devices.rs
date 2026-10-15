@@ -32,11 +32,12 @@ fn activate_request() -> Request<Body> {
         .unwrap()
 }
 
-async fn create_agent(pool: &PgPool, user_id: i64) -> i64 {
+async fn create_agent(pool: &PgPool, user_id: i64, name: &str) -> i64 {
     sqlx::query_scalar(
-        "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, 'default', '') RETURNING id",
+        "INSERT INTO agents (user_id, name, persona_prompt) VALUES ($1, $2, '') RETURNING id",
     )
     .bind(user_id)
+    .bind(name)
     .fetch_one(pool)
     .await
     .unwrap()
@@ -77,14 +78,14 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     };
 
     let (cookie, user_id) = register(&app, &pool).await;
-    let agent_id = create_agent(&pool, user_id).await;
+    let agent_id = create_agent(&pool, user_id, "default").await;
 
     let res = send(
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &code, "agent_id": 999999}).to_string()),
+            "/api/agents/999999/devices",
+            Some(&json!({"code": &code}).to_string()),
             Some(&cookie),
         ),
     )
@@ -95,8 +96,8 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &code, "agent_id": agent_id}).to_string()),
+            &format!("/api/agents/{agent_id}/devices"),
+            Some(&json!({"code": &code}).to_string()),
             Some(&cookie),
         ),
     )
@@ -108,7 +109,16 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     assert!(device.get("id").is_none());
     assert!(device["created_at"].as_str().unwrap().contains('T'));
 
-    let res = send(&app, request("GET", "/api/devices", None, Some(&cookie))).await;
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent_id}/devices"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
 
@@ -141,21 +151,13 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     assert!(connect_gateway(addr, Some("wrong-token")).await.is_err());
     assert!(connect_gateway(addr, None).await.is_err());
 
-    sqlx::query("DELETE FROM agents WHERE id = $1")
-        .bind(agent_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    assert!(
-        connect_gateway(addr, Some(&token)).await.is_err(),
-        "a bound device whose agent is gone must be rejected"
-    );
-
+    // the unbind is agent-scoped, so it must happen while the agent row
+    // still exists
     let res = send(
         &app,
         request(
             "DELETE",
-            &format!("/api/devices/{CLIENT_ID}"),
+            &format!("/api/agents/{agent_id}/devices/{CLIENT_ID}"),
             None,
             Some(&cookie),
         ),
@@ -168,6 +170,41 @@ async fn bind_flow_issues_token_and_gateway_enforces(pool: PgPool) {
     let body = body_json(send(&app, ota_request()).await).await;
     assert!(body["activation"]["code"].is_string());
     assert_eq!(body["websocket"]["token"], "");
+
+    // the freed code re-binds under the same agent, and a device whose
+    // agent row is deleted afterwards is still rejected at the gateway
+    let code = body["activation"]["code"].as_str().unwrap().to_owned();
+    let res = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/agents/{agent_id}/devices"),
+            Some(&json!({"code": &code}).to_string()),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        send(&app, activate_request()).await.status(),
+        StatusCode::OK
+    );
+    let token = {
+        let body = body_json(send(&app, ota_request()).await).await;
+        assert!(body.get("activation").is_none());
+        body["websocket"]["token"].as_str().unwrap().to_owned()
+    };
+    assert!(connect_gateway(addr, Some(&token)).await.is_ok());
+
+    sqlx::query("DELETE FROM agents WHERE id = $1")
+        .bind(agent_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        connect_gateway(addr, Some(&token)).await.is_err(),
+        "a bound device whose agent is gone must be rejected"
+    );
 
     shutdown_tx.send(true).unwrap();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
@@ -228,13 +265,13 @@ async fn expired_code_is_not_found_and_reissued(pool: PgPool) {
     }
 
     let (cookie, user_id) = register(&app, &pool).await;
-    let agent_id = create_agent(&pool, user_id).await;
+    let agent_id = create_agent(&pool, user_id, "default").await;
     let res = send(
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &old_code, "agent_id": agent_id}).to_string()),
+            &format!("/api/agents/{agent_id}/devices"),
+            Some(&json!({"code": &old_code}).to_string()),
             Some(&cookie),
         ),
     )
@@ -256,13 +293,13 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
     };
 
     let (cookie, user_id) = register(&app, &pool).await;
-    let agent_id = create_agent(&pool, user_id).await;
+    let agent_id = create_agent(&pool, user_id, "default").await;
     let res = send(
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &code, "agent_id": agent_id}).to_string()),
+            &format!("/api/agents/{agent_id}/devices"),
+            Some(&json!({"code": &code}).to_string()),
             Some(&cookie),
         ),
     )
@@ -270,13 +307,13 @@ async fn binding_taken_code_is_not_found(pool: PgPool) {
     assert_eq!(res.status(), StatusCode::OK);
 
     let (other, other_id) = register(&app, &pool).await;
-    let other_agent = create_agent(&pool, other_id).await;
+    let other_agent = create_agent(&pool, other_id, "other").await;
     let res = send(
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &code, "agent_id": other_agent}).to_string()),
+            &format!("/api/agents/{other_agent}/devices"),
+            Some(&json!({"code": &code}).to_string()),
             Some(&other),
         ),
     )
@@ -294,15 +331,15 @@ async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgP
     };
 
     let (owner, owner_id) = register(&app, &pool).await;
-    let owner_agent = create_agent(&pool, owner_id).await;
+    let owner_agent = create_agent(&pool, owner_id, "default").await;
     let (other, _) = register(&app, &pool).await;
 
     let res = send(
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &code, "agent_id": owner_agent}).to_string()),
+            &format!("/api/agents/{owner_agent}/devices"),
+            Some(&json!({"code": &code}).to_string()),
             Some(&other),
         ),
     )
@@ -313,11 +350,128 @@ async fn binding_with_foreign_agent_is_rejected_and_leaves_code_usable(pool: PgP
         &app,
         request(
             "POST",
-            "/api/devices/activate",
-            Some(&json!({"code": &code, "agent_id": owner_agent}).to_string()),
+            &format!("/api/agents/{owner_agent}/devices"),
+            Some(&json!({"code": &code}).to_string()),
             Some(&owner),
         ),
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn device_rest_is_scoped_to_the_path_agent(pool: PgPool) {
+    let app = common::app(pool.clone());
+    let (owner, owner_id) = register(&app, &pool).await;
+    let bound_agent = create_agent(&pool, owner_id, "bound").await;
+    let other_agent = create_agent(&pool, owner_id, "other").await;
+    let (foreign, _) = register(&app, &pool).await;
+
+    let code = {
+        let body = body_json(send(&app, ota_request()).await).await;
+        body["activation"]["code"].as_str().unwrap().to_owned()
+    };
+    let res = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/agents/{bound_agent}/devices"),
+            Some(&json!({"code": &code}).to_string()),
+            Some(&owner),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // a foreign agent is 404 before anything else is looked at
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{bound_agent}/devices"),
+            None,
+            Some(&foreign),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // the device shows under its own agent, not the owner's other one
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{bound_agent}/devices"),
+            None,
+            Some(&owner),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let devices = body_json(res).await;
+    assert_eq!(devices.as_array().unwrap().len(), 1);
+    assert_eq!(devices[0]["client_id"], CLIENT_ID);
+
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{other_agent}/devices"),
+            None,
+            Some(&owner),
+        ),
+    )
+    .await;
+    let devices = body_json(res).await;
+    assert_eq!(devices.as_array().unwrap().len(), 0);
+
+    // unbinding under the wrong agent leaves the binding untouched
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{other_agent}/devices/{CLIENT_ID}"),
+            None,
+            Some(&owner),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{bound_agent}/devices"),
+            None,
+            Some(&owner),
+        ),
+    )
+    .await;
+    assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
+
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{bound_agent}/devices/{CLIENT_ID}"),
+            None,
+            Some(&owner),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{bound_agent}/devices"),
+            None,
+            Some(&owner),
+        ),
+    )
+    .await;
+    assert_eq!(body_json(res).await.as_array().unwrap().len(), 0);
 }
