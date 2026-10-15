@@ -113,8 +113,8 @@ impl SpeakerStore {
                      RETURNING id, agent_id, name, description, sample_count, \
                                created_at, updated_at",
                 )
-                .bind(user_id)
                 .bind(agent_id)
+                .bind(user_id)
                 .bind(name)
                 .bind(description)
                 .bind(&addend)

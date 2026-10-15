@@ -180,6 +180,28 @@ async fn create_or_append_on_an_agent_you_do_not_own_is_not_found(pool: PgPool) 
 
 #[sqlx::test]
 #[ignore]
+async fn create_or_append_inserts_when_agent_id_differs_from_user_id(pool: PgPool) {
+    let store = SpeakerStore::new(pool.clone());
+    let first = owned_agent(&pool, 1, "a").await;
+    let second = owned_agent(&pool, 1, "b").await;
+    assert_ne!(second, first);
+
+    let record = store
+        .create_or_append(second, 1, "张三", None, vec192(0.5), 1)
+        .await
+        .unwrap();
+    assert_eq!(record.agent_id, second);
+
+    let appended = store
+        .create_or_append(second, 1, "张三", None, vec192(0.25), 1)
+        .await
+        .unwrap();
+    assert_eq!(appended.id, record.id);
+    assert_eq!(appended.sample_count, 2);
+}
+
+#[sqlx::test]
+#[ignore]
 async fn same_name_coexists_across_agents_and_lists_are_scoped(pool: PgPool) {
     let store = SpeakerStore::new(pool.clone());
     let mine = owned_agent(&pool, 1, "mine").await;
