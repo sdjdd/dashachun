@@ -1,4 +1,9 @@
+mod common;
+
+use axum::http::StatusCode;
 use sqlx::PgPool;
+
+use common::{app, expect_json, register, request, send};
 
 use dashachun::settings::Settings;
 
@@ -67,4 +72,83 @@ async fn ensure_session_secret_generates_stores_and_reuses(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(stored, 1);
+}
+
+#[sqlx::test]
+#[ignore]
+async fn ota_settings_rest_reads_defaults_and_roundtrips(pool: PgPool) {
+    let app = app(pool.clone());
+    let (admin, _) = register(&app, &pool).await;
+
+    let body = expect_json(
+        &app,
+        request("GET", "/api/settings/ota", None, Some(&admin)),
+        StatusCode::OK,
+    )
+    .await;
+    assert!(body["websocket_url"].is_null());
+    assert_eq!(body["timezone_offset"], 480);
+
+    let body = expect_json(
+        &app,
+        request(
+            "PUT",
+            "/api/settings/ota",
+            Some(r#"{"websocket_url":"wss://example.com/gateway","timezone_offset":-300}"#),
+            Some(&admin),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(body["websocket_url"], "wss://example.com/gateway");
+    assert_eq!(body["timezone_offset"], -300);
+
+    let body = expect_json(
+        &app,
+        request("GET", "/api/settings/ota", None, Some(&admin)),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(body["websocket_url"], "wss://example.com/gateway");
+    assert_eq!(body["timezone_offset"], -300);
+
+    for payload in [
+        r#"{"websocket_url":"https://example.com","timezone_offset":0}"#,
+        r#"{"websocket_url":null,"timezone_offset":99999}"#,
+        r#"{"websocket_url":null,"timezone_offset":-1000}"#,
+    ] {
+        let res = send(
+            &app,
+            request("PUT", "/api/settings/ota", Some(payload), Some(&admin)),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let (non_admin, _) = register(&app, &pool).await;
+    let res = send(
+        &app,
+        request("GET", "/api/settings/ota", None, Some(&non_admin)),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let res = send(
+        &app,
+        request(
+            "PUT",
+            "/api/settings/ota",
+            Some(r#"{"websocket_url":null,"timezone_offset":0}"#),
+            Some(&non_admin),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let settings = Settings::load(&pool).await.unwrap();
+    let ota = settings.ota.unwrap();
+    assert_eq!(
+        ota.websocket_url.as_deref(),
+        Some("wss://example.com/gateway")
+    );
+    assert_eq!(ota.timezone_offset, -300);
 }

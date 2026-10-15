@@ -8,7 +8,9 @@ mod common;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 
-use common::{IdSink, RecordingHook, session};
+use axum::http::StatusCode;
+
+use common::{IdSink, RecordingHook, app, expect_json, register, request, send, session};
 use dashachun::agent::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor, Llm,
     LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ReasoningEffort,
@@ -708,4 +710,111 @@ async fn teardown_flushes_the_remaining_items(pool: PgPool) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(entries.list().await[0].content, "用户养了一只猫");
+}
+
+#[sqlx::test]
+#[ignore]
+async fn memories_rest_lists_and_deletes_within_the_agent_scope(pool: PgPool) {
+    let app = app(pool.clone());
+    let (cookie, user_id) = register(&app, &pool).await;
+    let created = expect_json(
+        &app,
+        request(
+            "POST",
+            "/api/agents",
+            Some(r#"{"name":"default"}"#),
+            Some(&cookie),
+        ),
+        StatusCode::CREATED,
+    )
+    .await;
+    let agent = created["id"].as_i64().unwrap();
+
+    let memory = DbEntryMemory::new(pool.clone(), user_id, agent);
+    memory.add("第一条").await.unwrap();
+    memory.add("第二条").await.unwrap();
+
+    let body = expect_json(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/memories"),
+            None,
+            Some(&cookie),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["mem_no"], 1);
+    assert_eq!(items[0]["content"], "第一条");
+    assert_eq!(items[1]["mem_no"], 2);
+    assert_eq!(items[1]["content"], "第二条");
+
+    let (other, _) = register(&app, &pool).await;
+    let res = send(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/memories"),
+            None,
+            Some(&other),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/memories/2"),
+            None,
+            Some(&other),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/memories/1"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let body = expect_json(
+        &app,
+        request(
+            "GET",
+            &format!("/api/agents/{agent}/memories"),
+            None,
+            Some(&cookie),
+        ),
+        StatusCode::OK,
+    )
+    .await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["mem_no"], 2);
+
+    let res = send(
+        &app,
+        request(
+            "DELETE",
+            &format!("/api/agents/{agent}/memories/1"),
+            None,
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    let third = memory.add("第三条").await.unwrap();
+    assert_eq!(third.mem_no, 3);
 }

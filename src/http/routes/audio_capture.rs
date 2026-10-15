@@ -9,12 +9,12 @@ use crate::config::OssConfig;
 use crate::error::{AppError, ErrorResponse};
 use crate::http::extract::auth::AdminUser;
 use crate::http::session::AuthState;
-use crate::http::state::AudioCaptureState;
+use crate::http::state::SettingsState;
 use crate::oss::Oss;
 use crate::settings::{self, AudioCaptureSettings};
 use crate::state::ServerState;
 
-pub fn routes() -> Router<AudioCaptureState> {
+pub fn routes() -> Router<SettingsState> {
     Router::new().route("/", get(get_capture).put(put_capture))
 }
 

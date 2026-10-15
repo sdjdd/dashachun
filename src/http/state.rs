@@ -53,22 +53,23 @@ impl FromRef<ProvidersState> for ServerState {
     }
 }
 
-/// Router state for the audio-capture settings API: session auth plus the
-/// server handle whose storage slot the apply path swaps.
+/// Router state for the settings API (`/api/settings/*`): session auth plus
+/// the server handle whose slots the apply paths swap (today audio-capture;
+/// the ota section only writes the row).
 #[derive(Clone)]
-pub struct AudioCaptureState {
+pub struct SettingsState {
     pub auth: AuthState,
     pub server: ServerState,
 }
 
-impl FromRef<AudioCaptureState> for AuthState {
-    fn from_ref(state: &AudioCaptureState) -> Self {
+impl FromRef<SettingsState> for AuthState {
+    fn from_ref(state: &SettingsState) -> Self {
         state.auth.clone()
     }
 }
 
-impl FromRef<AudioCaptureState> for ServerState {
-    fn from_ref(state: &AudioCaptureState) -> Self {
+impl FromRef<SettingsState> for ServerState {
+    fn from_ref(state: &SettingsState) -> Self {
         state.server.clone()
     }
 }

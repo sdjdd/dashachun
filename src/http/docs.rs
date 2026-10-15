@@ -5,13 +5,14 @@ use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 
 use crate::auth::Role;
 use crate::error::ErrorResponse;
-use crate::http::dto::agent::{AgentResponse, CreateAgentArgs};
+use crate::http::dto::agent::{AgentResponse, CreateAgentArgs, UpdateAgentArgs};
 use crate::http::dto::auth::{ChangePasswordArgs, LoginArgs, RegisterArgs, UserResponse};
 use crate::http::dto::conversation::{ConversationPage, MessagePage};
 use crate::http::dto::device::{ActivateDeviceArgs, DeviceResponse};
+use crate::http::dto::memory::MemoryResponse;
 use crate::http::dto::provider::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
 use crate::http::dto::speaker::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
-use crate::settings::AudioCaptureSettings;
+use crate::settings::{AudioCaptureSettings, OtaSettings};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -28,7 +29,12 @@ use crate::settings::AudioCaptureSettings;
         crate::http::routes::auth::logout,
         crate::http::routes::auth::change_password,
         crate::http::routes::auth::me,
+        crate::http::routes::agents::list_agents,
         crate::http::routes::agents::create_agent,
+        crate::http::routes::agents::update_agent,
+        crate::http::routes::agents::delete_agent,
+        crate::http::routes::memories::list_memories,
+        crate::http::routes::memories::delete_memory,
         crate::http::routes::devices::list_devices,
         crate::http::routes::devices::activate_device,
         crate::http::routes::devices::unbind_device,
@@ -40,6 +46,8 @@ use crate::settings::AudioCaptureSettings;
         crate::http::routes::providers::activate_provider,
         crate::http::routes::audio_capture::get_capture,
         crate::http::routes::audio_capture::put_capture,
+        crate::http::routes::settings::get_ota,
+        crate::http::routes::settings::put_ota,
         crate::http::routes::speakers::list_speakers,
         crate::http::routes::speakers::create_speaker,
         crate::http::routes::speakers::update_speaker,
@@ -56,13 +64,16 @@ use crate::settings::AudioCaptureSettings;
         ChangePasswordArgs,
         UserResponse,
         CreateAgentArgs,
+        UpdateAgentArgs,
         AgentResponse,
+        MemoryResponse,
         ActivateDeviceArgs,
         DeviceResponse,
         CreateProviderArgs,
         UpdateProviderArgs,
         ProviderResponse,
         AudioCaptureSettings,
+        OtaSettings,
         CreateSpeakerArgs,
         UpdateSpeakerArgs,
         SpeakerResponse,
@@ -107,12 +118,16 @@ mod tests {
             "/api/auth/change-password",
             "/api/auth/me",
             "/api/agents",
+            "/api/agents/{agent_id}",
+            "/api/agents/{agent_id}/memories",
+            "/api/agents/{agent_id}/memories/{mem_no}",
             "/api/agents/{agent_id}/devices",
             "/api/agents/{agent_id}/devices/{client_id}",
             "/api/providers",
             "/api/providers/{id}",
             "/api/providers/{id}/activate",
             "/api/settings/audio-capture",
+            "/api/settings/ota",
             "/api/agents/{agent_id}/speakers",
             "/api/agents/{agent_id}/speakers/{speaker_id}",
             "/api/agents/{agent_id}/conversations",
@@ -124,7 +139,7 @@ mod tests {
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 17, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 21, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));
@@ -133,6 +148,11 @@ mod tests {
                 .is_array()
         );
         assert!(json["components"]["schemas"]["ErrorResponse"].is_object());
+        assert!(json["paths"]["/api/agents"]["get"].is_object());
+        assert!(json["paths"]["/api/agents"]["post"].is_object());
+        assert!(json["paths"]["/api/agents/{agent_id}"]["put"].is_object());
+        assert!(json["paths"]["/api/agents/{agent_id}"]["delete"].is_object());
+        assert!(json["paths"]["/api/settings/ota"]["put"].is_object());
         assert_eq!(
             json["components"]["securitySchemes"]["cookieAuth"]["type"],
             "apiKey"

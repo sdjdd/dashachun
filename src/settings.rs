@@ -37,7 +37,7 @@ impl ProviderSelections {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct OtaSettings {
     pub websocket_url: Option<String>,
     #[serde(default = "default_timezone_offset")]
@@ -225,6 +225,40 @@ pub async fn load_audio_capture(pool: &PgPool) -> Result<AudioCaptureSettings, S
     match row {
         Some(value) => parse_row(AUDIO_CAPTURE_KEY, value),
         None => Ok(AudioCaptureSettings::default()),
+    }
+}
+
+/// Stores the ota section — the `/api/settings/ota` PUT path. Takes effect
+/// on the next boot: the section is resolved once at startup, unlike the
+/// hot-applied audio-capture row.
+pub async fn set_ota(pool: &PgPool, ota: &OtaSettings) -> Result<(), String> {
+    let value =
+        serde_json::to_value(ota).map_err(|err| format!("failed to encode ota settings: {err}"))?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()",
+    )
+    .bind(OTA_KEY)
+    .bind(value)
+    .execute(pool)
+    .await
+    .map_err(|err| format!("failed to store ota settings: {err}"))?;
+    Ok(())
+}
+
+/// Reads just the ota section — the `/api/settings/ota` GET path. An absent
+/// row is the default (Host-derived websocket url, offset 480), matching how
+/// boot resolves a missing row.
+pub async fn load_ota(pool: &PgPool) -> Result<OtaSettings, String> {
+    let row: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = $1")
+            .bind(OTA_KEY)
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| format!("failed to load ota settings: {err}"))?;
+    match row {
+        Some(value) => parse_row(OTA_KEY, value),
+        None => Ok(OtaSettings::default()),
     }
 }
 

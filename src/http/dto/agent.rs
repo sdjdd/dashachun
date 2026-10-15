@@ -13,6 +13,14 @@ pub struct CreateAgentArgs {
     pub persona_prompt: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+pub struct UpdateAgentArgs {
+    #[garde(length(min = 1, max = 64))]
+    pub name: Option<String>,
+    #[garde(length(max = 4096))]
+    pub persona_prompt: Option<String>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AgentResponse {
     pub id: i64,

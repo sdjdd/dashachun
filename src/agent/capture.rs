@@ -27,7 +27,10 @@ const BITS_PER_SAMPLE: usize = 16;
 /// audio while the message row stays the primary record. `put` returns the
 /// bucket the object landed in — the inserted row records bucket and key,
 /// so a later bucket switch can never orphan a reference, and `get` reads
-/// back through the bucket a row recorded, never the current one.
+/// back through the bucket a row recorded, never the current one. The port
+/// deliberately has no delete: objects outlive their rows by design (failed
+/// puts, agent deletes) and are reaped by the storage's periodic retention,
+/// never app-side.
 #[async_trait::async_trait]
 pub trait AudioStorage: Send + Sync {
     async fn put(&self, key: &str, bytes: Vec<u8>) -> Result<String, String>;

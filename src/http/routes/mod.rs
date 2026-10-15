@@ -9,6 +9,8 @@ pub mod auth;
 pub mod conversations;
 pub mod devices;
 pub mod gateway;
+pub mod memories;
 pub mod ota;
 pub mod providers;
+pub mod settings;
 pub mod speakers;
