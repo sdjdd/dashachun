@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteRouteImport } from './routes/_app/route'
 import { Route as AuthRouteRouteImport } from './routes/_auth/route'
 import { Route as AppIndexRouteImport } from './routes/_app/index'
+import { Route as AppAccountRouteImport } from './routes/_app/account'
 import { Route as AuthLoginRouteImport } from './routes/_auth/login'
 import { Route as AuthRegisterRouteImport } from './routes/_auth/register'
 import { Route as AppAgentsIndexRouteImport } from './routes/_app/agents/index'
@@ -33,6 +34,11 @@ const AuthRouteRoute = AuthRouteRouteImport.update({
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AppRouteRoute,
+} as any)
+const AppAccountRoute = AppAccountRouteImport.update({
+  id: '/account',
+  path: '/account',
   getParentRoute: () => AppRouteRoute,
 } as any)
 const AuthLoginRoute = AuthLoginRouteImport.update({
@@ -86,6 +92,7 @@ const AppAgentsAgentIdSpeakersRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
+  '/account': typeof AppAccountRoute
   '/login': typeof AuthLoginRoute
   '/register': typeof AuthRegisterRoute
   '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
@@ -98,6 +105,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
+  '/account': typeof AppAccountRoute
   '/login': typeof AuthLoginRoute
   '/register': typeof AuthRegisterRoute
   '/agents': typeof AppAgentsIndexRoute
@@ -111,6 +119,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteRouteWithChildren
   '/_auth': typeof AuthRouteRouteWithChildren
+  '/_app/account': typeof AppAccountRoute
   '/_auth/login': typeof AuthLoginRoute
   '/_auth/register': typeof AuthRegisterRoute
   '/_app/': typeof AppIndexRoute
@@ -126,6 +135,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/account'
     | '/login'
     | '/register'
     | '/agents/$agentId'
@@ -138,6 +148,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/account'
     | '/login'
     | '/register'
     | '/agents'
@@ -150,6 +161,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_app'
     | '/_auth'
+    | '/_app/account'
     | '/_auth/login'
     | '/_auth/register'
     | '/_app/'
@@ -188,6 +200,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRouteRoute
+    }
+    '/_app/account': {
+      id: '/_app/account'
+      path: '/account'
+      fullPath: '/account'
+      preLoaderRoute: typeof AppAccountRouteImport
       parentRoute: typeof AppRouteRoute
     }
     '/_auth/login': {
@@ -276,12 +295,14 @@ const AppAgentsAgentIdRouteWithChildren =
   AppAgentsAgentIdRoute._addFileChildren(AppAgentsAgentIdRouteChildren)
 
 interface AppRouteRouteChildren {
+  AppAccountRoute: typeof AppAccountRoute
   AppIndexRoute: typeof AppIndexRoute
   AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRouteWithChildren
   AppAgentsIndexRoute: typeof AppAgentsIndexRoute
 }
 
 const AppRouteRouteChildren: AppRouteRouteChildren = {
+  AppAccountRoute: AppAccountRoute,
   AppIndexRoute: AppIndexRoute,
   AppAgentsAgentIdRoute: AppAgentsAgentIdRouteWithChildren,
   AppAgentsIndexRoute: AppAgentsIndexRoute,

@@ -32,6 +32,13 @@ function AppLayout() {
             >
               {copy.agents.nav}
             </Link>
+            <Link
+              to="/account"
+              className="text-muted-foreground"
+              activeProps={{ className: "font-medium text-foreground" }}
+            >
+              {copy.account.nav}
+            </Link>
           </nav>
           <div className="ms-auto flex items-center gap-3 text-sm text-muted-foreground">
             <span>{session?.username}</span>

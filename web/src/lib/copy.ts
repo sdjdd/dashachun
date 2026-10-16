@@ -35,6 +35,45 @@ export const copy = {
   shell: {
     logout: "退出登录",
   },
+  account: {
+    nav: "账号",
+    title: "账号安全",
+    description: "管理登录密码与登录会话",
+    password: {
+      title: "修改密码",
+      description: "修改成功后，其他设备上的登录会立即失效，需要重新登录",
+      submit: "修改密码",
+      saved: "密码已修改，其他设备的登录已失效",
+    },
+    sessions: {
+      title: "登录会话",
+      description: "账号当前有效的登录会话，可以让不再使用的设备下线",
+      currentBadge: "当前会话",
+      lastActive: (time: string) => `最后活跃 ${time}`,
+      loggedIn: (time: string) => `登录于 ${time}`,
+      revoke: "下线",
+      revokeTitle: "下线此会话",
+      revokeDescription: "确认让这台设备的登录失效？该设备之后需要重新登录。",
+      revokeConfirm: "确认下线",
+      errors: {
+        notFound: "该会话已失效，无需下线",
+      },
+    },
+    fields: {
+      currentPassword: "当前密码",
+      newPassword: "新密码",
+      confirmPassword: "确认新密码",
+    },
+    errors: {
+      wrongCurrentPassword: "当前密码错误",
+    },
+    validation: {
+      currentRequired: "请输入当前密码",
+      passwordLength: "密码长度为 8-128 位",
+      confirmRequired: "请再次输入新密码",
+      confirmMismatch: "两次输入的新密码不一致",
+    },
+  },
   agents: {
     nav: "智能体",
     title: "智能体",
