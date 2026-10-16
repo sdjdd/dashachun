@@ -25,7 +25,7 @@ const SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
 async fn main() {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt::init();
+    dashachun::telemetry::init();
 
     let server = resolve_static_dir(ServerConfig::from_env());
     let bind_addr = server.bind_addr.clone();

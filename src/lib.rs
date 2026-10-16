@@ -11,6 +11,7 @@ pub mod provider;
 pub mod ratelimit;
 pub mod settings;
 pub mod state;
+pub mod telemetry;
 pub mod util;
 pub mod vad;
 pub mod voiceprint;
