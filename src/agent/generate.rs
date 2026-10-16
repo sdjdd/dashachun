@@ -404,19 +404,15 @@ pub async fn generate_text(params: StreamTextParams<'_>) -> Result<StreamResult,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::VecDeque;
     use std::convert::Infallible;
-    use std::fmt;
     use std::sync::Arc;
     use std::sync::Mutex;
 
     use serde::Deserialize;
-    use tracing::Id;
-    use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Record};
-    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::layer::SubscriberExt;
 
+    use crate::agent::span_capture::{SpanCapture, install_global_test_registry};
     use crate::agent::tool::{Tool, ToolSet};
     use crate::agent::{LlmMeta, LlmResponse, LlmUsage, ToolSpec};
 
@@ -644,86 +640,6 @@ mod tests {
             seen.push(item);
         }
         seen
-    }
-
-    /// Captures span names and fields through a tracing-subscriber layer —
-    /// the assertion surface for the conventions spans, no otel SDK.
-    #[derive(Clone)]
-    struct SpanCapture(Arc<Mutex<Vec<CapturedSpan>>>);
-
-    #[derive(Debug, Clone)]
-    struct CapturedSpan {
-        id: u64,
-        parent: Option<u64>,
-        name: String,
-        fields: BTreeMap<String, String>,
-    }
-
-    impl SpanCapture {
-        fn new() -> Self {
-            Self(Arc::new(Mutex::new(Vec::new())))
-        }
-
-        fn spans(&self, name: &str) -> Vec<CapturedSpan> {
-            self.0
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|span| span.name == name)
-                .cloned()
-                .collect()
-        }
-    }
-
-    /// Installs a bare global `Registry` once per test process. The callsite
-    /// interest cache is process-global and a callsite's first registration
-    /// is decided by whichever thread reaches it first: a thread without any
-    /// subscriber answers `Interest::never`, which poisons the callsite for
-    /// every later span — scoped dispatchers never trigger a rebuild. The
-    /// bare registry answers `always`, discards everything, and leaves each
-    /// test's scoped capture in charge.
-    fn install_global_test_registry() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            tracing::subscriber::set_global_default(tracing_subscriber::registry())
-                .expect("global test registry");
-        });
-    }
-
-    struct FieldWriter<'a>(&'a mut BTreeMap<String, String>);
-
-    impl Visit for FieldWriter<'_> {
-        fn record_str(&mut self, field: &Field, value: &str) {
-            self.0.insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.0
-                .insert(field.name().to_string(), format!("{value:?}"));
-        }
-    }
-
-    impl<S> Layer<S> for SpanCapture
-    where
-        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
-    {
-        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
-            let mut fields = BTreeMap::new();
-            attrs.record(&mut FieldWriter(&mut fields));
-            self.0.lock().unwrap().push(CapturedSpan {
-                id: id.into_u64(),
-                parent: attrs.parent().map(Id::into_u64),
-                name: attrs.metadata().name().to_string(),
-                fields,
-            });
-        }
-
-        fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
-            let mut spans = self.0.lock().unwrap();
-            if let Some(span) = spans.iter_mut().find(|span| span.id == id.into_u64()) {
-                values.record(&mut FieldWriter(&mut span.fields));
-            }
-        }
     }
 
     #[tokio::test]

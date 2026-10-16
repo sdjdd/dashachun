@@ -38,6 +38,9 @@ pub struct CompositeAgent {
     pub memory: Arc<dyn Memory>,
     pub entries: Arc<dyn EntryMemory>,
     pub tools: Arc<ToolSet>,
+    /// The agent row's name — the persona identity the `invoke_agent`
+    /// span carries as `gen_ai.agent.name` (telemetry.md).
+    pub name: String,
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
     pub speaker_matcher: Option<Arc<SpeakerMatcher>>,

@@ -3,6 +3,7 @@ use crate::agent::InMemEntryMemory;
 use crate::agent::InMemMemory;
 use crate::agent::collect;
 use crate::agent::memory::HISTORY_TURNS;
+use crate::agent::span_capture::{SpanCapture, install_global_test_registry};
 use crate::agent::tool::MemoryAdd;
 use crate::agent::{
     AgentInput, Asr, AsrError, AsrEvent, AsrEvents, AudioStream, Capture, ChatItem, EntryMemory,
@@ -18,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::layer::SubscriberExt;
 
 struct ScriptedTts;
 
@@ -278,6 +280,7 @@ fn stub_agent() -> CompositeAgent {
         memory: Arc::new(InMemMemory::default()),
         entries: Arc::new(InMemEntryMemory::default()),
         tools: empty_tools(),
+        name: "stub".into(),
         system_prompt: SystemPrompt::default(),
         capture: None,
         speaker_matcher: None,
@@ -1496,6 +1499,111 @@ async fn spoken_preamble_before_tool_call_is_kept() {
             ChatItem::tool("call_x", "error: unknown tool `nonexistent`"),
             ChatItem::assistant("答复"),
         ]
+    );
+}
+
+#[tokio::test]
+async fn turn_opens_the_invoke_agent_span_above_the_chat_spans() {
+    install_global_test_registry();
+    let capture = SpanCapture::new();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let agent = CompositeAgent {
+        name: "大傻春".into(),
+        llm: Arc::new(ScriptedLlm {
+            reply: "hi".into(),
+            calls: calls.clone(),
+        }),
+        vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+        ..stub_agent()
+    };
+    let (tx, mut output) = run(agent);
+
+    tx.send(AgentInput::ListenStart { mode: None })
+        .await
+        .unwrap();
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+    collect_reply(&mut output).await;
+    drop(_guard);
+
+    let turns = capture.spans("invoke_agent");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0]
+            .fields
+            .get("gen_ai.operation.name")
+            .map(String::as_str),
+        Some("invoke_agent")
+    );
+    assert_eq!(
+        turns[0].fields.get("gen_ai.agent.name").map(String::as_str),
+        Some("大傻春")
+    );
+    assert_eq!(
+        turns[0].fields.get("conversation_id").map(String::as_str),
+        Some("1")
+    );
+    assert!(!turns[0].fields.contains_key("error.type"));
+    assert!(!turns[0].fields.contains_key("otel.status_code"));
+    // The voice path's `chat` span hangs off the turn span through the
+    // ambient context the instrumented turn task carries.
+    let chats = capture.spans("chat");
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0].parent, Some(turns[0].id));
+}
+
+#[tokio::test]
+async fn failed_turn_and_its_chat_span_record_the_error_status() {
+    install_global_test_registry();
+    let capture = SpanCapture::new();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let agent = CompositeAgent {
+        llm: Arc::new(FailingLlm { reply: "hi".into() }),
+        vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+        ..stub_agent()
+    };
+    let (tx, mut output) = run(agent);
+
+    tx.send(AgentInput::ListenStart { mode: None })
+        .await
+        .unwrap();
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+    next_matching(&mut output, |item| {
+        matches!(item, AgentOutput::Error { .. })
+    })
+    .await;
+    // The turn task records its span after the think leg returns — the
+    // failure output can beat it back through the channels.
+    wait_until("turn span error status", || {
+        capture
+            .spans("invoke_agent")
+            .first()
+            .and_then(|span| span.fields.get("otel.status_code"))
+            .is_some_and(|value| value == "error")
+            .then_some(())
+    })
+    .await;
+    drop(_guard);
+
+    let turns = capture.spans("invoke_agent");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0].fields.get("error.type").map(String::as_str),
+        Some("failed")
+    );
+    // The round's own client span carries the same status — the loop
+    // recorded it when the stream failed.
+    let chats = capture.spans("chat");
+    assert_eq!(chats.len(), 1);
+    assert_eq!(
+        chats[0].fields.get("error.type").map(String::as_str),
+        Some("failed")
+    );
+    assert_eq!(
+        chats[0].fields.get("otel.status_code").map(String::as_str),
+        Some("error")
     );
 }
 

@@ -176,6 +176,7 @@ impl AgentFactory {
             memory: Arc::new(memory) as Arc<dyn Memory>,
             entries,
             tools: Arc::new(tools),
+            name: agent.name.clone(),
             system_prompt: SystemPrompt::new(&agent.persona_prompt),
             capture: Some(audio as Arc<dyn Capture>),
             speaker_matcher,

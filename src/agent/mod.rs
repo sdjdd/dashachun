@@ -7,6 +7,8 @@ mod generate;
 mod llm;
 mod memory;
 mod prompt;
+#[cfg(test)]
+pub(crate) mod span_capture;
 mod store;
 pub mod tool;
 mod tts;

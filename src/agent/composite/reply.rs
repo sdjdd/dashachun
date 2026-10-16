@@ -392,14 +392,33 @@ fn spawn_turn(
         tts: agent.tts.clone(),
         conversation_id: session.conversation_id,
     };
-    let handle = tokio::spawn(run_turn(
-        deps,
-        history,
-        prompt,
-        turn_id,
-        events,
-        token.clone(),
-    ));
+    // One GenAI-conventions span per conversational turn. The handle rides
+    // into the turn task — instrumenting its future puts it in the ambient
+    // context, which is how the round's `chat` spans (created without an
+    // explicit parent inside the loop) become its children; the speak leg
+    // is instrumented with the same handle. A failed turn records the
+    // error status onto it. The macro name is the conventions' composed
+    // shape — no `otel.name` needed.
+    let span = tracing::info_span!(
+        "invoke_agent",
+        gen_ai.operation.name = "invoke_agent",
+        gen_ai.agent.name = %agent.name,
+        conversation_id = deps.conversation_id,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    let handle = tokio::spawn(
+        run_turn(
+            deps,
+            history,
+            prompt,
+            turn_id,
+            events,
+            token.clone(),
+            span.clone(),
+        )
+        .instrument(span),
+    );
     Turn {
         id: turn_id,
         task: Cancellable::new(token, handle),
@@ -413,6 +432,7 @@ async fn run_turn(
     turn_id: u64,
     events: mpsc::Sender<(u64, ReplyEvent)>,
     token: CancellationToken,
+    span: tracing::Span,
 ) {
     let (speak_tx, speak_rx) = mpsc::channel::<String>(TTS_TEXT_CHANNEL_CAPACITY);
     // The speak leg runs on a child token: a failed turn silences it with
@@ -420,18 +440,26 @@ async fn run_turn(
     // live, so the reply stage still drains the Failed mapping.
     let speak_token = token.child_token();
     let conversation_id = deps.conversation_id;
-    let mut speak = tokio::spawn(speak_stage(
-        deps.tts.clone(),
-        speak_rx,
-        events.clone(),
-        turn_id,
-        speak_token.clone(),
-        conversation_id,
-    ));
-    let outcome = think_stage(&deps, history, prompt, &speak_tx, &events, turn_id, &token)
-        .instrument(tracing::info_span!("think", conversation_id))
-        .await;
+    let mut speak = tokio::spawn(
+        speak_stage(
+            deps.tts.clone(),
+            speak_rx,
+            events.clone(),
+            turn_id,
+            speak_token.clone(),
+            conversation_id,
+        )
+        .instrument(span.clone()),
+    );
+    let outcome = think_stage(&deps, history, prompt, &speak_tx, &events, turn_id, &token).await;
     drop(speak_tx);
+    if matches!(outcome, TurnOutcome::Failed) {
+        // The turn failed — the span must not look successful (iron rule
+        // 1). `failed` is the class the loop's `LlmError` names; TTS
+        // failures surface through the speak leg's own span later.
+        span.record("error.type", "failed");
+        span.record("otel.status_code", "error");
+    }
     match outcome {
         TurnOutcome::Done => {
             let _ = speak.await;
