@@ -35,10 +35,14 @@ pub(crate) fn params_schema<T: JsonSchema>() -> Value {
 /// the content fed back to the model as the tool message, and whether the
 /// call succeeded — a degraded call (invalid arguments, unknown tool, tool
 /// failure) is not ok. The bit feeds [`StepResult::ok`]; it does not steer
-/// the loop by itself.
+/// the loop by itself. `error_type` names the degradation class the way the
+/// telemetry span's `error.type` attribute wants it — a stable,
+/// low-cardinality string (`unknown_tool`, `invalid_arguments`,
+/// `tool_error`); `None` on success.
 pub struct ToolOutcome {
     pub content: String,
     pub ok: bool,
+    pub error_type: Option<&'static str>,
 }
 
 /// The arguments type for tools that take no arguments: the schema
@@ -181,6 +185,7 @@ impl ToolSet {
             return ToolOutcome {
                 content: format!("error: unknown tool `{}`", call.name),
                 ok: false,
+                error_type: Some("unknown_tool"),
             };
         };
         let args = if call.arguments.trim().is_empty() {
@@ -193,6 +198,7 @@ impl ToolSet {
                     return ToolOutcome {
                         content: format!("error: invalid arguments: {err}"),
                         ok: false,
+                        error_type: Some("invalid_arguments"),
                     };
                 }
             }
@@ -211,6 +217,7 @@ async fn call_typed<T: Tool>(tool: &T, args: Value) -> ToolOutcome {
             return ToolOutcome {
                 content: format!("error: invalid arguments: {err}"),
                 ok: false,
+                error_type: Some("invalid_arguments"),
             };
         }
     };
@@ -218,12 +225,14 @@ async fn call_typed<T: Tool>(tool: &T, args: Value) -> ToolOutcome {
         Ok(output) => ToolOutcome {
             content: output.to_string(),
             ok: true,
+            error_type: None,
         },
         Err(err) => {
             warn!(tool = T::NAME, %err, "tool failed");
             ToolOutcome {
                 content: format!("error: {err}"),
                 ok: false,
+                error_type: Some("tool_error"),
             }
         }
     }
