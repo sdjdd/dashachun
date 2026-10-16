@@ -281,6 +281,8 @@ fn stub_agent() -> CompositeAgent {
         entries: Arc::new(InMemEntryMemory::default()),
         tools: empty_tools(),
         name: "stub".into(),
+        asr_name: "stub".into(),
+        tts_name: "stub".into(),
         system_prompt: SystemPrompt::default(),
         capture: None,
         speaker_matcher: None,
@@ -672,6 +674,32 @@ impl Tts for SlowTts {
             }
             let _ = tx.send(Ok(TtsEvent::SentenceStart { text: acc }));
             let _ = tx.send(Ok(TtsEvent::Done));
+        });
+        crate::util::recv_unbounded_stream(rx)
+    }
+}
+
+/// Fails the recognition outright: the event stream is one error.
+struct FailingAsr;
+
+impl Asr for FailingAsr {
+    fn transcribe(&self, _audio: AudioStream, _cancel: CancellationToken) -> AsrEvents<'_> {
+        Box::pin(futures_util::stream::iter([Err(AsrError::Failed(
+            "boom".into(),
+        ))]))
+    }
+}
+
+/// Drains the text stream, then fails the synthesis: the error surfaces
+/// after the turn's reply leg has already succeeded.
+struct FailingTts;
+
+impl Tts for FailingTts {
+    fn synthesize(&self, mut text: TextStream, _cancel: CancellationToken) -> TtsEvents<'_> {
+        let (tx, rx) = mpsc::unbounded_channel::<Result<TtsEvent, TtsError>>();
+        tokio::spawn(async move {
+            while text.next().await.is_some() {}
+            let _ = tx.send(Err(TtsError::Failed("boom".into())));
         });
         crate::util::recv_unbounded_stream(rx)
     }
@@ -1603,6 +1631,168 @@ async fn failed_turn_and_its_chat_span_record_the_error_status() {
     );
     assert_eq!(
         chats[0].fields.get("otel.status_code").map(String::as_str),
+        Some("error")
+    );
+}
+
+/// The utterance's whole chain in one trace: the `asr` recognition is a
+/// root span (it precedes any turn), the turn's `invoke_agent` is its
+/// explicit child, the `tts` synthesis hangs off the turn through the
+/// ambient context the speak leg carries. Content attributes stay off —
+/// `TELEMETRY_CONTENT` is unset.
+#[tokio::test]
+async fn the_turn_hangs_under_its_utterance_asr_span() {
+    install_global_test_registry();
+    let capture = SpanCapture::new();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let agent = CompositeAgent {
+        vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+        ..stub_agent()
+    };
+    let (tx, mut output) = run(agent);
+
+    tx.send(AgentInput::ListenStart { mode: None })
+        .await
+        .unwrap();
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+    collect_reply(&mut output).await;
+    drop(_guard);
+
+    let asr = capture.spans("asr");
+    assert_eq!(asr.len(), 1);
+    assert_eq!(asr[0].parent, None, "recognition precedes any turn");
+    assert_eq!(
+        asr[0].fields.get("asr.provider.name").map(String::as_str),
+        Some("stub")
+    );
+    assert_eq!(
+        asr[0].fields.get("conversation_id").map(String::as_str),
+        Some("1")
+    );
+    assert!(!asr[0].fields.contains_key("error.type"));
+    assert!(
+        !asr[0].fields.contains_key("asr.transcript"),
+        "content is opt-in"
+    );
+
+    let turns = capture.spans("invoke_agent");
+    assert_eq!(turns.len(), 1);
+    assert_eq!(
+        turns[0].parent,
+        Some(asr[0].id),
+        "explicit parent: the utterance's recognition"
+    );
+
+    let tts = capture.spans("tts");
+    assert_eq!(tts.len(), 1);
+    assert_eq!(
+        tts[0].parent,
+        Some(turns[0].id),
+        "ambient parent: the turn the speak leg rides"
+    );
+    assert_eq!(
+        tts[0].fields.get("tts.provider.name").map(String::as_str),
+        Some("stub")
+    );
+    assert!(
+        !tts[0].fields.contains_key("tts.input.text"),
+        "content is opt-in"
+    );
+}
+
+/// A failing recognition records the error status on its own span and
+/// spawns no turn.
+#[tokio::test]
+async fn a_failed_asr_records_the_error_status() {
+    install_global_test_registry();
+    let capture = SpanCapture::new();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let agent = CompositeAgent {
+        asr: Arc::new(FailingAsr),
+        vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+        ..stub_agent()
+    };
+    let (tx, mut output) = run(agent);
+
+    tx.send(AgentInput::ListenStart { mode: None })
+        .await
+        .unwrap();
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+    next_matching(&mut output, |item| {
+        matches!(item, AgentOutput::Error { .. })
+    })
+    .await;
+    wait_until("asr span error status", || {
+        capture
+            .spans("asr")
+            .first()
+            .and_then(|span| span.fields.get("otel.status_code"))
+            .is_some_and(|value| value == "error")
+            .then_some(())
+    })
+    .await;
+    drop(_guard);
+
+    let asr = capture.spans("asr");
+    assert_eq!(asr.len(), 1);
+    assert_eq!(
+        asr[0].fields.get("error.type").map(String::as_str),
+        Some("failed")
+    );
+    assert!(capture.spans("invoke_agent").is_empty());
+}
+
+/// A failing synthesis records the error status on the `tts` span — the
+/// turn's own span stays clean, the failure is the speak leg's.
+#[tokio::test]
+async fn a_failed_tts_records_the_error_status() {
+    install_global_test_registry();
+    let capture = SpanCapture::new();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+    let agent = CompositeAgent {
+        tts: Arc::new(FailingTts),
+        vad: Arc::new(ScriptedVadFactory::utterances(&[&[]])),
+        ..stub_agent()
+    };
+    let (tx, mut output) = run(agent);
+
+    tx.send(AgentInput::ListenStart { mode: None })
+        .await
+        .unwrap();
+    tx.send(AgentInput::Audio(vec![0.5; 960])).await.unwrap();
+    next_matching(&mut output, |item| {
+        matches!(item, AgentOutput::Error { .. })
+    })
+    .await;
+    wait_until("tts span error status", || {
+        capture
+            .spans("tts")
+            .first()
+            .and_then(|span| span.fields.get("otel.status_code"))
+            .is_some_and(|value| value == "error")
+            .then_some(())
+    })
+    .await;
+    drop(_guard);
+
+    let turns = capture.spans("invoke_agent");
+    assert_eq!(turns.len(), 1);
+    assert!(
+        !turns[0].fields.contains_key("error.type"),
+        "the failure is the speak leg's, not the turn's"
+    );
+    let tts = capture.spans("tts");
+    assert_eq!(tts.len(), 1);
+    assert_eq!(tts[0].parent, Some(turns[0].id));
+    assert_eq!(
+        tts[0].fields.get("error.type").map(String::as_str),
+        Some("failed")
+    );
+    assert_eq!(
+        tts[0].fields.get("otel.status_code").map(String::as_str),
         Some("error")
     );
 }

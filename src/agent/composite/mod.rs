@@ -41,6 +41,12 @@ pub struct CompositeAgent {
     /// The agent row's name — the persona identity the `invoke_agent`
     /// span carries as `gen_ai.agent.name` (telemetry.md).
     pub name: String,
+    /// The ASR and TTS provider rows' names — the identities the speech
+    /// spans carry as `asr.provider.name` / `tts.provider.name`
+    /// (telemetry.md), the same operator-facing row naming the chat
+    /// span's `gen_ai.provider.name` uses.
+    pub asr_name: String,
+    pub tts_name: String,
     pub system_prompt: SystemPrompt,
     pub capture: Option<Arc<dyn Capture>>,
     pub speaker_matcher: Option<Arc<SpeakerMatcher>>,
@@ -79,6 +85,11 @@ enum ListenEvent {
         text: String,
         speaker: Option<i64>,
         turn: CancellationToken,
+        /// The utterance's `asr` span — the turn's explicit parent, so the
+        /// per-utterance trace chains recognition → reply → speech. The
+        /// handle rides the final: the listening stage holds the span open
+        /// until the reply stage has spawned the turn under it.
+        asr: tracing::Span,
     },
     Interrupt,
     Reset,

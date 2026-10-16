@@ -26,8 +26,12 @@ use crate::voiceprint::{SpeakerMatcher, SpeakerStore, Voiceprint};
 /// through [`AgentFactory::drain_when_orphaned`].
 pub struct AgentFactory {
     asr: Arc<dyn Asr>,
+    /// The provider rows' names, for the speech spans' identity attributes
+    /// (telemetry.md).
+    asr_name: String,
     llm: Arc<dyn Llm>,
     tts: Arc<dyn Tts>,
+    tts_name: String,
     vad: Arc<dyn VadFactory>,
     voiceprint: Option<Arc<Mutex<Voiceprint>>>,
     tools: ToolSet,
@@ -39,8 +43,10 @@ impl AgentFactory {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         asr: Arc<dyn Asr>,
+        asr_name: String,
         llm: Arc<dyn Llm>,
         tts: Arc<dyn Tts>,
+        tts_name: String,
         vad: Arc<dyn VadFactory>,
         voiceprint: Option<Arc<Mutex<Voiceprint>>>,
         tools: ToolSet,
@@ -49,8 +55,10 @@ impl AgentFactory {
     ) -> Self {
         Self {
             asr,
+            asr_name,
             llm,
             tts,
+            tts_name,
             vad,
             voiceprint,
             tools,
@@ -72,6 +80,7 @@ impl AgentFactory {
         pool: PgPool,
     ) -> Result<Self, String> {
         tracing::info!(stage = "asr", kind = %asr.kind, "constructing provider");
+        let asr_name = asr.name.clone();
         let asr = registry.build_asr(asr)?;
         tracing::info!(
             stage = "llm",
@@ -81,9 +90,10 @@ impl AgentFactory {
         );
         let llm = registry.build_llm(llm)?;
         tracing::info!(stage = "tts", kind = %tts.kind, "constructing provider");
+        let tts_name = tts.name.clone();
         let tts = registry.build_tts(tts)?;
         Ok(Self::new(
-            asr, llm, tts, vad, voiceprint, tools, agents, pool,
+            asr, asr_name, llm, tts, tts_name, vad, voiceprint, tools, agents, pool,
         ))
     }
 
@@ -177,6 +187,8 @@ impl AgentFactory {
             entries,
             tools: Arc::new(tools),
             name: agent.name.clone(),
+            asr_name: self.asr_name.clone(),
+            tts_name: self.tts_name.clone(),
             system_prompt: SystemPrompt::new(&agent.persona_prompt),
             capture: Some(audio as Arc<dyn Capture>),
             speaker_matcher,

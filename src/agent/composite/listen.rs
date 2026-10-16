@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 
 use super::{ASR_CHANNEL_CAPACITY, Cancellable, CompositeAgent, ListenEvent};
 use crate::agent::{
@@ -33,7 +33,9 @@ const SPEAKER_WAIT: Duration = Duration::from_millis(250);
 
 /// What one per-utterance ASR task reports back to the listening stage,
 /// tagged with its epoch so superseded results are dropped. The final
-/// carries the speaker the task resolved (and stored) for its utterance.
+/// carries the speaker the task resolved (and stored) for its utterance
+/// and the utterance's `asr` span — the handle the reply stage parents
+/// the turn's `invoke_agent` on.
 enum AsrUpdate {
     Partial {
         epoch: u64,
@@ -43,6 +45,7 @@ enum AsrUpdate {
         epoch: u64,
         text: String,
         speaker: Option<i64>,
+        asr: tracing::Span,
     },
     Error {
         epoch: u64,
@@ -169,9 +172,11 @@ pub(super) async fn listen_stage(
                         }
                     }
                     AsrUpdate::Final {
-                        text, speaker, ..
+                        text,
+                        speaker,
+                        asr,
+                        ..
                     } => {
-                        info!(conversation_id = %session.conversation_id, %text, "asr result");
                         if out_tx
                             .send(AgentOutput::Stt {
                                 text: text.clone(),
@@ -194,6 +199,7 @@ pub(super) async fn listen_stage(
                                 text,
                                 speaker,
                                 turn,
+                                asr,
                             })
                             .await
                             .is_err()
@@ -202,7 +208,6 @@ pub(super) async fn listen_stage(
                         }
                     }
                     AsrUpdate::Error { message, .. } => {
-                        warn!(conversation_id = %session.conversation_id, %message, "asr failed");
                         if out_tx.send(AgentOutput::Error { message }).await.is_err() {
                             break;
                         }
@@ -229,6 +234,7 @@ fn listen_deps<'a>(
     ListenDeps {
         session,
         asr: &agent.asr,
+        asr_name: &agent.asr_name,
         asr_tx,
         memory: &agent.memory,
         capture: agent.capture.as_deref(),
@@ -239,6 +245,7 @@ fn listen_deps<'a>(
 struct ListenDeps<'a> {
     session: &'a AgentSession,
     asr: &'a Arc<dyn Asr>,
+    asr_name: &'a str,
     asr_tx: &'a mpsc::Sender<AsrUpdate>,
     memory: &'a Arc<dyn Memory>,
     capture: Option<&'a dyn Capture>,
@@ -332,17 +339,36 @@ fn spawn_asr(
     let (tx, rx) = mpsc::channel::<Vec<f32>>(ASR_CHANNEL_CAPACITY);
     let audio: AudioStream = recv_stream(rx);
     let cancel = CancellationToken::new();
-    let handle = tokio::spawn(run_asr(
-        deps.asr.clone(),
-        audio,
-        deps.asr_tx.clone(),
-        deps.session.clone(),
-        epoch,
-        cancel.clone(),
-        deps.memory.clone(),
-        capture.clone(),
-        speaker_rx,
-    ));
+    // One span per utterance recognition, opened at SpeechStart: a root
+    // span — the recognition precedes any turn — covering the whole
+    // `transcribe` session (audio in, final or error out) and with it the
+    // utterance window the capture and voiceprint tap ride. The handle
+    // rides the final to `spawn_turn`, which parents the turn's
+    // `invoke_agent` on it, so the utterance's trace chains recognition →
+    // reply → speech; the listening stage holds a clone until then.
+    let span = tracing::info_span!(
+        "asr",
+        conversation_id = deps.session.conversation_id,
+        asr.provider.name = %deps.asr_name,
+        asr.transcript = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    let handle = tokio::spawn(
+        run_asr(
+            deps.asr.clone(),
+            audio,
+            deps.asr_tx.clone(),
+            deps.session.clone(),
+            epoch,
+            cancel.clone(),
+            deps.memory.clone(),
+            capture.clone(),
+            speaker_rx,
+            span.clone(),
+        )
+        .instrument(span),
+    );
     AsrSlot {
         tx,
         task: Cancellable::new(cancel, handle),
@@ -362,6 +388,7 @@ async fn run_asr(
     memory: Arc<dyn Memory>,
     capture: Option<UtteranceCapture>,
     speaker_rx: Option<SpeakerResult>,
+    span: tracing::Span,
 ) {
     let mut events = asr.transcribe(audio, cancel.clone());
     while let Some(result) = events.next().await {
@@ -375,6 +402,10 @@ async fn run_asr(
                 // utterance's, however far behind the final lags. The
                 // speaker resolves before the store: the row carries the
                 // same attribution the turn is labeled with.
+                if !text.is_empty() && crate::telemetry::content_enabled() {
+                    span.record("asr.transcript", text.as_str());
+                }
+                info!(conversation_id = %session.conversation_id, %text, "asr result");
                 let mut speaker = None;
                 if !cancel.is_cancelled() && !text.is_empty() {
                     speaker = resolve_speaker(speaker_rx).await;
@@ -396,14 +427,20 @@ async fn run_asr(
                         epoch,
                         text,
                         speaker,
+                        asr: span,
                     })
                     .await;
                 return;
             }
-            Err(err) => AsrUpdate::Error {
-                epoch,
-                message: err.to_string(),
-            },
+            Err(err) => {
+                warn!(conversation_id = %session.conversation_id, %err, "asr failed");
+                span.record("error.type", "failed");
+                span.record("otel.status_code", "error");
+                AsrUpdate::Error {
+                    epoch,
+                    message: err.to_string(),
+                }
+            }
         };
         if asr_tx.send(message).await.is_err() {
             debug!(conversation_id = %session.conversation_id, "asr output closed");

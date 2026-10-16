@@ -23,6 +23,7 @@ struct TurnDeps {
     llm: Arc<dyn Llm>,
     tools: Arc<ToolSet>,
     tts: Arc<dyn Tts>,
+    tts_name: String,
     conversation_id: i64,
 }
 
@@ -245,6 +246,7 @@ pub(super) async fn reply_stage(
                         text,
                         speaker,
                         turn: token,
+                        asr,
                     } => {
                         if reply
                             .cut(&agent.memory, &session, &out_tx, Cut::Superseded)
@@ -279,6 +281,7 @@ pub(super) async fn reply_stage(
                             turn_id,
                             token,
                             events_tx.clone(),
+                            &asr,
                         ));
                     }
                 }
@@ -326,7 +329,6 @@ pub(super) async fn reply_stage(
                         }
                     }
                     ReplyEvent::SpeakError { message } => {
-                        warn!(conversation_id = %session.conversation_id, %message, "tts failed");
                         if reply
                             .cut(&agent.memory, &session, &out_tx, Cut::TtsFailed { message })
                             .await
@@ -377,6 +379,7 @@ pub(super) async fn reply_stage(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_turn(
     agent: &CompositeAgent,
     session: &AgentSession,
@@ -385,21 +388,26 @@ fn spawn_turn(
     turn_id: u64,
     token: CancellationToken,
     events: mpsc::Sender<(u64, ReplyEvent)>,
+    asr: &tracing::Span,
 ) -> Turn {
     let deps = TurnDeps {
         llm: agent.llm.clone(),
         tools: agent.tools.clone(),
         tts: agent.tts.clone(),
+        tts_name: agent.tts_name.clone(),
         conversation_id: session.conversation_id,
     };
-    // One GenAI-conventions span per conversational turn. The handle rides
-    // into the turn task — instrumenting its future puts it in the ambient
-    // context, which is how the round's `chat` spans (created without an
-    // explicit parent inside the loop) become its children; the speak leg
-    // is instrumented with the same handle. A failed turn records the
-    // error status onto it. The macro name is the conventions' composed
-    // shape — no `otel.name` needed.
+    // One GenAI-conventions span per conversational turn, explicitly
+    // parented on its utterance's `asr` span — the recognition is the
+    // turn's cause, and the per-utterance trace chains recognition →
+    // reply → speech. The handle rides into the turn task — instrumenting
+    // its future puts it in the ambient context, which is how the round's
+    // `chat` spans (created without an explicit parent inside the loop)
+    // become its children; the speak leg is instrumented with the same
+    // handle. A failed turn records the error status onto it. The macro
+    // name is the conventions' composed shape — no `otel.name` needed.
     let span = tracing::info_span!(
+        parent: asr.id(),
         "invoke_agent",
         gen_ai.operation.name = "invoke_agent",
         gen_ai.agent.name = %agent.name,
@@ -448,6 +456,7 @@ async fn run_turn(
             turn_id,
             speak_token.clone(),
             conversation_id,
+            deps.tts_name.clone(),
         )
         .instrument(span.clone()),
     );
@@ -631,8 +640,10 @@ async fn emit(
 }
 
 /// The speaking leg: maps one `tts.synthesize` call's events into the turn
-/// event stream. A cancelled token exits silently (no TtsStop); a natural
-/// `Done` emits `TtsStop`, an error emits `SpeakError`.
+/// event stream. The `tts` span — a child of this turn's `invoke_agent` —
+/// wraps the synthesis; the inner future is instrumented with it so the
+/// leg's events carry it. A cancelled token exits silently (no TtsStop); a
+/// natural `Done` emits `TtsStop`, an error emits `SpeakError`.
 async fn speak_stage(
     tts: Arc<dyn Tts>,
     text_rx: mpsc::Receiver<String>,
@@ -640,9 +651,43 @@ async fn speak_stage(
     turn_id: u64,
     cancel: CancellationToken,
     conversation_id: i64,
+    tts_name: String,
+) {
+    let span = tracing::info_span!(
+        "tts",
+        conversation_id,
+        tts.provider.name = %tts_name,
+        tts.input.text = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    speak_stream(
+        tts,
+        text_rx,
+        events,
+        turn_id,
+        cancel,
+        conversation_id,
+        span.clone(),
+    )
+    .instrument(span)
+    .await;
+}
+
+async fn speak_stream(
+    tts: Arc<dyn Tts>,
+    text_rx: mpsc::Receiver<String>,
+    events: mpsc::Sender<(u64, ReplyEvent)>,
+    turn_id: u64,
+    cancel: CancellationToken,
+    conversation_id: i64,
+    span: tracing::Span,
 ) {
     let text: TextStream = recv_stream(text_rx);
     let mut synth = tts.synthesize(text, cancel.clone());
+    // The provider echoes the synthesized text back sentence by sentence —
+    // that echo is what the opt-in content attribute records.
+    let mut spoken = String::new();
     loop {
         let item = tokio::select! {
             item = synth.next() => match item {
@@ -652,14 +697,27 @@ async fn speak_stage(
             _ = cancel.cancelled() => return,
         };
         let event = match item {
-            Ok(TtsEvent::SentenceStart { text }) => ReplyEvent::SentenceStart { text },
+            Ok(TtsEvent::SentenceStart { text }) => {
+                spoken.push_str(&text);
+                ReplyEvent::SentenceStart { text }
+            }
             Ok(TtsEvent::Subtitle(subtitle)) => ReplyEvent::Subtitle { subtitle },
             Ok(TtsEvent::Audio(samples)) => ReplyEvent::Audio { samples },
             Ok(TtsEvent::Done) => {
+                if crate::telemetry::content_enabled() {
+                    span.record("tts.input.text", spoken.as_str());
+                }
+                info!(conversation_id, "tts finished");
                 let _ = events.send((turn_id, ReplyEvent::TtsStop)).await;
                 return;
             }
             Err(err) => {
+                warn!(conversation_id, %err, "tts failed");
+                span.record("error.type", "failed");
+                span.record("otel.status_code", "error");
+                if crate::telemetry::content_enabled() {
+                    span.record("tts.input.text", spoken.as_str());
+                }
                 let _ = events
                     .send((
                         turn_id,

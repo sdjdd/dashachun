@@ -1,7 +1,9 @@
 //! The boot subscriber: human-readable by default, JSON under
 //! `TELEMETRY_JSON`. The conventions spans (telemetry.md) are plain
 //! `tracing` spans — this module is where the future
-//! `tracing-opentelemetry` bridge mounts, beside the same subscriber.
+//! `tracing-opentelemetry` bridge mounts, beside the same subscriber. It
+//! also owns the boot env flags the span record sites read:
+//! `TELEMETRY_CONTENT` gates the opt-in content attributes.
 
 use std::env;
 
@@ -20,7 +22,7 @@ pub fn init() {
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
-    if json_enabled(env::var("TELEMETRY_JSON").ok()) {
+    if flag_enabled(env::var("TELEMETRY_JSON").ok()) {
         tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
@@ -30,27 +32,35 @@ pub fn init() {
     }
 }
 
-/// `TELEMETRY_JSON` parses as a plain `bool` — an unset or unparseable
-/// value counts as the default `false` (human-readable), the same pattern
-/// as the other boot envs.
-fn json_enabled(value: Option<String>) -> bool {
+/// Boot env booleans parse as a plain `bool` — an unset or unparseable
+/// value counts as the default `false`, the same pattern as the other
+/// boot envs.
+fn flag_enabled(value: Option<String>) -> bool {
     value.and_then(|value| value.parse().ok()).unwrap_or(false)
+}
+
+/// `TELEMETRY_CONTENT` gates the opt-in content attributes (telemetry.md):
+/// the speech spans' `asr.transcript` / `tts.input.text` and, when they
+/// arrive, the chat span's message attributes. Read at the record sites
+/// across the process; boot-level env — a restart applies it.
+pub(crate) fn content_enabled() -> bool {
+    flag_enabled(env::var("TELEMETRY_CONTENT").ok())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::json_enabled;
+    use super::flag_enabled;
 
     #[test]
-    fn unset_or_garbage_stays_human_readable() {
-        assert!(!json_enabled(None));
-        assert!(!json_enabled(Some("false".into())));
-        assert!(!json_enabled(Some("garbage".into())));
-        assert!(!json_enabled(Some("".into())));
+    fn unset_or_garbage_stays_off() {
+        assert!(!flag_enabled(None));
+        assert!(!flag_enabled(Some("false".into())));
+        assert!(!flag_enabled(Some("garbage".into())));
+        assert!(!flag_enabled(Some("".into())));
     }
 
     #[test]
-    fn true_switches_to_json() {
-        assert!(json_enabled(Some("true".into())));
+    fn true_switches_on() {
+        assert!(flag_enabled(Some("true".into())));
     }
 }
