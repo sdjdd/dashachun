@@ -3,6 +3,8 @@ import { LoaderCircle } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { ErrorState, FormError, LoadingState } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -113,7 +115,7 @@ function PasswordCard() {
               <p className="text-sm text-destructive">{errors.confirm_password.message}</p>
             )}
           </div>
-          {errors.root && <p className="text-sm text-destructive">{errors.root.message}</p>}
+          {errors.root?.message && <FormError message={errors.root.message} />}
           {saved && <p className="text-sm text-muted-foreground">{copy.account.password.saved}</p>}
           <Button
             type="submit"
@@ -134,19 +136,30 @@ function SessionsCard() {
 
   if (sessions.isPending) {
     return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{copy.account.sessions.title}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <LoadingState className="py-8" />
+        </CardContent>
+      </Card>
     );
   }
   if (sessions.isError) {
     return (
-      <div className="grid place-items-center gap-3 py-16">
-        <p className="text-sm text-destructive">{describeSessionError(sessions.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => sessions.refetch()}>
-          {copy.agents.retry}
-        </Button>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{copy.account.sessions.title}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ErrorState
+            message={describeSessionError(sessions.error)}
+            onRetry={() => sessions.refetch()}
+            className="py-8"
+          />
+        </CardContent>
+      </Card>
     );
   }
 
@@ -178,9 +191,9 @@ function SessionRow({ session }: { session: DeviceSession }) {
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{session.ip}</span>
           {session.current && (
-            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
+            <Badge className="bg-primary/10 text-primary">
               {copy.account.sessions.currentBadge}
-            </span>
+            </Badge>
           )}
         </div>
         <p className="max-w-xl truncate text-xs text-muted-foreground" title={session.user_agent}>
@@ -215,7 +228,7 @@ function SessionRow({ session }: { session: DeviceSession }) {
               {copy.account.sessions.revokeDescription}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <FormError message={error} />}
           <AlertDialogFooter>
             <AlertDialogCancel>{copy.agents.cancel}</AlertDialogCancel>
             <AlertDialogAction

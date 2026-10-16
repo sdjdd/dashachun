@@ -4,13 +4,14 @@ export const copy = {
   },
   auth: {
     login: {
+      title: "登录",
       subtitle: "登录以继续",
       submit: "登录",
       switchPrompt: "还没有账号？",
       switchLink: "注册",
     },
     register: {
-      title: "注册账号",
+      title: "注册",
       subtitle: "创建新的账号",
       submit: "注册",
       switchPrompt: "已有账号？",
@@ -19,6 +20,8 @@ export const copy = {
     fields: {
       username: "用户名",
       password: "密码",
+      showPassword: "显示密码",
+      hidePassword: "隐藏密码",
     },
     errors: {
       invalidCredentials: "用户名或密码错误",

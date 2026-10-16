@@ -1,8 +1,10 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { LoaderCircle, Pencil, Trash2 } from "lucide-react";
+import { LoaderCircle, Pencil, Plug, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { EmptyState, ErrorState, FormError, LoadingState } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -97,20 +99,14 @@ function ProvidersSection() {
   const providers = useProviders();
 
   if (providers.isPending) {
-    return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (providers.isError) {
     return (
-      <div className="grid place-items-center gap-3 py-16">
-        <p className="text-sm text-destructive">{describeSettingsError(providers.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => providers.refetch()}>
-          {copy.agents.retry}
-        </Button>
-      </div>
+      <ErrorState
+        message={describeSettingsError(providers.error)}
+        onRetry={() => providers.refetch()}
+      />
     );
   }
 
@@ -141,12 +137,14 @@ function ProviderTypeCard({ type, rows }: { type: ProviderType; rows: ProviderRo
         </CardAction>
       </CardHeader>
       <CardContent>
-        {actionError && <p className="mb-3 text-sm text-destructive">{actionError}</p>}
+        {actionError && <FormError className="mb-3" message={actionError} />}
         {rows.length === 0 ? (
-          <div className="grid place-items-center gap-1 py-8 text-center">
-            <p className="text-sm text-muted-foreground">{copy.settings.providers.empty}</p>
-            <p className="text-xs text-muted-foreground">{copy.settings.providers.emptyHint}</p>
-          </div>
+          <EmptyState
+            icon={Plug}
+            text={copy.settings.providers.empty}
+            hint={copy.settings.providers.emptyHint}
+            className="py-8"
+          />
         ) : (
           <ul className="divide-y">
             {rows.map((row) => (
@@ -180,9 +178,7 @@ function ProviderRowItem({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{row.name}</span>
           {row.selected && (
-            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-xs text-primary">
-              {copy.settings.providers.selected}
-            </span>
+            <Badge className="bg-primary/10 text-primary">{copy.settings.providers.selected}</Badge>
           )}
         </div>
         <p className="text-xs text-muted-foreground">
@@ -230,7 +226,7 @@ function ProviderRowItem({
               {copy.settings.providers.deleteDescription(row.name)}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <FormError message={error} />}
           <AlertDialogFooter>
             <AlertDialogCancel>{copy.agents.cancel}</AlertDialogCancel>
             <AlertDialogAction
@@ -419,7 +415,7 @@ function ProviderDialog({ type, row }: { type: ProviderType; row?: ProviderRow }
               </div>
             );
           })}
-          {errors.root && <p className="text-sm text-destructive">{errors.root.message}</p>}
+          {errors.root?.message && <FormError message={errors.root.message} />}
           <DialogFooter>
             <DialogClose render={<Button variant="outline" type="button" />}>
               {copy.agents.cancel}
@@ -460,8 +456,8 @@ function OtaCard() {
         <CardHeader>
           <CardTitle className="text-base">{copy.settings.ota.title}</CardTitle>
         </CardHeader>
-        <CardContent className="grid place-items-center py-8 text-muted-foreground">
-          <LoaderCircle className="animate-spin" />
+        <CardContent>
+          <LoadingState className="py-8" />
         </CardContent>
       </Card>
     );
@@ -472,11 +468,12 @@ function OtaCard() {
         <CardHeader>
           <CardTitle className="text-base">{copy.settings.ota.title}</CardTitle>
         </CardHeader>
-        <CardContent className="grid place-items-center gap-3 py-8">
-          <p className="text-sm text-destructive">{describeSettingsError(ota.error)}</p>
-          <Button variant="outline" size="sm" onClick={() => ota.refetch()}>
-            {copy.agents.retry}
-          </Button>
+        <CardContent>
+          <ErrorState
+            message={describeSettingsError(ota.error)}
+            onRetry={() => ota.refetch()}
+            className="py-8"
+          />
         </CardContent>
       </Card>
     );
@@ -530,7 +527,7 @@ function OtaCard() {
               <p className="text-sm text-destructive">{errors.timezone_offset.message}</p>
             )}
           </div>
-          {errors.root && <p className="text-sm text-destructive">{errors.root.message}</p>}
+          {errors.root?.message && <FormError message={errors.root.message} />}
           {saved && <p className="text-sm text-muted-foreground">{copy.settings.ota.saved}</p>}
           <Button
             type="submit"
@@ -568,8 +565,8 @@ function CaptureCard() {
         <CardHeader>
           <CardTitle className="text-base">{copy.settings.capture.title}</CardTitle>
         </CardHeader>
-        <CardContent className="grid place-items-center py-8 text-muted-foreground">
-          <LoaderCircle className="animate-spin" />
+        <CardContent>
+          <LoadingState className="py-8" />
         </CardContent>
       </Card>
     );
@@ -580,11 +577,12 @@ function CaptureCard() {
         <CardHeader>
           <CardTitle className="text-base">{copy.settings.capture.title}</CardTitle>
         </CardHeader>
-        <CardContent className="grid place-items-center gap-3 py-8">
-          <p className="text-sm text-destructive">{describeSettingsError(capture.error)}</p>
-          <Button variant="outline" size="sm" onClick={() => capture.refetch()}>
-            {copy.agents.retry}
-          </Button>
+        <CardContent>
+          <ErrorState
+            message={describeSettingsError(capture.error)}
+            onRetry={() => capture.refetch()}
+            className="py-8"
+          />
         </CardContent>
       </Card>
     );
@@ -629,7 +627,7 @@ function CaptureCard() {
             />
             {errors.bucket && <p className="text-sm text-destructive">{errors.bucket.message}</p>}
           </div>
-          {errors.root && <p className="text-sm text-destructive">{errors.root.message}</p>}
+          {errors.root?.message && <FormError message={errors.root.message} />}
           {saved && <p className="text-sm text-muted-foreground">{copy.settings.capture.saved}</p>}
           <Button
             type="submit"
