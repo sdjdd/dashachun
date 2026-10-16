@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { LoaderCircle } from "lucide-react";
+import { CheckCircle2, Eye, EyeOff, LoaderCircle, Lock, LogOut, Monitor } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -7,7 +7,12 @@ import { ErrorState, FormError, LoadingState } from "@/components/states";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
 import {
   AlertDialog,
@@ -50,6 +55,7 @@ function AccountPage() {
 function PasswordCard() {
   const change = useChangePassword();
   const [saved, setSaved] = useState(false);
+  const [show, setShow] = useState(false);
   const form = useForm<ChangePasswordValues>({
     resolver: zodResolver(changePasswordSchema),
     defaultValues: { current_password: "", new_password: "", confirm_password: "" },
@@ -78,45 +84,98 @@ function PasswordCard() {
         <form onSubmit={form.handleSubmit(onSubmit)} className="grid max-w-sm gap-4" noValidate>
           <div className="grid gap-2">
             <Label htmlFor="current_password">{copy.account.fields.currentPassword}</Label>
-            <Input
-              id="current_password"
-              type="password"
-              autoComplete="current-password"
-              {...form.register("current_password")}
-              aria-invalid={!!errors.current_password}
-            />
+            <InputGroup>
+              <InputGroupAddon>
+                <Lock />
+              </InputGroupAddon>
+              <InputGroupInput
+                id="current_password"
+                type={show ? "text" : "password"}
+                autoComplete="current-password"
+                {...form.register("current_password")}
+                aria-invalid={!!errors.current_password}
+              />
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={show ? copy.auth.fields.hidePassword : copy.auth.fields.showPassword}
+                  aria-pressed={show}
+                  onClick={() => setShow((v) => !v)}
+                >
+                  {show ? <EyeOff /> : <Eye />}
+                </InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
             {errors.current_password && (
               <p className="text-sm text-destructive">{errors.current_password.message}</p>
             )}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="new_password">{copy.account.fields.newPassword}</Label>
-            <Input
-              id="new_password"
-              type="password"
-              autoComplete="new-password"
-              {...form.register("new_password")}
-              aria-invalid={!!errors.new_password}
-            />
+            <InputGroup>
+              <InputGroupAddon>
+                <Lock />
+              </InputGroupAddon>
+              <InputGroupInput
+                id="new_password"
+                type={show ? "text" : "password"}
+                autoComplete="new-password"
+                {...form.register("new_password")}
+                aria-invalid={!!errors.new_password}
+              />
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={show ? copy.auth.fields.hidePassword : copy.auth.fields.showPassword}
+                  aria-pressed={show}
+                  onClick={() => setShow((v) => !v)}
+                >
+                  {show ? <EyeOff /> : <Eye />}
+                </InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
             {errors.new_password && (
               <p className="text-sm text-destructive">{errors.new_password.message}</p>
             )}
           </div>
           <div className="grid gap-2">
             <Label htmlFor="confirm_password">{copy.account.fields.confirmPassword}</Label>
-            <Input
-              id="confirm_password"
-              type="password"
-              autoComplete="new-password"
-              {...form.register("confirm_password")}
-              aria-invalid={!!errors.confirm_password}
-            />
+            <InputGroup>
+              <InputGroupAddon>
+                <Lock />
+              </InputGroupAddon>
+              <InputGroupInput
+                id="confirm_password"
+                type={show ? "text" : "password"}
+                autoComplete="new-password"
+                {...form.register("confirm_password")}
+                aria-invalid={!!errors.confirm_password}
+              />
+              <InputGroupAddon align="inline-end">
+                <InputGroupButton
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={show ? copy.auth.fields.hidePassword : copy.auth.fields.showPassword}
+                  aria-pressed={show}
+                  onClick={() => setShow((v) => !v)}
+                >
+                  {show ? <EyeOff /> : <Eye />}
+                </InputGroupButton>
+              </InputGroupAddon>
+            </InputGroup>
             {errors.confirm_password && (
               <p className="text-sm text-destructive">{errors.confirm_password.message}</p>
             )}
           </div>
           {errors.root?.message && <FormError message={errors.root.message} />}
-          {saved && <p className="text-sm text-muted-foreground">{copy.account.password.saved}</p>}
+          {saved && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <CheckCircle2 className="size-4 text-primary" />
+              {copy.account.password.saved}
+            </p>
+          )}
           <Button
             type="submit"
             disabled={form.formState.isSubmitting}
@@ -186,37 +245,45 @@ function SessionRow({ session }: { session: DeviceSession }) {
   const [error, setError] = useState<string | null>(null);
 
   return (
-    <li className="flex items-start justify-between gap-4 py-3 first:pt-0 last:pb-0">
-      <div className="grid min-w-0 gap-0.5">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">{session.ip}</span>
-          {session.current && (
-            <Badge className="bg-primary/10 text-primary">
-              {copy.account.sessions.currentBadge}
-            </Badge>
-          )}
+    <li className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground">
+          <Monitor className="size-4" />
         </div>
-        <p className="max-w-xl truncate text-xs text-muted-foreground" title={session.user_agent}>
-          {session.user_agent}
-        </p>
-        <p className="text-xs text-muted-foreground">
-          {copy.account.sessions.lastActive(
-            new Date(session.last_active_at).toLocaleString("zh-CN"),
-          )}
-          {" · "}
-          {copy.account.sessions.loggedIn(new Date(session.created_at).toLocaleDateString("zh-CN"))}
-        </p>
+        <div className="grid min-w-0 gap-0.5">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium">{session.ip}</span>
+            {session.current && (
+              <Badge className="bg-primary/10 text-primary">
+                {copy.account.sessions.currentBadge}
+              </Badge>
+            )}
+          </div>
+          <p className="truncate text-xs text-muted-foreground" title={session.user_agent}>
+            {session.user_agent}
+          </p>
+          <p className="text-xs text-muted-foreground">
+            {copy.account.sessions.lastActive(
+              new Date(session.last_active_at).toLocaleString("zh-CN"),
+            )}
+            {" · "}
+            {copy.account.sessions.loggedIn(
+              new Date(session.created_at).toLocaleDateString("zh-CN"),
+            )}
+          </p>
+        </div>
       </div>
       {!session.current && (
         <Button
           variant="ghost"
-          size="sm"
+          size="icon-sm"
+          aria-label={copy.account.sessions.revoke}
           onClick={() => {
             setError(null);
             setConfirmOpen(true);
           }}
         >
-          {copy.account.sessions.revoke}
+          <LogOut className="size-4" />
         </Button>
       )}
 

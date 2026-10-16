@@ -1,5 +1,18 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { LoaderCircle, Pencil, Plug, Trash2 } from "lucide-react";
+import {
+  Brain,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  LoaderCircle,
+  Lock,
+  Mic,
+  Pencil,
+  Plug,
+  Trash2,
+  Volume2,
+} from "lucide-react";
+import type { ComponentProps } from "react";
 import { useEffect, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -34,6 +47,12 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -124,13 +143,23 @@ function ProvidersSection() {
   );
 }
 
+const typeIcons = {
+  asr: Mic,
+  llm: Brain,
+  tts: Volume2,
+} as Record<ProviderType, typeof Mic>;
+
 function ProviderTypeCard({ type, rows }: { type: ProviderType; rows: ProviderRow[] }) {
   const [actionError, setActionError] = useState<string | null>(null);
+  const Icon = typeIcons[type];
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{copy.settings.providerTypes[type]}</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Icon className="size-4 text-primary" />
+          {copy.settings.providerTypes[type]}
+        </CardTitle>
         <CardDescription>{copy.settings.typeDescriptions[type]}</CardDescription>
         <CardAction>
           <ProviderDialog type={type} />
@@ -173,10 +202,10 @@ function ProviderRowItem({
   const activating = activate.isPending && activate.variables === row.id;
 
   return (
-    <li className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0">
-      <div className="grid gap-0.5">
+    <li className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0">
+      <div className="grid min-w-0 gap-0.5">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">{row.name}</span>
+          <span className="truncate text-sm font-medium">{row.name}</span>
           {row.selected && (
             <Badge className="bg-primary/10 text-primary">{copy.settings.providers.selected}</Badge>
           )}
@@ -369,6 +398,27 @@ function ProviderDialog({ type, row }: { type: ProviderType; row?: ProviderRow }
           </div>
           {fields.map((spec) => {
             const label = copy.settings.providers.fieldLabels[spec.key] ?? spec.key;
+            const inputProps = {
+              id: `provider-${spec.key}`,
+              placeholder: spec.placeholderKey
+                ? copy.settings.providers.placeholders[spec.placeholderKey]
+                : undefined,
+              ...form.register(spec.key, {
+                validate: (value: string) => {
+                  const trimmed = (value ?? "").trim();
+                  if (spec.required && trimmed === "")
+                    return copy.settings.providers.validation.required(label);
+                  if (spec.number && trimmed !== "") {
+                    if (!/^\d+$/.test(trimmed))
+                      return copy.settings.providers.validation.notNumber(label);
+                    if (spec.min !== undefined && Number(trimmed) < spec.min)
+                      return copy.settings.providers.validation.minNumber(label, spec.min);
+                  }
+                  return true;
+                },
+              }),
+              "aria-invalid": !!errors[spec.key],
+            } satisfies ComponentProps<typeof InputGroupInput>;
             return (
               <div key={spec.key} className="grid gap-2">
                 <div className="flex items-baseline justify-between">
@@ -379,31 +429,7 @@ function ProviderDialog({ type, row }: { type: ProviderType; row?: ProviderRow }
                     </span>
                   )}
                 </div>
-                <Input
-                  id={`provider-${spec.key}`}
-                  type={spec.secret ? "password" : "text"}
-                  placeholder={
-                    spec.placeholderKey
-                      ? copy.settings.providers.placeholders[spec.placeholderKey]
-                      : undefined
-                  }
-                  autoComplete={spec.secret ? "off" : undefined}
-                  {...form.register(spec.key, {
-                    validate: (value: string) => {
-                      const trimmed = (value ?? "").trim();
-                      if (spec.required && trimmed === "")
-                        return copy.settings.providers.validation.required(label);
-                      if (spec.number && trimmed !== "") {
-                        if (!/^\d+$/.test(trimmed))
-                          return copy.settings.providers.validation.notNumber(label);
-                        if (spec.min !== undefined && Number(trimmed) < spec.min)
-                          return copy.settings.providers.validation.minNumber(label, spec.min);
-                      }
-                      return true;
-                    },
-                  })}
-                  aria-invalid={!!errors[spec.key]}
-                />
+                {spec.secret ? <SecretField {...inputProps} /> : <Input {...inputProps} />}
                 {errors[spec.key] && (
                   <p className="text-sm text-destructive">{errors[spec.key]?.message}</p>
                 )}
@@ -528,7 +554,12 @@ function OtaCard() {
             )}
           </div>
           {errors.root?.message && <FormError message={errors.root.message} />}
-          {saved && <p className="text-sm text-muted-foreground">{copy.settings.ota.saved}</p>}
+          {saved && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <CheckCircle2 className="size-4 text-primary" />
+              {copy.settings.ota.saved}
+            </p>
+          )}
           <Button
             type="submit"
             disabled={form.formState.isSubmitting}
@@ -628,7 +659,12 @@ function CaptureCard() {
             {errors.bucket && <p className="text-sm text-destructive">{errors.bucket.message}</p>}
           </div>
           {errors.root?.message && <FormError message={errors.root.message} />}
-          {saved && <p className="text-sm text-muted-foreground">{copy.settings.capture.saved}</p>}
+          {saved && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <CheckCircle2 className="size-4 text-primary" />
+              {copy.settings.capture.saved}
+            </p>
+          )}
           <Button
             type="submit"
             disabled={form.formState.isSubmitting}
@@ -640,5 +676,28 @@ function CaptureCard() {
         </form>
       </CardContent>
     </Card>
+  );
+}
+
+function SecretField(props: ComponentProps<typeof InputGroupInput>) {
+  const [show, setShow] = useState(false);
+  return (
+    <InputGroup>
+      <InputGroupAddon>
+        <Lock />
+      </InputGroupAddon>
+      <InputGroupInput {...props} type={show ? "text" : "password"} autoComplete="off" />
+      <InputGroupAddon align="inline-end">
+        <InputGroupButton
+          variant="ghost"
+          size="icon-sm"
+          aria-label={show ? copy.auth.fields.hidePassword : copy.auth.fields.showPassword}
+          aria-pressed={show}
+          onClick={() => setShow((v) => !v)}
+        >
+          {show ? <EyeOff /> : <Eye />}
+        </InputGroupButton>
+      </InputGroupAddon>
+    </InputGroup>
   );
 }
