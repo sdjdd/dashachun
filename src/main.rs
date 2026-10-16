@@ -168,6 +168,7 @@ async fn main() {
         factory.shutdown().await;
     }
     tracing::info!("server stopped");
+    dashachun::telemetry::shutdown();
 }
 
 /// Resolves the static web console directory (`STATIC_DIR`). A set-but-missing
