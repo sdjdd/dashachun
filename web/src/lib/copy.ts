@@ -198,7 +198,6 @@ export const copy = {
     editTitle: "基本信息",
     editSubmit: "保存",
     saved: "已保存",
-    dangerTitle: "危险区",
     deleteAction: "删除智能体",
     deleteTitle: "删除智能体",
     deleteDescription: (name: string) =>
@@ -303,7 +302,9 @@ export const copy = {
       ended: "已结束",
       loadEarlierConversations: "加载更早会话",
       loadEarlierMessages: "加载更早消息",
-      transcriptTitle: "转录",
+      transcriptOf: (id: number) => `转录 · #${id}`,
+      close: "关闭",
+      deviceLabel: (id: number) => `设备 #${id}`,
       deleteTitle: "删除会话",
       deleteDescription: "确认删除这条会话？转录与录音记录将一并删除，且无法恢复。",
       deleteConfirm: "确认删除",
@@ -325,6 +326,8 @@ export const copy = {
     },
   },
   common: {
+    retry: "重试",
+    close: "关闭",
     requestFailed: (status: number) => `请求失败（HTTP ${status}）`,
     network: "网络错误，请确认服务已启动后重试",
   },

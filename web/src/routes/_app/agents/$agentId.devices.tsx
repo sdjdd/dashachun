@@ -1,8 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { LoaderCircle } from "lucide-react";
+import { LoaderCircle, Smartphone } from "lucide-react";
 import { useState } from "react";
+import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -49,37 +50,32 @@ function DevicesTab() {
   const devices = useDevices(id);
 
   if (devices.isPending) {
-    return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (devices.isError) {
     return (
-      <div className="grid place-items-center gap-3 py-16">
-        <p className="text-sm text-destructive">{describeDeviceError(devices.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => devices.refetch()}>
-          {copy.agents.retry}
-        </Button>
-      </div>
+      <ErrorState message={describeDeviceError(devices.error)} onRetry={() => devices.refetch()} />
     );
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{copy.agents.devices.listTitle}</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Smartphone className="size-4 text-muted-foreground" />
+          {copy.agents.devices.listTitle}
+        </CardTitle>
         <CardAction>
           <BindDialog agentId={id} />
         </CardAction>
       </CardHeader>
       <CardContent>
         {devices.data.length === 0 ? (
-          <div className="grid place-items-center gap-1 py-8 text-center">
-            <p className="text-sm text-muted-foreground">{copy.agents.devices.empty}</p>
-            <p className="text-xs text-muted-foreground">{copy.agents.devices.emptyHint}</p>
-          </div>
+          <EmptyState
+            icon={Smartphone}
+            text={copy.agents.devices.empty}
+            hint={copy.agents.devices.emptyHint}
+          />
         ) : (
           <ul className="divide-y">
             {devices.data.map((device) => (
@@ -175,9 +171,14 @@ function DeviceRow({ agentId, device }: { agentId: number; device: Device }) {
 
   return (
     <li className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0">
-      <div className="grid gap-0.5">
-        <span className="font-mono text-sm">{device.client_id}</span>
-        <span className="text-xs text-muted-foreground">{meta || "—"}</span>
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground">
+          <Smartphone className="size-4" />
+        </div>
+        <div className="grid min-w-0 gap-0.5">
+          <span className="truncate font-mono text-sm">{device.client_id}</span>
+          <span className="truncate text-xs text-muted-foreground">{meta || "—"}</span>
+        </div>
       </div>
       <div className="flex items-center gap-3">
         {device.activated_at && (

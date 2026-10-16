@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Check, LoaderCircle } from "lucide-react";
+import { AudioWaveform, Check, LoaderCircle, Pencil, Trash2 } from "lucide-react";
 import { useState } from "react";
 import {
   AlertDialog,
@@ -13,8 +13,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Dialog,
   DialogClose,
@@ -68,37 +76,36 @@ function SpeakersTab() {
   const speakers = useSpeakers(id);
 
   if (speakers.isPending) {
-    return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (speakers.isError) {
     return (
-      <div className="grid place-items-center gap-3 py-16">
-        <p className="text-sm text-destructive">{describeSpeakerError(speakers.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => speakers.refetch()}>
-          {copy.agents.retry}
-        </Button>
-      </div>
+      <ErrorState
+        message={describeSpeakerError(speakers.error)}
+        onRetry={() => speakers.refetch()}
+      />
     );
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{copy.agents.speakers.listTitle}</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <AudioWaveform className="size-4 text-muted-foreground" />
+          {copy.agents.speakers.listTitle}
+        </CardTitle>
+        <CardDescription>{copy.agents.speakers.listDescription}</CardDescription>
         <CardAction>
           <EnrollDialog agentId={id} />
         </CardAction>
       </CardHeader>
       <CardContent>
         {speakers.data.length === 0 ? (
-          <div className="grid place-items-center gap-1 py-8 text-center">
-            <p className="text-sm text-muted-foreground">{copy.agents.speakers.empty}</p>
-            <p className="text-xs text-muted-foreground">{copy.agents.speakers.emptyHint}</p>
-          </div>
+          <EmptyState
+            icon={AudioWaveform}
+            text={copy.agents.speakers.empty}
+            hint={copy.agents.speakers.emptyHint}
+          />
         ) : (
           <ul className="divide-y">
             {speakers.data.map((speaker) => (
@@ -118,27 +125,34 @@ function SpeakerRow({ agentId, speaker }: { agentId: number; speaker: Speaker })
 
   return (
     <li className="flex flex-wrap items-center justify-between gap-2 py-3 first:pt-0 last:pb-0">
-      <div className="grid gap-0.5">
-        <span className="text-sm font-medium">{speaker.name}</span>
-        {speaker.description && (
-          <span className="text-sm text-muted-foreground">{speaker.description}</span>
-        )}
-        <span className="text-xs text-muted-foreground">
-          {copy.agents.speakers.samples(speaker.sample_count)} ·{" "}
-          {new Date(speaker.created_at).toLocaleDateString("zh-CN")}
-        </span>
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="grid size-9 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-medium text-primary">
+          {speaker.name.slice(0, 1)}
+        </div>
+        <div className="grid min-w-0 gap-0.5">
+          <span className="truncate text-sm font-medium">{speaker.name}</span>
+          {speaker.description && (
+            <span className="truncate text-sm text-muted-foreground">{speaker.description}</span>
+          )}
+          <span className="text-xs text-muted-foreground">
+            {copy.agents.speakers.samples(speaker.sample_count)} ·{" "}
+            {new Date(speaker.created_at).toLocaleDateString("zh-CN")}
+          </span>
+        </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <EditSpeakerDialog agentId={agentId} speaker={speaker} />
         <Button
-          variant="outline"
-          size="sm"
+          variant="ghost"
+          size="icon-sm"
+          className="text-muted-foreground hover:text-destructive"
+          aria-label={copy.agents.speakers.deleteTitle}
           onClick={() => {
             setError(null);
             setConfirmOpen(true);
           }}
         >
-          {copy.agents.speakers.deleteTitle}
+          <Trash2 className="size-4" />
         </Button>
       </div>
 
@@ -490,8 +504,10 @@ function EditSpeakerDialog({ agentId, speaker }: { agentId: number; speaker: Spe
         }
       }}
     >
-      <DialogTrigger render={<Button variant="outline" size="sm" />}>
-        {copy.agents.speakers.edit}
+      <DialogTrigger
+        render={<Button variant="ghost" size="icon-sm" aria-label={copy.agents.speakers.edit} />}
+      >
+        <Pencil className="size-4 text-muted-foreground" />
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>

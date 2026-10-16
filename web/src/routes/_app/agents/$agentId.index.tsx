@@ -1,10 +1,8 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Check, LoaderCircle } from "lucide-react";
+import { Check, LoaderCircle, PenLine, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -15,6 +13,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -40,16 +40,14 @@ function BasicTab() {
     return null;
   }
 
-  return (
-    <div className="grid gap-6">
-      <AgentEditCard agent={agent.data} />
-      <DangerZoneCard agent={agent.data} />
-    </div>
-  );
+  return <AgentEditCard agent={agent.data} />;
 }
 
 function AgentEditCard({ agent }: { agent: Agent }) {
+  const navigate = useNavigate();
   const update = useUpdateAgent();
+  const remove = useDeleteAgent();
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const form = useForm<AgentInput>({
     resolver: zodResolver(agentSchema),
     defaultValues: { name: agent.name, persona_prompt: agent.persona_prompt },
@@ -68,7 +66,10 @@ function AgentEditCard({ agent }: { agent: Agent }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{copy.agents.editTitle}</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <PenLine className="size-4 text-muted-foreground" />
+          {copy.agents.editTitle}
+        </CardTitle>
       </CardHeader>
       <form onSubmit={form.handleSubmit(onSubmit)} className="grid gap-4" noValidate>
         <CardContent className="grid gap-4">
@@ -97,40 +98,31 @@ function AgentEditCard({ agent }: { agent: Agent }) {
           </div>
           {errors.root && <p className="text-sm text-destructive">{errors.root.message}</p>}
         </CardContent>
-        <CardFooter className="justify-between">
-          {update.isSuccess && !update.isPending ? (
-            <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
-              <Check className="size-4" />
-              {copy.agents.saved}
-            </span>
-          ) : (
-            <span />
-          )}
-          <Button type="submit" disabled={form.formState.isSubmitting}>
-            {form.formState.isSubmitting && <LoaderCircle className="animate-spin" />}
-            {copy.agents.editSubmit}
+        <CardFooter className="justify-between gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="-ml-2 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+            onClick={() => setConfirmOpen(true)}
+          >
+            <Trash2 className="size-4" />
+            {copy.agents.deleteAction}
           </Button>
+          <div className="flex items-center gap-3">
+            {update.isSuccess && !update.isPending && (
+              <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
+                <Check className="size-4" />
+                {copy.agents.saved}
+              </span>
+            )}
+            <Button type="submit" disabled={form.formState.isSubmitting}>
+              {form.formState.isSubmitting && <LoaderCircle className="animate-spin" />}
+              {copy.agents.editSubmit}
+            </Button>
+          </div>
         </CardFooter>
       </form>
-    </Card>
-  );
-}
-
-function DangerZoneCard({ agent }: { agent: Agent }) {
-  const navigate = useNavigate();
-  const remove = useDeleteAgent();
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  return (
-    <Card className="border-destructive/30">
-      <CardHeader>
-        <CardTitle className="text-base text-destructive">{copy.agents.dangerTitle}</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <Button variant="destructive" onClick={() => setConfirmOpen(true)}>
-          {copy.agents.deleteAction}
-        </Button>
-      </CardContent>
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>

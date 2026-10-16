@@ -1,5 +1,5 @@
 import { Link, Outlet, createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
-import { LoaderCircle } from "lucide-react";
+import { Bot, LoaderCircle, Settings, UserRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { sessionQuery, useLogout, useSession } from "@/lib/auth";
 import { copy } from "@/lib/copy";
@@ -20,37 +20,43 @@ function AppLayout() {
   return (
     <div className="min-h-svh bg-muted/40">
       <header className="border-b bg-background">
-        <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4">
+        <div className="mx-auto flex h-14 max-w-5xl items-center gap-3 px-4 sm:gap-6">
           <Link to="/" className="text-sm font-semibold">
             {copy.brand.name}
           </Link>
-          <nav className="flex items-center gap-4 text-sm">
+          <nav className="flex items-center gap-1 text-sm sm:gap-2">
             <Link
               to="/agents"
-              className="text-muted-foreground"
+              aria-label={copy.agents.nav}
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-muted-foreground transition-colors hover:text-foreground"
               activeProps={{ className: "font-medium text-foreground" }}
             >
-              {copy.agents.nav}
+              <Bot className="size-4" />
+              <span className="hidden sm:inline">{copy.agents.nav}</span>
             </Link>
             <Link
               to="/account"
-              className="text-muted-foreground"
+              aria-label={copy.account.nav}
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-muted-foreground transition-colors hover:text-foreground"
               activeProps={{ className: "font-medium text-foreground" }}
             >
-              {copy.account.nav}
+              <UserRound className="size-4" />
+              <span className="hidden sm:inline">{copy.account.nav}</span>
             </Link>
             {session?.role === "admin" && (
               <Link
                 to="/settings"
-                className="text-muted-foreground"
+                aria-label={copy.settings.nav}
+                className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-muted-foreground transition-colors hover:text-foreground"
                 activeProps={{ className: "font-medium text-foreground" }}
               >
-                {copy.settings.nav}
+                <Settings className="size-4" />
+                <span className="hidden sm:inline">{copy.settings.nav}</span>
               </Link>
             )}
           </nav>
-          <div className="ms-auto flex items-center gap-3 text-sm text-muted-foreground">
-            <span>{session?.username}</span>
+          <div className="ms-auto flex items-center gap-2 text-sm text-muted-foreground sm:gap-3">
+            <span className="hidden sm:block">{session?.username}</span>
             <Button
               variant="ghost"
               size="sm"

@@ -1,8 +1,9 @@
 import { Link, createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { LoaderCircle, Plus } from "lucide-react";
+import { Bot, ChevronRight, LoaderCircle, Plus } from "lucide-react";
 import { useState } from "react";
+import { EmptyState, ErrorState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { agentSchema, describeAgentError, useAgents, useCreateAgent } from "@/lib/agents";
 import type { Agent, AgentInput } from "@/lib/agents";
@@ -42,21 +44,35 @@ function AgentsPage() {
       </div>
 
       {agents.isPending ? (
-        <div className="grid place-items-center py-24 text-muted-foreground">
-          <LoaderCircle className="animate-spin" />
+        <div className="grid gap-4 sm:grid-cols-2">
+          {[0, 1, 2, 3].map((i) => (
+            <Card key={i}>
+              <CardHeader>
+                <Skeleton className="h-5 w-1/3" />
+                <Skeleton className="h-3.5 w-1/4" />
+              </CardHeader>
+              <CardContent className="grid gap-1.5">
+                <Skeleton className="h-3.5 w-full" />
+                <Skeleton className="h-3.5 w-4/5" />
+              </CardContent>
+            </Card>
+          ))}
         </div>
       ) : agents.isError ? (
-        <div className="grid place-items-center gap-3 py-24">
-          <p className="text-sm text-destructive">{describeAgentError(agents.error)}</p>
-          <Button variant="outline" size="sm" onClick={() => agents.refetch()}>
-            {copy.agents.retry}
-          </Button>
-        </div>
+        <ErrorState message={describeAgentError(agents.error)} onRetry={() => agents.refetch()} />
       ) : agents.data.length === 0 ? (
-        <div className="grid place-items-center gap-1 py-24 text-center">
-          <p className="text-sm text-muted-foreground">{copy.agents.empty}</p>
-          <p className="text-xs text-muted-foreground">{copy.agents.emptyHint}</p>
-        </div>
+        <EmptyState
+          icon={Bot}
+          text={copy.agents.empty}
+          hint={copy.agents.emptyHint}
+          action={
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus />
+              {copy.agents.create}
+            </Button>
+          }
+          className="py-16"
+        />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {agents.data.map((agent) => (
@@ -75,15 +91,23 @@ function AgentCard({ agent }: { agent: Agent }) {
 
   return (
     <Link to="/agents/$agentId" params={{ agentId: String(agent.id) }} className="group">
-      <Card className="h-full transition-colors group-hover:border-ring">
+      <Card className="h-full transition-all group-hover:border-ring group-hover:shadow-sm">
         <CardHeader>
-          <CardTitle className="text-base">{agent.name}</CardTitle>
-          <CardDescription>
-            {copy.agents.createdAt} {date}
-          </CardDescription>
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+              <Bot className="size-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <CardTitle className="truncate text-base">{agent.name}</CardTitle>
+              <CardDescription>
+                {copy.agents.createdAt} {date}
+              </CardDescription>
+            </div>
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+          </div>
         </CardHeader>
         <CardContent>
-          <p className="line-clamp-3 text-sm text-muted-foreground">
+          <p className="line-clamp-2 text-sm text-muted-foreground">
             {agent.persona_prompt || copy.agents.fields.personaPlaceholder}
           </p>
         </CardContent>

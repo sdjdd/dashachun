@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { LoaderCircle, Trash2 } from "lucide-react";
+import { Brain, LoaderCircle, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { EmptyState, ErrorState, LoadingState } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -27,35 +28,33 @@ function MemoriesTab() {
   const memories = useMemories(id);
 
   if (memories.isPending) {
-    return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (memories.isError) {
     return (
-      <div className="grid place-items-center gap-3 py-16">
-        <p className="text-sm text-destructive">{describeMemoryError(memories.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => memories.refetch()}>
-          {copy.agents.retry}
-        </Button>
-      </div>
+      <ErrorState
+        message={describeMemoryError(memories.error)}
+        onRetry={() => memories.refetch()}
+      />
     );
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{copy.agents.memories.title}</CardTitle>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Brain className="size-4 text-muted-foreground" />
+          {copy.agents.memories.title}
+        </CardTitle>
         <CardDescription>{copy.agents.memories.description}</CardDescription>
       </CardHeader>
       <CardContent>
         {memories.data.length === 0 ? (
-          <div className="grid place-items-center gap-1 py-8 text-center">
-            <p className="text-sm text-muted-foreground">{copy.agents.memories.empty}</p>
-            <p className="text-xs text-muted-foreground">{copy.agents.memories.emptyHint}</p>
-          </div>
+          <EmptyState
+            icon={Brain}
+            text={copy.agents.memories.empty}
+            hint={copy.agents.memories.emptyHint}
+          />
         ) : (
           <ul className="divide-y">
             {memories.data.map((entry) => (
@@ -75,13 +74,14 @@ function MemoryRow({ agentId, entry }: { agentId: number; entry: MemoryEntry }) 
 
   return (
     <li className="flex items-start justify-between gap-4 py-3 first:pt-0 last:pb-0">
-      <div className="grid gap-0.5">
+      <div className="grid min-w-0 gap-0.5">
         <span className="text-xs text-muted-foreground">#{entry.mem_no}</span>
         <p className="text-sm whitespace-pre-wrap">{entry.content}</p>
       </div>
       <Button
         variant="ghost"
         size="icon-sm"
+        className="shrink-0 text-muted-foreground hover:text-destructive"
         aria-label={copy.agents.memories.deleteTitle}
         onClick={() => {
           setError(null);

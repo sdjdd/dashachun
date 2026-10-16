@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { LoaderCircle, Play, Square, Trash2, X } from "lucide-react";
+import { LoaderCircle, MessagesSquare, Play, Square, Trash2, UserRound, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
@@ -12,8 +12,17 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { EmptyState, ErrorState, LoadingState } from "@/components/states";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   describeAudioError,
   describeConversationError,
@@ -68,20 +77,14 @@ function ConversationsTab() {
   };
 
   if (conversations.isPending) {
-    return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (conversations.isError) {
     return (
-      <div className="grid place-items-center gap-3 py-16">
-        <p className="text-sm text-destructive">{describeConversationError(conversations.error)}</p>
-        <Button variant="outline" size="sm" onClick={() => conversations.refetch()}>
-          {copy.agents.retry}
-        </Button>
-      </div>
+      <ErrorState
+        message={describeConversationError(conversations.error)}
+        onRetry={() => conversations.refetch()}
+      />
     );
   }
 
@@ -89,17 +92,21 @@ function ConversationsTab() {
 
   return (
     <div className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)] lg:items-start">
-      <Card>
+      <Card className={selected != null ? "hidden lg:block" : undefined}>
         <CardHeader>
-          <CardTitle className="text-base">{copy.agents.conversations.listTitle}</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-base">
+            <MessagesSquare className="size-4 text-muted-foreground" />
+            {copy.agents.conversations.listTitle}
+          </CardTitle>
           <CardDescription>{copy.agents.conversations.listDescription}</CardDescription>
         </CardHeader>
         <CardContent>
           {items.length === 0 ? (
-            <div className="grid place-items-center gap-1 py-8 text-center">
-              <p className="text-sm text-muted-foreground">{copy.agents.conversations.empty}</p>
-              <p className="text-xs text-muted-foreground">{copy.agents.conversations.emptyHint}</p>
-            </div>
+            <EmptyState
+              icon={MessagesSquare}
+              text={copy.agents.conversations.empty}
+              hint={copy.agents.conversations.emptyHint}
+            />
           ) : (
             <div className="grid gap-1">
               <ul className="divide-y">
@@ -134,8 +141,9 @@ function ConversationsTab() {
       </Card>
 
       {selected == null ? (
-        <div className="grid place-items-center rounded-xl border border-dashed py-16 text-sm text-muted-foreground">
-          {copy.agents.conversations.selectHint}
+        <div className="grid place-items-center gap-2 rounded-xl border border-dashed py-16 text-center">
+          <MessagesSquare className="size-6 text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">{copy.agents.conversations.selectHint}</p>
         </div>
       ) : (
         <TranscriptPane
@@ -177,6 +185,14 @@ function ConversationRow({
         <div className="grid gap-0.5">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">#{conversation.id}</span>
+            {conversation.ended_at ? (
+              <span className="size-2 rounded-full bg-muted-foreground/40" />
+            ) : (
+              <span className="relative flex size-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
+                <span className="relative inline-flex size-2 rounded-full bg-primary" />
+              </span>
+            )}
             <span
               className={
                 conversation.ended_at
@@ -190,7 +206,8 @@ function ConversationRow({
             </span>
           </div>
           <span className="text-xs text-muted-foreground">
-            {formatDateTime(conversation.created_at)} · 设备 #{conversation.device_id}
+            {formatDateTime(conversation.created_at)} ·{" "}
+            {copy.agents.conversations.deviceLabel(conversation.device_id)}
           </span>
         </div>
       </button>
@@ -265,11 +282,7 @@ function TranscriptPane({
   }, [messages.isSuccess, conversationId]);
 
   if (messages.isPending) {
-    return (
-      <div className="grid place-items-center py-16 text-muted-foreground">
-        <LoaderCircle className="animate-spin" />
-      </div>
-    );
+    return <LoadingState />;
   }
   if (messages.isError) {
     return (
@@ -295,8 +308,13 @@ function TranscriptPane({
     <Card>
       <CardHeader>
         <CardTitle className="text-base">
-          {copy.agents.conversations.transcriptTitle} · #{conversationId}
+          {copy.agents.conversations.transcriptOf(conversationId)}
         </CardTitle>
+        <CardAction>
+          <Button variant="ghost" size="icon-sm" aria-label={copy.common.close} onClick={onClose}>
+            <X className="size-4" />
+          </Button>
+        </CardAction>
       </CardHeader>
       <CardContent>
         <div className="max-h-[70vh] overflow-y-auto">
@@ -355,11 +373,17 @@ function MessageRow({
   return (
     <li className="grid gap-1.5 py-3 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-muted-foreground">{roleLabel(message.role)}</span>
-        {message.role === "user" && message.speaker_id != null && (
-          <span className="text-xs text-muted-foreground">
-            {speaker?.name ?? copy.agents.conversations.unknownSpeaker}
-          </span>
+        {message.role === "user" ? (
+          <Badge>
+            <UserRound />
+            {message.speaker_id != null
+              ? (speaker?.name ?? copy.agents.conversations.unknownSpeaker)
+              : roleLabel(message.role)}
+          </Badge>
+        ) : message.role === "assistant" ? (
+          <Badge variant="secondary">{roleLabel(message.role)}</Badge>
+        ) : (
+          <Badge variant="outline">{roleLabel(message.role)}</Badge>
         )}
         <span className="text-xs text-muted-foreground">{formatDateTime(message.created_at)}</span>
       </div>
