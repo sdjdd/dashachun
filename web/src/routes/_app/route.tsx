@@ -39,6 +39,15 @@ function AppLayout() {
             >
               {copy.account.nav}
             </Link>
+            {session?.role === "admin" && (
+              <Link
+                to="/settings"
+                className="text-muted-foreground"
+                activeProps={{ className: "font-medium text-foreground" }}
+              >
+                {copy.settings.nav}
+              </Link>
+            )}
           </nav>
           <div className="ms-auto flex items-center gap-3 text-sm text-muted-foreground">
             <span>{session?.username}</span>
