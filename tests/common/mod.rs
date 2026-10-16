@@ -149,6 +149,7 @@ fn test_state_with_registry_inner(
                 bind_addr: "127.0.0.1:0".into(),
                 playback_prebuffer_ms: 180,
                 shutdown_grace_ms: 5000,
+                static_dir: None,
             },
             ota: OtaSettings {
                 websocket_url,

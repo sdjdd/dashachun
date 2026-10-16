@@ -27,7 +27,7 @@ async fn main() {
 
     tracing_subscriber::fmt::init();
 
-    let server = ServerConfig::from_env();
+    let server = resolve_static_dir(ServerConfig::from_env());
     let bind_addr = server.bind_addr.clone();
     let grace = Duration::from_millis(server.shutdown_grace_ms);
     let device = DeviceConfig::from_env();
@@ -168,6 +168,33 @@ async fn main() {
         factory.shutdown().await;
     }
     tracing::info!("server stopped");
+}
+
+/// Resolves the static web console directory (`STATIC_DIR`). A set-but-missing
+/// directory only turns the console off with a warning — the REST and gateway
+/// surfaces do not depend on it, the same fail-open reasoning as the audio
+/// capture. Development serves the console through Vite and leaves the
+/// variable unset.
+fn resolve_static_dir(config: ServerConfig) -> ServerConfig {
+    let Some(dir) = &config.static_dir else {
+        return config;
+    };
+    match std::fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => {
+            tracing::info!(dir = %dir.display(), "serving the web console");
+            config
+        }
+        _ => {
+            tracing::warn!(
+                dir = %dir.display(),
+                "STATIC_DIR does not name a readable directory; the web console is not served (API and gateway are unaffected)"
+            );
+            ServerConfig {
+                static_dir: None,
+                ..config
+            }
+        }
+    }
 }
 
 /// Builds the boot-time audio storage. Storage problems never block the

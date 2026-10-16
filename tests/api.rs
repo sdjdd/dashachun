@@ -33,14 +33,87 @@ fn ota_request(uri: &str) -> Request<Body> {
 
 #[sqlx::test]
 #[ignore]
-async fn root_returns_ok(pool: PgPool) {
-    let app = app(pool);
+async fn static_dir_serves_the_console(pool: PgPool) {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("index.html"), "<html>index</html>").unwrap();
+    std::fs::create_dir(dir.path().join("assets")).unwrap();
+    std::fs::write(dir.path().join("assets/app-1.js"), "console.log(1)").unwrap();
+
+    let mut state = common::test_state(pool.clone(), Some("ws://configured/gateway".into()));
+    state.config.server.static_dir = Some(dir.path().to_path_buf());
+    let app = dashachun::http::app(state, common::auth_state(pool));
+
     let res = send(
         &app,
         Request::builder().uri("/").body(Body::empty()).unwrap(),
     )
     .await;
     assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["cache-control"], "no-cache");
+    let body = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(body, "<html>index</html>");
+
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/agents/1")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/assets/app-1.js")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/api/nope")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let v = common::body_json(res).await;
+    assert!(
+        v["error"].is_string(),
+        "unmatched /api paths stay JSON 404s"
+    );
+}
+
+#[sqlx::test]
+#[ignore]
+async fn healthz_probes_postgres(pool: PgPool) {
+    let app = app(pool);
+    let res = send(
+        &app,
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let v = common::body_json(res).await;
+    assert_eq!(v["status"], "ok");
 }
 
 #[sqlx::test]
@@ -344,5 +417,9 @@ async fn openapi_spec_and_scalar_ui_are_served(pool: PgPool) {
     assert!(
         spec["paths"]["/api/ota"].is_null(),
         "device surface stays out"
+    );
+    assert!(
+        spec["paths"]["/healthz"].is_null(),
+        "infra surface stays out"
     );
 }

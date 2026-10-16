@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 use crate::settings::OtaSettings;
 
@@ -64,6 +65,7 @@ pub struct ServerConfig {
     pub bind_addr: String,
     pub playback_prebuffer_ms: u32,
     pub shutdown_grace_ms: u64,
+    pub static_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +91,10 @@ impl ServerConfig {
                 .parse()
                 .unwrap_or(180),
             shutdown_grace_ms: env_or("SHUTDOWN_GRACE_MS", "5000").parse().unwrap_or(5000),
+            static_dir: env::var("STATIC_DIR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
         }
     }
 }
