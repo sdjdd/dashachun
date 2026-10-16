@@ -98,6 +98,15 @@ struct Loop<'a> {
     /// off it. Replacing it at the next `Start` closes the round that
     /// fully finished.
     chat_span: tracing::Span,
+    /// The round's inference-metrics inputs: the provider identity
+    /// (resolved with the span at `Start`), the request issue time and the
+    /// stream-tail response data (`LlmEvent::Response`) — recorded onto the
+    /// metrics at whichever of the three round ends lands (done, error,
+    /// cancellation).
+    round_meta: (String, String),
+    round_started: std::time::Instant,
+    round_response_model: Option<String>,
+    round_usage: Option<(u64, u64)>,
 }
 
 /// The single argument of [`stream_text`] and [`generate_text`] — one
@@ -168,6 +177,10 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         round_ok: true,
         phase: Phase::Start,
         chat_span: tracing::Span::none(),
+        round_meta: (String::new(), String::new()),
+        round_started: std::time::Instant::now(),
+        round_response_model: None,
+        round_usage: None,
     };
     Box::pin(futures_util::stream::unfold(
         state,
@@ -197,6 +210,10 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                         // future tracing-opentelemetry bridge reads as the
                         // exported name.
                         let meta = state.llm.meta();
+                        state.round_meta = (meta.provider.clone(), meta.model.clone());
+                        state.round_started = std::time::Instant::now();
+                        state.round_response_model = None;
+                        state.round_usage = None;
                         state.chat_span = tracing::info_span!(
                             "chat",
                             otel.name = %format!("chat {}", meta.model),
@@ -226,7 +243,14 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                     Phase::Chat(mut chat) => {
                         let item = tokio::select! {
                             item = chat.next() => item,
-                            _ = state.cancel.cancelled() => return None,
+                            // Cancellation ends the round silently on the
+                            // span, but the inference metric still records
+                            // the duration and the usage received so far
+                            // (the conventions count cancelled operations).
+                            _ = state.cancel.cancelled() => {
+                                record_round_metrics(&state, None);
+                                return None;
+                            },
                         };
                         match item {
                             Some(Ok(LlmEvent::Delta { text })) => {
@@ -248,7 +272,15 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                                 // and response identity, lifted off the
                                 // wire, recorded onto the round's `chat`
                                 // span (telemetry.md); each attribute only
-                                // when the provider supplied it.
+                                // when the provider supplied it. The same
+                                // data feeds the round's metrics.
+                                state.round_response_model = response.model.clone();
+                                state.round_usage = response.usage.clone().map(|usage| {
+                                    (
+                                        u64::from(usage.input_tokens),
+                                        u64::from(usage.output_tokens),
+                                    )
+                                });
                                 if let Some(id) = response.id {
                                     state.chat_span.record("gen_ai.response.id", id);
                                 }
@@ -279,14 +311,18 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                                 // The round's request failed — the client
                                 // span must not look successful (iron rule 1).
                                 // `failed` is the `LlmError` variant: the
-                                // class the loop can honestly name.
+                                // class the loop can honestly name. The
+                                // metrics record the same class with no
+                                // usage (none was received).
                                 state.chat_span.record("error.type", "failed");
                                 state.chat_span.record("otel.status_code", "error");
+                                record_round_metrics(&state, Some("failed"));
                                 return Some((Err(err), state));
                             }
                         }
                     }
                     Phase::RoundEnd => {
+                        record_round_metrics(&state, None);
                         let spoke = !state.round_text.is_empty();
                         let calls = std::mem::take(&mut state.calls);
                         if calls.is_empty() {
@@ -384,6 +420,21 @@ fn finish(state: &mut Loop<'_>) -> StreamResult {
         messages: std::mem::take(&mut state.items),
         steps: state.step_results.len(),
     }
+}
+
+/// Records the finished round onto the inference metrics (telemetry.md):
+/// the duration since the request was issued, the error class on the
+/// failed path, and the stream-tail usage when the provider supplied it —
+/// the no-op case is a no-op (no bridge, or tests).
+fn record_round_metrics(state: &Loop<'_>, error: Option<&str>) {
+    crate::telemetry::record_chat_round(
+        &state.round_meta.0,
+        &state.round_meta.1,
+        state.round_response_model.as_deref(),
+        state.round_started.elapsed(),
+        error,
+        state.round_usage,
+    );
 }
 
 /// The collecting twin of [`stream_text`]: runs the same loop and returns
