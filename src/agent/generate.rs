@@ -93,6 +93,11 @@ struct Loop<'a> {
     step_results: Vec<StepResult>,
     round_ok: bool,
     phase: Phase<'a>,
+    /// The round's GenAI client span, created each `Phase::Start` and
+    /// recorded through the round; the round's `execute_tool` spans hang
+    /// off it. Replacing it at the next `Start` closes the round that
+    /// fully finished.
+    chat_span: tracing::Span,
 }
 
 /// The single argument of [`stream_text`] and [`generate_text`] — one
@@ -162,6 +167,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
         step_results: Vec::new(),
         round_ok: true,
         phase: Phase::Start,
+        chat_span: tracing::Span::none(),
     };
     Box::pin(futures_util::stream::unfold(
         state,
@@ -181,6 +187,33 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             ));
                         }
                         state.round_text.clear();
+                        // One GenAI-conventions client span per `Llm::chat`
+                        // round. The sampling-relevant identity rides the
+                        // constructor (iron rule 3); the stream tail records
+                        // onto the handle when `LlmEvent::Response` arrives.
+                        // `otel.name` carries the composed span name
+                        // (`chat {model}`) — `tracing` metadata names are
+                        // 'static, so the composed name rides the field the
+                        // future tracing-opentelemetry bridge reads as the
+                        // exported name.
+                        let meta = state.llm.meta();
+                        state.chat_span = tracing::info_span!(
+                            "chat",
+                            otel.name = %format!("chat {}", meta.model),
+                            otel.kind = "client",
+                            gen_ai.operation.name = "chat",
+                            gen_ai.provider.name = %meta.provider,
+                            gen_ai.request.model = %meta.model,
+                            gen_ai.response.id = tracing::field::Empty,
+                            gen_ai.response.model = tracing::field::Empty,
+                            gen_ai.response.finish_reasons = tracing::field::Empty,
+                            gen_ai.usage.input_tokens = tracing::field::Empty,
+                            gen_ai.usage.output_tokens = tracing::field::Empty,
+                            // Declared for the failed-round path; a clean
+                            // round never records them.
+                            error.type = tracing::field::Empty,
+                            otel.status_code = tracing::field::Empty,
+                        );
                         let chat = state.llm.chat(
                             state.working.clone(),
                             state.specs.clone(),
@@ -210,16 +243,47 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                                 state.calls.push(call);
                                 state.phase = Phase::Chat(chat);
                             }
-                            Some(Ok(LlmEvent::Response(_))) => {
+                            Some(Ok(LlmEvent::Response(response))) => {
                                 // End-of-stream response metadata — usage
-                                // and response identity, lifted off the wire
-                                // for the round's `chat` span (telemetry.md).
+                                // and response identity, lifted off the
+                                // wire, recorded onto the round's `chat`
+                                // span (telemetry.md); each attribute only
+                                // when the provider supplied it.
+                                if let Some(id) = response.id {
+                                    state.chat_span.record("gen_ai.response.id", id);
+                                }
+                                if let Some(model) = response.model {
+                                    state.chat_span.record("gen_ai.response.model", model);
+                                }
+                                if !response.finish_reasons.is_empty() {
+                                    state.chat_span.record(
+                                        "gen_ai.response.finish_reasons",
+                                        serde_json::to_string(&response.finish_reasons)
+                                            .unwrap_or_default(),
+                                    );
+                                }
+                                if let Some(usage) = response.usage {
+                                    state
+                                        .chat_span
+                                        .record("gen_ai.usage.input_tokens", usage.input_tokens);
+                                    state
+                                        .chat_span
+                                        .record("gen_ai.usage.output_tokens", usage.output_tokens);
+                                }
                                 state.phase = Phase::Chat(chat);
                             }
                             Some(Ok(LlmEvent::Done)) | None => {
                                 state.phase = Phase::RoundEnd;
                             }
-                            Some(Err(err)) => return Some((Err(err), state)),
+                            Some(Err(err)) => {
+                                // The round's request failed — the client
+                                // span must not look successful (iron rule 1).
+                                // `failed` is the `LlmError` variant: the
+                                // class the loop can honestly name.
+                                state.chat_span.record("error.type", "failed");
+                                state.chat_span.record("otel.status_code", "error");
+                                return Some((Err(err), state));
+                            }
                         }
                     }
                     Phase::RoundEnd => {
@@ -257,8 +321,10 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                             state.phase = Phase::AfterTools;
                             continue;
                         };
-                        // One GenAI-conventions span per execution. `otel.name`
-                        // carries the composed span name
+                        // One GenAI-conventions span per execution, hung off
+                        // its round's `chat` span through the explicit
+                        // `parent:` (iron rule 2: no enter across awaits).
+                        // `otel.name` carries the composed span name
                         // (`execute_tool {tool.name}`) — `tracing` metadata
                         // names are 'static, so the composed name rides the
                         // field the future tracing-opentelemetry bridge reads
@@ -266,6 +332,7 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                         // `error.type` + the error status when the outcome
                         // lands.
                         let span = tracing::info_span!(
+                            parent: state.chat_span.id(),
                             "execute_tool",
                             otel.name = %format!("execute_tool {}", call.name),
                             otel.kind = "internal",
@@ -435,6 +502,25 @@ mod tests {
         Ok(LlmEvent::Done)
     }
 
+    /// A stream-tail `LlmEvent::Response` — every field optional, exactly
+    /// like the wire.
+    fn response(
+        id: Option<&str>,
+        model: Option<&str>,
+        finish_reasons: &[&str],
+        usage: Option<LlmUsage>,
+    ) -> Result<LlmEvent, LlmError> {
+        Ok(LlmEvent::Response(LlmResponse {
+            id: id.map(Into::into),
+            model: model.map(Into::into),
+            finish_reasons: finish_reasons
+                .iter()
+                .map(|reason| reason.to_string())
+                .collect(),
+            usage,
+        }))
+    }
+
     fn tool_call(name: &str, arguments: &str) -> ToolCall {
         ToolCall {
             id: "call_1".into(),
@@ -568,6 +654,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct CapturedSpan {
         id: u64,
+        parent: Option<u64>,
         name: String,
         fields: BTreeMap<String, String>,
     }
@@ -625,6 +712,7 @@ mod tests {
             attrs.record(&mut FieldWriter(&mut fields));
             self.0.lock().unwrap().push(CapturedSpan {
                 id: id.into_u64(),
+                parent: attrs.parent().map(Id::into_u64),
                 name: attrs.metadata().name().to_string(),
                 fields,
             });
@@ -671,15 +759,15 @@ mod tests {
     async fn response_event_is_inert_to_the_loop() {
         let llm = ScriptedLlm::new(vec![vec![
             delta("你"),
-            Ok(LlmEvent::Response(LlmResponse {
-                id: Some("chatcmpl-1".into()),
-                model: Some("m".into()),
-                finish_reasons: vec!["stop".into()],
-                usage: Some(LlmUsage {
+            response(
+                Some("chatcmpl-1"),
+                Some("m"),
+                &["stop"],
+                Some(LlmUsage {
                     input_tokens: 11,
                     output_tokens: 7,
                 }),
-            })),
+            ),
             delta("好"),
             done(),
         ]]);
@@ -1018,6 +1106,185 @@ mod tests {
         assert_eq!(
             fields.get("error.type").map(String::as_str),
             Some("invalid_arguments")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_span_opens_with_creation_attributes() {
+        let llm = ScriptedLlm::new(vec![vec![delta("你"), delta("好"), done()]]);
+        install_global_test_registry();
+        let capture = SpanCapture::new();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("hi")])
+                .tools(&ToolSet::new())
+                .build(),
+        ))
+        .await;
+        drop(_guard);
+        let spans = capture.spans("chat");
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+        assert_eq!(
+            fields.get("otel.name").map(String::as_str),
+            Some("chat stub")
+        );
+        assert_eq!(fields.get("otel.kind").map(String::as_str), Some("client"));
+        assert_eq!(
+            fields.get("gen_ai.operation.name").map(String::as_str),
+            Some("chat")
+        );
+        assert_eq!(
+            fields.get("gen_ai.provider.name").map(String::as_str),
+            Some("stub")
+        );
+        assert_eq!(
+            fields.get("gen_ai.request.model").map(String::as_str),
+            Some("stub")
+        );
+        // The end-of-stream data is absent until the provider supplies it,
+        // and a clean round never looks failed.
+        assert!(!fields.contains_key("gen_ai.response.id"));
+        assert!(!fields.contains_key("gen_ai.usage.input_tokens"));
+        assert!(!fields.contains_key("error.type"));
+        assert!(!fields.contains_key("otel.status_code"));
+    }
+
+    #[tokio::test]
+    async fn response_event_records_the_end_attributes() {
+        let llm = ScriptedLlm::new(vec![vec![
+            delta("你好"),
+            response(
+                Some("chatcmpl-1"),
+                Some("doubao-seed"),
+                &["stop"],
+                Some(LlmUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                }),
+            ),
+            done(),
+        ]]);
+        install_global_test_registry();
+        let capture = SpanCapture::new();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("hi")])
+                .tools(&ToolSet::new())
+                .build(),
+        ))
+        .await;
+        drop(_guard);
+        let spans = capture.spans("chat");
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+        assert_eq!(
+            fields.get("gen_ai.response.id").map(String::as_str),
+            Some("chatcmpl-1")
+        );
+        assert_eq!(
+            fields.get("gen_ai.response.model").map(String::as_str),
+            Some("doubao-seed")
+        );
+        assert_eq!(
+            fields
+                .get("gen_ai.response.finish_reasons")
+                .map(String::as_str),
+            Some(r#"["stop"]"#)
+        );
+        assert_eq!(
+            fields.get("gen_ai.usage.input_tokens").map(String::as_str),
+            Some("11")
+        );
+        assert_eq!(
+            fields.get("gen_ai.usage.output_tokens").map(String::as_str),
+            Some("7")
+        );
+        assert!(!fields.contains_key("error.type"));
+        assert!(!fields.contains_key("otel.status_code"));
+    }
+
+    #[tokio::test]
+    async fn response_without_optional_data_records_no_end_attributes() {
+        let llm = ScriptedLlm::new(vec![vec![
+            delta("你好"),
+            response(None, None, &[], None),
+            done(),
+        ]]);
+        install_global_test_registry();
+        let capture = SpanCapture::new();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("hi")])
+                .tools(&ToolSet::new())
+                .build(),
+        ))
+        .await;
+        drop(_guard);
+        let fields = &capture.spans("chat")[0].fields;
+        assert!(!fields.contains_key("gen_ai.response.id"));
+        assert!(!fields.contains_key("gen_ai.response.model"));
+        assert!(!fields.contains_key("gen_ai.response.finish_reasons"));
+        assert!(!fields.contains_key("gen_ai.usage.input_tokens"));
+        assert!(!fields.contains_key("gen_ai.usage.output_tokens"));
+    }
+
+    #[tokio::test]
+    async fn tool_span_hangs_off_its_rounds_chat_span() {
+        let llm = ScriptedLlm::new(vec![
+            vec![delta("算一下"), call("add", r#"{"x":1,"y":2}"#), done()],
+            vec![delta("等于 3"), done()],
+        ]);
+        install_global_test_registry();
+        let capture = SpanCapture::new();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("1+2?")])
+                .tools(&typed_tools())
+                .build(),
+        ))
+        .await;
+        drop(_guard);
+        // One `chat` span per round; the tool execution belongs to the
+        // round that requested it.
+        let chats = capture.spans("chat");
+        assert_eq!(chats.len(), 2);
+        let tools = capture.spans("execute_tool");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].parent, Some(chats[0].id));
+    }
+
+    #[tokio::test]
+    async fn failed_round_records_the_error_status() {
+        let llm = ScriptedLlm::new(vec![vec![Err(LlmError::Failed("provider down".into()))]]);
+        install_global_test_registry();
+        let capture = SpanCapture::new();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let seen = drain(&mut stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("hi")])
+                .tools(&ToolSet::new())
+                .build(),
+        ))
+        .await;
+        drop(_guard);
+        assert!(matches!(seen.last(), Some(Err(LlmError::Failed(_)))));
+        let spans = capture.spans("chat");
+        assert_eq!(spans.len(), 1);
+        let fields = &spans[0].fields;
+        assert_eq!(fields.get("error.type").map(String::as_str), Some("failed"));
+        assert_eq!(
+            fields.get("otel.status_code").map(String::as_str),
+            Some("error")
         );
     }
 
