@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::provider::ProviderRegistry;
+use crate::provider::{ProviderRegistry, ProviderSpec};
 
 pub const STUB_KIND: &str = "stub";
 
@@ -14,15 +14,19 @@ pub fn register_stub(registry: &mut ProviderRegistry) {
     registry.register_llm(STUB_KIND, build_stub);
 }
 
-fn build_stub(config: &Value) -> Result<Arc<dyn Llm>, String> {
-    let reply = config.get("reply").and_then(Value::as_str).unwrap_or("");
+fn build_stub(spec: &ProviderSpec) -> Result<Arc<dyn Llm>, String> {
+    let reply = spec
+        .config
+        .get("reply")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     Ok(Arc::new(StubLlm::new(reply)))
 }
 
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{
-    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolChoice, ToolSpec,
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, LlmMeta, ReasoningEffort, ToolChoice, ToolSpec,
 };
 
 #[derive(Default)]
@@ -39,6 +43,13 @@ impl StubLlm {
 }
 
 impl Llm for StubLlm {
+    fn meta(&self) -> LlmMeta {
+        LlmMeta {
+            provider: "stub".into(),
+            model: "stub".into(),
+        }
+    }
+
     fn chat(
         &self,
         _history: Vec<ChatItem>,

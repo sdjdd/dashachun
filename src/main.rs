@@ -324,7 +324,11 @@ async fn type_spec(
         return Ok(None);
     };
     match store.find(id).await? {
-        Some(record) => Ok(Some(ProviderSpec::new(record.kind, record.config))),
+        Some(record) => Ok(Some(ProviderSpec::new(
+            record.name,
+            record.kind,
+            record.config,
+        ))),
         None => {
             tracing::error!(id, "selected provider row is missing");
             Ok(None)

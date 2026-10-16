@@ -22,7 +22,8 @@ pub use generate::{
     generate_text, stream_text,
 };
 pub use llm::{
-    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice, ToolSpec,
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, LlmMeta, LlmResponse, LlmUsage, ReasoningEffort,
+    ToolCall, ToolChoice, ToolSpec,
 };
 pub use memory::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor,

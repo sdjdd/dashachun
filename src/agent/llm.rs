@@ -111,9 +111,45 @@ impl ChatItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmEvent {
-    Delta { text: String },
+    Delta {
+        text: String,
+    },
     ToolCall(ToolCall),
+    /// End-of-stream response metadata, emitted exactly once per stream,
+    /// immediately before `Done` — never on cancellation or error, which
+    /// end the stream without either.
+    Response(LlmResponse),
     Done,
+}
+
+/// Token usage as the wire reports it — the totals behind
+/// `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// End-of-stream response metadata a provider lifted off the wire — the
+/// response identity and usage behind the chat span's end attributes. Every
+/// field is optional: providers (and older servers) supply only what the
+/// wire gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmResponse {
+    pub id: Option<String>,
+    pub model: Option<String>,
+    pub finish_reasons: Vec<String>,
+    pub usage: Option<LlmUsage>,
+}
+
+/// The provider's telemetry identity, read before the stream opens —
+/// `gen_ai.provider.name` (the operator's vendor name from the provider
+/// row) and `gen_ai.request.model`. The conventions pin them at span
+/// creation time for sampling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmMeta {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -135,6 +171,8 @@ impl From<&str> for LlmError {
 }
 
 pub trait Llm: Send + Sync {
+    fn meta(&self) -> LlmMeta;
+
     fn chat(
         &self,
         history: Vec<ChatItem>,
@@ -143,6 +181,16 @@ pub trait Llm: Send + Sync {
         reasoning: Option<ReasoningEffort>,
         cancel: CancellationToken,
     ) -> LlmEvents<'_>;
+}
+
+/// The identity every in-crate test double of [`Llm`] answers with — the
+/// stub vendor and model name (telemetry.md's provider-name rule).
+#[cfg(test)]
+pub fn stub_meta() -> LlmMeta {
+    LlmMeta {
+        provider: "stub".into(),
+        model: "stub".into(),
+    }
 }
 
 #[cfg(test)]

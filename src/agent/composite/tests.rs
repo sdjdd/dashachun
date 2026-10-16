@@ -6,8 +6,8 @@ use crate::agent::memory::HISTORY_TURNS;
 use crate::agent::tool::MemoryAdd;
 use crate::agent::{
     AgentInput, Asr, AsrError, AsrEvent, AsrEvents, AudioStream, Capture, ChatItem, EntryMemory,
-    Llm, LlmEvent, LlmEvents, ReasoningEffort, ReplyCapture, Speaker, Subtitle, TextStream,
-    ToolCall, Tts, TtsError, TtsEvent, TtsEvents, UtteranceCapture,
+    Llm, LlmEvent, LlmEvents, LlmMeta, ReasoningEffort, ReplyCapture, Speaker, Subtitle,
+    TextStream, ToolCall, Tts, TtsError, TtsEvent, TtsEvents, UtteranceCapture,
 };
 use crate::provider::asr::StubAsr;
 use crate::provider::llm::StubLlm;
@@ -47,6 +47,10 @@ struct ScriptedLlm {
     calls: Arc<Mutex<Vec<Vec<ChatItem>>>>,
 }
 impl Llm for ScriptedLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         history: Vec<ChatItem>,
@@ -72,6 +76,10 @@ struct EffortProbe {
 }
 
 impl Llm for EffortProbe {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         _history: Vec<ChatItem>,
@@ -95,6 +103,10 @@ struct ToolCallingLlm {
 }
 
 impl Llm for ToolCallingLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         history: Vec<ChatItem>,
@@ -136,6 +148,10 @@ struct PreambleToolLlm {
 }
 
 impl Llm for PreambleToolLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         history: Vec<ChatItem>,
@@ -610,6 +626,10 @@ struct ChunkedLlm {
 }
 
 impl Llm for ChunkedLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         _history: Vec<ChatItem>,
@@ -993,6 +1013,10 @@ struct MemoryLlm {
 }
 
 impl Llm for MemoryLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         history: Vec<ChatItem>,
@@ -1171,6 +1195,10 @@ impl Tts for CancelAwareTts {
 struct HangingLlm;
 
 impl Llm for HangingLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         _history: Vec<ChatItem>,
@@ -1549,6 +1577,10 @@ struct FailingLlm {
 }
 
 impl Llm for FailingLlm {
+    fn meta(&self) -> LlmMeta {
+        crate::agent::llm::stub_meta()
+    }
+
     fn chat(
         &self,
         _history: Vec<ChatItem>,

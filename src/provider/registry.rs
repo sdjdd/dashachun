@@ -6,26 +6,32 @@ use serde_json::Value;
 use super::{asr, llm, tts};
 use crate::agent::{Asr, Llm, Tts};
 
-pub type AsrBuilder = fn(&Value) -> Result<Arc<dyn Asr>, String>;
-pub type LlmBuilder = fn(&Value) -> Result<Arc<dyn Llm>, String>;
-pub type TtsBuilder = fn(&Value) -> Result<Arc<dyn Tts>, String>;
+pub type AsrBuilder = fn(&ProviderSpec) -> Result<Arc<dyn Asr>, String>;
+pub type LlmBuilder = fn(&ProviderSpec) -> Result<Arc<dyn Llm>, String>;
+pub type TtsBuilder = fn(&ProviderSpec) -> Result<Arc<dyn Tts>, String>;
 
 #[derive(Clone)]
 pub struct ProviderSpec {
+    /// The provider row's name — the operator's vendor identity (UNIQUE per
+    /// type, e.g. `volcengine`), surfaced to telemetry through the stage
+    /// traits (`Llm::meta`). Wiring never reads it: selection is by row id
+    /// and the kind picks the builder.
+    pub name: String,
     pub kind: String,
     pub config: Value,
 }
 
 impl ProviderSpec {
-    pub fn new(kind: impl Into<String>, config: Value) -> Self {
+    pub fn new(name: impl Into<String>, kind: impl Into<String>, config: Value) -> Self {
         Self {
+            name: name.into(),
             kind: kind.into(),
             config,
         }
     }
 
     pub fn stub() -> Self {
-        Self::new("stub", serde_json::json!({}))
+        Self::new("stub", "stub", serde_json::json!({}))
     }
 }
 
@@ -71,27 +77,27 @@ impl ProviderRegistry {
         }
     }
 
-    pub fn build_asr(&self, kind: &str, config: &Value) -> Result<Arc<dyn Asr>, String> {
-        lookup(&self.asr, "asr", kind)?(config)
+    pub fn build_asr(&self, spec: &ProviderSpec) -> Result<Arc<dyn Asr>, String> {
+        lookup(&self.asr, "asr", &spec.kind)?(spec)
     }
 
-    pub fn build_llm(&self, kind: &str, config: &Value) -> Result<Arc<dyn Llm>, String> {
-        lookup(&self.llm, "llm", kind)?(config)
+    pub fn build_llm(&self, spec: &ProviderSpec) -> Result<Arc<dyn Llm>, String> {
+        lookup(&self.llm, "llm", &spec.kind)?(spec)
     }
 
-    pub fn build_tts(&self, kind: &str, config: &Value) -> Result<Arc<dyn Tts>, String> {
-        lookup(&self.tts, "tts", kind)?(config)
+    pub fn build_tts(&self, spec: &ProviderSpec) -> Result<Arc<dyn Tts>, String> {
+        lookup(&self.tts, "tts", &spec.kind)?(spec)
     }
 
     /// Checks a type/kind/config triple against the registered builders by
     /// constructing the provider and dropping it — the create/update path
     /// validates eagerly so a stored config can never fail activation on
     /// schema errors.
-    pub fn validate(&self, r#type: &str, kind: &str, config: &Value) -> Result<(), String> {
+    pub fn validate(&self, r#type: &str, spec: &ProviderSpec) -> Result<(), String> {
         match r#type {
-            "asr" => self.build_asr(kind, config).map(|_| ()),
-            "llm" => self.build_llm(kind, config).map(|_| ()),
-            "tts" => self.build_tts(kind, config).map(|_| ()),
+            "asr" => self.build_asr(spec).map(|_| ()),
+            "llm" => self.build_llm(spec).map(|_| ()),
+            "tts" => self.build_tts(spec).map(|_| ()),
             other => Err(format!(
                 "unknown provider type \"{other}\" (expected asr, llm or tts)"
             )),
@@ -165,6 +171,10 @@ mod tests {
         result.err().expect("expected a build error")
     }
 
+    fn spec(kind: &str, config: Value) -> ProviderSpec {
+        ProviderSpec::new(kind, kind, config)
+    }
+
     #[test]
     fn builtins_register_one_kind_per_stage() {
         let registry = ProviderRegistry::with_builtins();
@@ -177,10 +187,10 @@ mod tests {
     fn builds_the_volc_asr_from_its_config() {
         let registry = ProviderRegistry::with_builtins();
         registry
-            .build_asr(
+            .build_asr(&spec(
                 "volcengine",
-                &json!({"base_url": "wss://asr", "api_key": "k", "resource_id": "r"}),
-            )
+                json!({"base_url": "wss://asr", "api_key": "k", "resource_id": "r"}),
+            ))
             .unwrap();
     }
 
@@ -188,10 +198,10 @@ mod tests {
     fn builds_the_openai_llm_with_optional_fields() {
         let registry = ProviderRegistry::with_builtins();
         registry
-            .build_llm(
+            .build_llm(&spec(
                 "openai",
-                &json!({"base_url": "http://localhost/v1", "api_key": "k", "model": "m"}),
-            )
+                json!({"base_url": "http://localhost/v1", "api_key": "k", "model": "m"}),
+            ))
             .unwrap();
     }
 
@@ -199,39 +209,40 @@ mod tests {
     async fn builds_the_volc_tts_from_its_config() {
         let registry = ProviderRegistry::with_builtins();
         registry
-            .build_tts(
+            .build_tts(&spec(
                 "volcengine",
-                &json!({
+                json!({
                     "base_url": "wss://tts",
                     "api_key": "k",
                     "resource_id": "r",
                     "speaker": "s"
                 }),
-            )
+            ))
             .unwrap();
     }
 
     #[test]
     fn missing_required_config_fields_fail_the_build() {
         let registry = ProviderRegistry::with_builtins();
-        let err = err_of(registry.build_asr(
+        let err = err_of(registry.build_asr(&spec(
             "volcengine",
-            &json!({"base_url": "wss://asr", "api_key": "k"}),
-        ));
+            json!({"base_url": "wss://asr", "api_key": "k"}),
+        )));
         assert!(err.contains("resource_id"), "unexpected error: {err}");
-        let err = err_of(registry.build_tts(
+        let err = err_of(registry.build_tts(&spec(
             "volcengine",
-            &json!({"base_url": "wss://tts", "api_key": "k", "resource_id": "r"}),
-        ));
+            json!({"base_url": "wss://tts", "api_key": "k", "resource_id": "r"}),
+        )));
         assert!(err.contains("speaker"), "unexpected error: {err}");
-        let err = err_of(registry.build_llm("openai", &json!({"base_url": "http://localhost/v1"})));
+        let err =
+            err_of(registry.build_llm(&spec("openai", json!({"base_url": "http://localhost/v1"}))));
         assert!(err.contains("api_key"), "unexpected error: {err}");
     }
 
     #[test]
     fn unknown_kinds_name_the_registered_kinds() {
         let registry = ProviderRegistry::with_builtins();
-        let err = err_of(registry.build_asr("aliyun", &json!({})));
+        let err = err_of(registry.build_asr(&spec("aliyun", json!({}))));
         assert!(
             err.contains("unknown asr provider kind") && err.contains("volcengine"),
             "unexpected error: {err}"
@@ -244,15 +255,19 @@ mod tests {
         registry
             .validate(
                 "asr",
-                "volcengine",
-                &json!({"base_url": "wss://asr", "api_key": "k", "resource_id": "r"}),
+                &spec(
+                    "volcengine",
+                    json!({"base_url": "wss://asr", "api_key": "k", "resource_id": "r"}),
+                ),
             )
             .unwrap();
         registry
             .validate(
                 "llm",
-                "openai",
-                &json!({"base_url": "http://localhost/v1", "api_key": "k", "model": "m"}),
+                &spec(
+                    "openai",
+                    json!({"base_url": "http://localhost/v1", "api_key": "k", "model": "m"}),
+                ),
             )
             .unwrap();
     }
@@ -260,12 +275,13 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_types_and_broken_configs() {
         let registry = ProviderRegistry::with_builtins();
-        let err = err_of(registry.validate("mic", "volcengine", &json!({})));
+        let err = err_of(registry.validate("mic", &spec("volcengine", json!({}))));
         assert!(
             err.contains("unknown provider type") && err.contains("mic"),
             "unexpected error: {err}"
         );
-        let err = err_of(registry.validate("asr", "volcengine", &json!({"base_url": "wss://asr"})));
+        let err =
+            err_of(registry.validate("asr", &spec("volcengine", json!({"base_url": "wss://asr"}))));
         assert!(err.contains("api_key"), "unexpected error: {err}");
     }
 
@@ -298,7 +314,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "registered twice")]
     fn duplicate_kind_registration_panics() {
-        fn builder(_: &Value) -> Result<Arc<dyn Asr>, String> {
+        fn builder(_: &ProviderSpec) -> Result<Arc<dyn Asr>, String> {
             unimplemented!()
         }
         let mut registry = ProviderRegistry::default();

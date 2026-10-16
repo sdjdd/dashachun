@@ -9,21 +9,22 @@ use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, ChatCompletionNamedToolChoice,
     ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
     ChatCompletionRequestSystemMessage, ChatCompletionRequestToolMessage,
-    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage, ChatCompletionTool,
-    ChatCompletionToolChoiceOption, ChatCompletionTools, CreateChatCompletionRequestArgs,
-    FunctionCall, FunctionName, FunctionObject, ToolChoiceOptions,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+    ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionToolChoiceOption,
+    ChatCompletionTools, CreateChatCompletionRequestArgs, FinishReason, FunctionCall, FunctionName,
+    FunctionObject, ToolChoiceOptions,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::agent::{
-    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, ReasoningEffort, ToolCall, ToolChoice, ToolSpec,
+    ChatItem, Llm, LlmError, LlmEvent, LlmEvents, LlmMeta, LlmResponse, LlmUsage, ReasoningEffort,
+    ToolCall, ToolChoice, ToolSpec,
 };
-use crate::provider::ProviderRegistry;
+use crate::provider::{ProviderRegistry, ProviderSpec};
 
 fn reasoning_wire(effort: ReasoningEffort) -> async_openai::types::chat::ReasoningEffort {
     use async_openai::types::chat::ReasoningEffort as Wire;
@@ -64,25 +65,30 @@ pub fn register(registry: &mut ProviderRegistry) {
     registry.register_llm(KIND, build);
 }
 
-fn build(config: &Value) -> Result<Arc<dyn Llm>, String> {
-    let config: OpenAiConfig = serde_json::from_value(config.clone())
+fn build(spec: &ProviderSpec) -> Result<Arc<dyn Llm>, String> {
+    let config: OpenAiConfig = serde_json::from_value(spec.config.clone())
         .map_err(|err| format!("invalid openai llm config: {err}"))?;
-    Ok(Arc::new(OpenAiLlm::new(config)))
+    Ok(Arc::new(OpenAiLlm::new(&spec.name, config)))
 }
 
 pub struct OpenAiLlm {
     client: Client<OpenAIConfig>,
     config: OpenAiConfig,
+    provider: String,
 }
 
 impl OpenAiLlm {
-    pub fn new(config: OpenAiConfig) -> Self {
+    pub fn new(provider: impl Into<String>, config: OpenAiConfig) -> Self {
         let client = Client::with_config(
             OpenAIConfig::new()
                 .with_api_base(config.base_url.clone())
                 .with_api_key(config.api_key.clone()),
         );
-        Self { client, config }
+        Self {
+            client,
+            config,
+            provider: provider.into(),
+        }
     }
 
     fn build_request(
@@ -152,6 +158,13 @@ impl OpenAiLlm {
             .model(self.config.model.clone())
             .messages(messages)
             .stream(true);
+        // The final usage chunk rides the stream when the server honors
+        // `include_usage` — the totals behind the chat span's
+        // `gen_ai.usage.*` attributes.
+        request.stream_options(ChatCompletionStreamOptions {
+            include_usage: Some(true),
+            include_obfuscation: None,
+        });
         if let Some(max_tokens) = self.config.max_tokens {
             request.max_tokens(max_tokens);
         }
@@ -209,6 +222,13 @@ impl OpenAiLlm {
 }
 
 impl Llm for OpenAiLlm {
+    fn meta(&self) -> LlmMeta {
+        LlmMeta {
+            provider: self.provider.clone(),
+            model: self.config.model.clone(),
+        }
+    }
+
     fn chat(
         &self,
         history: Vec<ChatItem>,
@@ -277,6 +297,16 @@ impl ToolCallAccumulator {
     }
 }
 
+fn finish_reason_wire(reason: FinishReason) -> &'static str {
+    match reason {
+        FinishReason::Stop => "stop",
+        FinishReason::Length => "length",
+        FinishReason::ToolCalls => "tool_calls",
+        FinishReason::ContentFilter => "content_filter",
+        FinishReason::FunctionCall => "function_call",
+    }
+}
+
 async fn run(
     client: Client<OpenAIConfig>,
     request: async_openai::types::chat::CreateChatCompletionRequest,
@@ -300,6 +330,12 @@ async fn run(
     };
 
     let mut tool_calls = ToolCallAccumulator::default();
+    let mut response = LlmResponse {
+        id: None,
+        model: None,
+        finish_reasons: Vec::new(),
+        usage: None,
+    };
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -313,7 +349,20 @@ async fn run(
                     break;
                 };
                 let chunk = chunk.map_err(|err| LlmError::from(format!("stream failed: {err}")))?;
+                response.id.get_or_insert(chunk.id);
+                response.model.get_or_insert(chunk.model);
+                if let Some(usage) = chunk.usage {
+                    response.usage = Some(LlmUsage {
+                        input_tokens: usage.prompt_tokens,
+                        output_tokens: usage.completion_tokens,
+                    });
+                }
                 for choice in chunk.choices {
+                    if let Some(reason) = choice.finish_reason {
+                        response
+                            .finish_reasons
+                            .push(finish_reason_wire(reason).to_string());
+                    }
                     if let Some(text) = choice.delta.content
                         && !text.is_empty()
                         && tx.send(Ok(LlmEvent::Delta { text })).is_err()
@@ -335,6 +384,7 @@ async fn run(
             return Ok(());
         }
     }
+    let _ = tx.send(Ok(LlmEvent::Response(response)));
     let _ = tx.send(Ok(LlmEvent::Done));
     Ok(())
 }
@@ -363,7 +413,7 @@ mod tests {
 
     #[test]
     fn maps_items_to_request_messages() {
-        let llm = OpenAiLlm::new(config());
+        let llm = OpenAiLlm::new("volcengine", config());
         let request = llm
             .build_request(
                 vec![
@@ -389,7 +439,7 @@ mod tests {
 
     #[test]
     fn tool_choice_maps_to_the_wire() {
-        let llm = OpenAiLlm::new(config());
+        let llm = OpenAiLlm::new("volcengine", config());
         let value = serde_json::to_value(
             llm.build_request(
                 vec![ChatItem::user("hi")],
@@ -434,7 +484,7 @@ mod tests {
 
     #[test]
     fn tool_choice_none_is_omitted_and_needs_advertised_tools() {
-        let llm = OpenAiLlm::new(config());
+        let llm = OpenAiLlm::new("volcengine", config());
         let value = serde_json::to_value(
             llm.build_request(vec![ChatItem::user("hi")], tool_specs(), None, None)
                 .unwrap(),
@@ -460,7 +510,7 @@ mod tests {
 
     #[test]
     fn reasoning_maps_to_the_wire() {
-        let llm = OpenAiLlm::new(config());
+        let llm = OpenAiLlm::new("volcengine", config());
         let value = serde_json::to_value(
             llm.build_request(
                 vec![ChatItem::user("hi")],
@@ -490,13 +540,28 @@ mod tests {
 
     #[test]
     fn reasoning_unset_is_omitted() {
-        let llm = OpenAiLlm::new(config());
+        let llm = OpenAiLlm::new("volcengine", config());
         let value = serde_json::to_value(
             llm.build_request(vec![ChatItem::user("hi")], Vec::new(), None, None)
                 .unwrap(),
         )
         .unwrap();
         assert!(value.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn stream_options_request_the_usage_chunk() {
+        let llm = OpenAiLlm::new("volcengine", config());
+        let value = serde_json::to_value(
+            llm.build_request(vec![ChatItem::user("hi")], Vec::new(), None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        // The exact object also proves `include_obfuscation` stays omitted.
+        assert_eq!(
+            value["stream_options"],
+            serde_json::json!({"include_usage": true})
+        );
     }
 
     fn chunk(
@@ -619,5 +684,150 @@ mod tests {
             .unwrap();
         let message = outcome.unwrap_err().to_string();
         assert!(message.contains("idle"), "unexpected error: {message}");
+    }
+
+    /// Serves the given chunks as one SSE chat-completions response, then
+    /// closes with `[DONE]`; answers with the base URL to call.
+    async fn serve_chunks(chunks: Vec<String>) -> String {
+        use axum::response::Sse;
+        use axum::response::sse::Event;
+        use axum::{Router, routing::post};
+
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let body = futures_util::stream::iter(chunks.clone())
+                    .map(|data| Ok::<_, std::convert::Infallible>(Event::default().data(data)))
+                    .chain(futures_util::stream::once(async {
+                        Ok(Event::default().data("[DONE]"))
+                    }));
+                async move { Sse::new(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1")
+    }
+
+    fn chunk_json(value: serde_json::Value) -> String {
+        value.to_string()
+    }
+
+    /// Streams one request against `base_url` and collects every event
+    /// until the channel closes.
+    async fn collect_events(base_url: String) -> Vec<Result<LlmEvent, LlmError>> {
+        let client = Client::with_config(
+            OpenAIConfig::new()
+                .with_api_base(base_url)
+                .with_api_key("k"),
+        );
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("m")
+            .messages(vec![ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage {
+                    content: "hi".to_string().into(),
+                    name: None,
+                },
+            )])
+            .build()
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run(
+            client,
+            request,
+            tx,
+            CancellationToken::new(),
+            Duration::from_secs(5),
+        ));
+        let mut events = Vec::new();
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+        {
+            events.push(event);
+        }
+        handle.await.unwrap().unwrap();
+        events
+    }
+
+    #[tokio::test]
+    async fn usage_chunk_becomes_the_response_event() {
+        let base_url = serve_chunks(vec![
+            chunk_json(serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "m",
+                "choices": [
+                    {"index": 0, "delta": {"content": "hi"}, "finish_reason": null}
+                ]
+            })),
+            chunk_json(serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "m",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+            })),
+            chunk_json(serde_json::json!({
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "m",
+                "choices": [],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+            })),
+        ])
+        .await;
+        let events = collect_events(base_url).await;
+        assert_eq!(events.len(), 3, "unexpected events: {events:?}");
+        assert_eq!(
+            events[0].as_ref().unwrap(),
+            &LlmEvent::Delta { text: "hi".into() }
+        );
+        assert_eq!(
+            events[1].as_ref().unwrap(),
+            &LlmEvent::Response(LlmResponse {
+                id: Some("chatcmpl-1".into()),
+                model: Some("m".into()),
+                finish_reasons: vec!["stop".into()],
+                usage: Some(LlmUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                }),
+            })
+        );
+        assert_eq!(events[2].as_ref().unwrap(), &LlmEvent::Done);
+    }
+
+    #[tokio::test]
+    async fn response_event_tolerates_a_server_without_usage() {
+        let base_url = serve_chunks(vec![chunk_json(serde_json::json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "m",
+            "choices": [
+                {"index": 0, "delta": {"content": "hi"}, "finish_reason": null}
+            ]
+        }))])
+        .await;
+        let events = collect_events(base_url).await;
+        assert_eq!(events.len(), 3, "unexpected events: {events:?}");
+        assert_eq!(
+            events[0].as_ref().unwrap(),
+            &LlmEvent::Delta { text: "hi".into() }
+        );
+        assert_eq!(
+            events[1].as_ref().unwrap(),
+            &LlmEvent::Response(LlmResponse {
+                id: Some("chatcmpl-1".into()),
+                model: Some("m".into()),
+                finish_reasons: Vec::new(),
+                usage: None,
+            })
+        );
+        assert_eq!(events[2].as_ref().unwrap(), &LlmEvent::Done);
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::provider::ProviderRegistry;
+use crate::provider::{ProviderRegistry, ProviderSpec};
 
 pub const STUB_KIND: &str = "stub";
 
@@ -14,8 +14,12 @@ pub fn register_stub(registry: &mut ProviderRegistry) {
     registry.register_asr(STUB_KIND, build_stub);
 }
 
-fn build_stub(config: &Value) -> Result<Arc<dyn Asr>, String> {
-    let text = config.get("text").and_then(Value::as_str).unwrap_or("你好");
+fn build_stub(spec: &ProviderSpec) -> Result<Arc<dyn Asr>, String> {
+    let text = spec
+        .config
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("你好");
     Ok(Arc::new(StubAsr::new(text)))
 }
 

@@ -341,7 +341,9 @@ fn render_extract(name: &str, ctx: Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{InMemEntryMemory, LlmError, LlmEvents, StepResult, ToolCall, ToolSpec};
+    use crate::agent::{
+        InMemEntryMemory, LlmError, LlmEvents, LlmMeta, StepResult, ToolCall, ToolSpec,
+    };
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
@@ -475,6 +477,10 @@ mod tests {
     struct FailLlm;
 
     impl Llm for FailLlm {
+        fn meta(&self) -> LlmMeta {
+            crate::agent::llm::stub_meta()
+        }
+
         fn chat(
             &self,
             _history: Vec<ChatItem>,

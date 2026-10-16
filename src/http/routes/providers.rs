@@ -112,9 +112,10 @@ pub(crate) async fn create_provider(
             .sole_kind(&args.r#type)
             .map_err(AppError::BadRequest)?,
     };
+    let spec = ProviderSpec::new(args.name.clone(), kind, args.config.clone());
     server
         .registry
-        .validate(&args.r#type, kind, &args.config)
+        .validate(&args.r#type, &spec)
         .map_err(AppError::BadRequest)?;
     let store = ProviderStore::new(auth.pool.clone());
     let row = store
@@ -161,9 +162,14 @@ pub(crate) async fn update_provider(
             .config
             .clone()
             .unwrap_or_else(|| existing.config.clone());
+        let spec = ProviderSpec::new(
+            args.name.clone().unwrap_or_else(|| existing.name.clone()),
+            kind,
+            config,
+        );
         server
             .registry
-            .validate(&existing.r#type, kind, &config)
+            .validate(&existing.r#type, &spec)
             .map_err(AppError::BadRequest)?;
     }
     let Some(row) = store
@@ -277,9 +283,9 @@ async fn apply_generation(server: &ServerState, pool: &PgPool) -> Result<(), App
     let asr = selected_row(&store, asr_id, "asr").await?;
     let llm = selected_row(&store, llm_id, "llm").await?;
     let tts = selected_row(&store, tts_id, "tts").await?;
-    let asr_spec = ProviderSpec::new(asr.kind, asr.config);
-    let llm_spec = ProviderSpec::new(llm.kind, llm.config);
-    let tts_spec = ProviderSpec::new(tts.kind, tts.config);
+    let asr_spec = ProviderSpec::new(asr.name, asr.kind, asr.config);
+    let llm_spec = ProviderSpec::new(llm.name, llm.kind, llm.config);
+    let tts_spec = ProviderSpec::new(tts.name, tts.kind, tts.config);
     let factory = AgentFactory::assemble(
         &server.registry,
         &asr_spec,

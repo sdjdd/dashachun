@@ -210,6 +210,12 @@ pub fn stream_text(params: StreamTextParams<'_>) -> StreamEvents<'_> {
                                 state.calls.push(call);
                                 state.phase = Phase::Chat(chat);
                             }
+                            Some(Ok(LlmEvent::Response(_))) => {
+                                // End-of-stream response metadata — usage
+                                // and response identity, lifted off the wire
+                                // for the round's `chat` span (telemetry.md).
+                                state.phase = Phase::Chat(chat);
+                            }
                             Some(Ok(LlmEvent::Done)) | None => {
                                 state.phase = Phase::RoundEnd;
                             }
@@ -344,8 +350,8 @@ mod tests {
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
 
-    use crate::agent::ToolSpec;
     use crate::agent::tool::{Tool, ToolSet};
+    use crate::agent::{LlmMeta, LlmResponse, LlmUsage, ToolSpec};
 
     /// Serves one scripted round per `chat` call; a call beyond the script
     /// fails loudly, so a runaway loop can never pass a test silently.
@@ -362,6 +368,10 @@ mod tests {
     }
 
     impl Llm for ScriptedLlm {
+        fn meta(&self) -> LlmMeta {
+            crate::agent::llm::stub_meta()
+        }
+
         fn chat(
             &self,
             _history: Vec<ChatItem>,
@@ -383,6 +393,10 @@ mod tests {
     struct HangingLlm;
 
     impl Llm for HangingLlm {
+        fn meta(&self) -> LlmMeta {
+            crate::agent::llm::stub_meta()
+        }
+
         fn chat(
             &self,
             _history: Vec<ChatItem>,
@@ -509,6 +523,10 @@ mod tests {
     }
 
     impl Llm for RecordingLlm {
+        fn meta(&self) -> LlmMeta {
+            crate::agent::llm::stub_meta()
+        }
+
         fn chat(
             &self,
             _history: Vec<ChatItem>,
@@ -623,6 +641,48 @@ mod tests {
     #[tokio::test]
     async fn text_only_turn_streams_deltas_then_done() {
         let llm = ScriptedLlm::new(vec![vec![delta("你"), delta("好"), done()]]);
+        let tools = ToolSet::new();
+        let mut events = stream_text(
+            StreamTextParams::builder(&llm)
+                .messages(vec![ChatItem::user("hi")])
+                .tools(&tools)
+                .build(),
+        );
+        match events.next().await {
+            Some(Ok(StreamEvent::Delta { text })) => assert_eq!(text, "你"),
+            other => panic!("expected delta, got {other:?}"),
+        }
+        match events.next().await {
+            Some(Ok(StreamEvent::Delta { text })) => assert_eq!(text, "好"),
+            other => panic!("expected delta, got {other:?}"),
+        }
+        match events.next().await {
+            Some(Ok(StreamEvent::Done(result))) => {
+                assert_eq!(result.text, "你好");
+                assert_eq!(result.messages, vec![ChatItem::assistant("你好")]);
+                assert_eq!(result.steps, 1);
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+        assert!(events.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn response_event_is_inert_to_the_loop() {
+        let llm = ScriptedLlm::new(vec![vec![
+            delta("你"),
+            Ok(LlmEvent::Response(LlmResponse {
+                id: Some("chatcmpl-1".into()),
+                model: Some("m".into()),
+                finish_reasons: vec!["stop".into()],
+                usage: Some(LlmUsage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                }),
+            })),
+            delta("好"),
+            done(),
+        ]]);
         let tools = ToolSet::new();
         let mut events = stream_text(
             StreamTextParams::builder(&llm)

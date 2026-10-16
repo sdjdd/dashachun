@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -14,7 +13,7 @@ use tracing::{debug, warn};
 mod protocol;
 
 use crate::agent::{Asr, AsrError, AsrEvent, AsrEvents, AudioStream};
-use crate::provider::ProviderRegistry;
+use crate::provider::{ProviderRegistry, ProviderSpec};
 use protocol::Response;
 
 const SAMPLE_RATE: usize = 16_000;
@@ -110,8 +109,8 @@ pub fn register(registry: &mut ProviderRegistry) {
     registry.register_asr(KIND, build);
 }
 
-fn build(config: &Value) -> Result<Arc<dyn Asr>, String> {
-    let config: VolcAsrConfig = serde_json::from_value(config.clone())
+fn build(spec: &ProviderSpec) -> Result<Arc<dyn Asr>, String> {
+    let config: VolcAsrConfig = serde_json::from_value(spec.config.clone())
         .map_err(|err| format!("invalid volc asr config: {err}"))?;
     Ok(Arc::new(VolcAsr::new(
         config.base_url,

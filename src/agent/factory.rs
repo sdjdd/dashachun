@@ -72,16 +72,16 @@ impl AgentFactory {
         pool: PgPool,
     ) -> Result<Self, String> {
         tracing::info!(stage = "asr", kind = %asr.kind, "constructing provider");
-        let asr = registry.build_asr(&asr.kind, &asr.config)?;
+        let asr = registry.build_asr(asr)?;
         tracing::info!(
             stage = "llm",
             kind = %llm.kind,
             model = json_str(&llm.config, "model"),
             "constructing provider"
         );
-        let llm = registry.build_llm(&llm.kind, &llm.config)?;
+        let llm = registry.build_llm(llm)?;
         tracing::info!(stage = "tts", kind = %tts.kind, "constructing provider");
-        let tts = registry.build_tts(&tts.kind, &tts.config)?;
+        let tts = registry.build_tts(tts)?;
         Ok(Self::new(
             asr, llm, tts, vad, voiceprint, tools, agents, pool,
         ))

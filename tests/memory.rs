@@ -13,8 +13,8 @@ use axum::http::StatusCode;
 use common::{IdSink, RecordingHook, app, expect_json, register, request, send, session};
 use dashachun::agent::{
     AddError, DbEntryMemory, DbMemory, EntryMemory, EntryOp, EntryOpResult, Extractor, Llm,
-    LlmError, LlmEvent, LlmEvents, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, ReasoningEffort,
-    ToolChoice, ToolSpec,
+    LlmError, LlmEvent, LlmEvents, LlmMeta, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook,
+    ReasoningEffort, ToolChoice, ToolSpec,
 };
 use dashachun::agent::{ChatItem, ToolCall};
 
@@ -480,6 +480,13 @@ impl ProposeLlm {
 }
 
 impl Llm for ProposeLlm {
+    fn meta(&self) -> LlmMeta {
+        LlmMeta {
+            provider: "stub".into(),
+            model: "stub".into(),
+        }
+    }
+
     fn chat(
         &self,
         history: Vec<ChatItem>,

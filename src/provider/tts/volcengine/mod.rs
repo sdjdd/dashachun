@@ -6,7 +6,6 @@ use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +16,7 @@ mod protocol;
 
 use crate::agent::{Subtitle, TextStream, Tts, TtsError, TtsEvent, TtsEvents};
 use crate::audio::{DOWNLINK, DownlinkAudio};
-use crate::provider::ProviderRegistry;
+use crate::provider::{ProviderRegistry, ProviderSpec};
 use pool::{ConnPool, ConnSpec, PoolTiming};
 use protocol::Message as TtsMessage;
 
@@ -164,8 +163,8 @@ pub fn register(registry: &mut ProviderRegistry) {
     registry.register_tts(KIND, build);
 }
 
-fn build(config: &Value) -> Result<Arc<dyn Tts>, String> {
-    let config: VolcTtsConfig = serde_json::from_value(config.clone())
+fn build(spec: &ProviderSpec) -> Result<Arc<dyn Tts>, String> {
+    let config: VolcTtsConfig = serde_json::from_value(spec.config.clone())
         .map_err(|err| format!("invalid volc tts config: {err}"))?;
     let tts = VolcTts::new(
         config.base_url,
