@@ -12,6 +12,7 @@ const TTS_PROVIDER_ID_KEY: &str = "tts_provider_id";
 const OTA_KEY: &str = "ota";
 const SECURITY_KEY: &str = "security";
 const AUDIO_CAPTURE_KEY: &str = "audio_capture";
+const VOICEPRINT_KEY: &str = "voiceprint";
 
 const SESSION_SECRET_BYTES: usize = 64;
 const MIN_SESSION_SECRET_LEN: usize = 64;
@@ -87,6 +88,30 @@ impl AudioCaptureSettings {
     }
 }
 
+/// The voiceprint identification match threshold — the minimum cosine
+/// similarity attributing an utterance to an enrolled speaker. A property
+/// of the CAM++ cosine distribution (same speaker ≈ 0.65–0.8, different
+/// speakers ≈ 0), not of any one agent, so the section is global. The
+/// factory reads it per session like the speaker snapshot: a change applies
+/// to every new session without a restart.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema)]
+pub struct VoiceprintSettings {
+    #[serde(default = "default_match_threshold")]
+    pub match_threshold: f32,
+}
+
+fn default_match_threshold() -> f32 {
+    crate::voiceprint::DEFAULT_MATCH_THRESHOLD
+}
+
+impl Default for VoiceprintSettings {
+    fn default() -> Self {
+        Self {
+            match_threshold: default_match_threshold(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Settings {
     pub asr: Option<i64>,
@@ -94,6 +119,7 @@ pub struct Settings {
     pub tts: Option<i64>,
     pub ota: Option<OtaSettings>,
     pub audio_capture: Option<AudioCaptureSettings>,
+    pub voiceprint: Option<VoiceprintSettings>,
     session_secret: Option<String>,
 }
 
@@ -105,6 +131,7 @@ impl fmt::Debug for Settings {
             .field("tts", &self.tts)
             .field("ota", &self.ota)
             .field("audio_capture", &self.audio_capture)
+            .field("voiceprint", &self.voiceprint)
             .field(
                 "session_secret",
                 &self.session_secret.as_ref().map(|_| "<redacted>"),
@@ -136,6 +163,7 @@ impl Settings {
                 AUDIO_CAPTURE_KEY => {
                     settings.audio_capture = Some(parse_row(AUDIO_CAPTURE_KEY, value)?)
                 }
+                VOICEPRINT_KEY => settings.voiceprint = Some(parse_row(VOICEPRINT_KEY, value)?),
                 SECURITY_KEY => {
                     settings.session_secret =
                         Some(parse_row::<SecuritySettings>(SECURITY_KEY, value)?.session_secret)
@@ -225,6 +253,40 @@ pub async fn load_audio_capture(pool: &PgPool) -> Result<AudioCaptureSettings, S
     match row {
         Some(value) => parse_row(AUDIO_CAPTURE_KEY, value),
         None => Ok(AudioCaptureSettings::default()),
+    }
+}
+
+/// Stores the voiceprint section — the `/api/settings/voiceprint` PUT path.
+/// The row is the single source; sessions pick the value up at their next
+/// connect (the factory reads it per session, like the speaker snapshot).
+pub async fn set_voiceprint(pool: &PgPool, voiceprint: &VoiceprintSettings) -> Result<(), String> {
+    let value = serde_json::to_value(voiceprint)
+        .map_err(|err| format!("failed to encode voiceprint settings: {err}"))?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()",
+    )
+    .bind(VOICEPRINT_KEY)
+    .bind(value)
+    .execute(pool)
+    .await
+    .map_err(|err| format!("failed to store voiceprint settings: {err}"))?;
+    Ok(())
+}
+
+/// Reads just the voiceprint section — the `/api/settings/voiceprint` GET
+/// path and the factory's per-session read. An absent row is the default
+/// (the pinned voiceprint-api threshold).
+pub async fn load_voiceprint(pool: &PgPool) -> Result<VoiceprintSettings, String> {
+    let row: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = $1")
+            .bind(VOICEPRINT_KEY)
+            .fetch_optional(pool)
+            .await
+            .map_err(|err| format!("failed to load voiceprint settings: {err}"))?;
+    match row {
+        Some(value) => parse_row(VOICEPRINT_KEY, value),
+        None => Ok(VoiceprintSettings::default()),
     }
 }
 
@@ -334,6 +396,16 @@ mod tests {
         assert!(!AudioCaptureSettings::default().enabled);
         assert!(!AudioCaptureSettings::default().usable());
         assert!(audio_capture.usable());
+    }
+
+    #[test]
+    fn voiceprint_json_defaults_the_threshold() {
+        let voiceprint: VoiceprintSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(voiceprint.match_threshold, 0.4);
+        let voiceprint: VoiceprintSettings =
+            serde_json::from_value(serde_json::json!({"match_threshold": 0.55})).unwrap();
+        assert_eq!(voiceprint.match_threshold, 0.55);
+        assert_eq!(VoiceprintSettings::default().match_threshold, 0.4);
     }
 
     #[test]

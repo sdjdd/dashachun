@@ -82,7 +82,10 @@ import {
   useProviders,
   useSaveAudioCapture,
   useSaveOtaSettings,
+  useSaveVoiceprintSettings,
   useUpdateProvider,
+  useVoiceprintSettings,
+  voiceprintSchema,
 } from "@/lib/settings";
 import type {
   AudioCaptureFormValues,
@@ -90,6 +93,7 @@ import type {
   ProviderFormValues,
   ProviderRow,
   ProviderType,
+  VoiceprintFormValues,
 } from "@/lib/settings";
 
 export const Route = createFileRoute("/_app/settings")({
@@ -110,6 +114,7 @@ function SettingsPage() {
       <ProvidersSection />
       <OtaCard />
       <CaptureCard />
+      <VoiceprintCard />
     </div>
   );
 }
@@ -672,6 +677,106 @@ function CaptureCard() {
           >
             {form.formState.isSubmitting && <LoaderCircle className="animate-spin" />}
             {copy.settings.capture.submit}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function VoiceprintCard() {
+  const voiceprint = useVoiceprintSettings();
+  const save = useSaveVoiceprintSettings();
+  const [saved, setSaved] = useState(false);
+  const form = useForm<VoiceprintFormValues>({
+    resolver: zodResolver(voiceprintSchema),
+    defaultValues: { match_threshold: "0.4" },
+  });
+  const errors = form.formState.errors;
+
+  useEffect(() => {
+    if (voiceprint.data) {
+      form.reset({ match_threshold: String(voiceprint.data.match_threshold) });
+    }
+  }, [voiceprint.data, form]);
+
+  if (voiceprint.isPending) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{copy.settings.voiceprint.title}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <LoadingState className="py-8" />
+        </CardContent>
+      </Card>
+    );
+  }
+  if (voiceprint.isError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{copy.settings.voiceprint.title}</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ErrorState
+            message={describeSettingsError(voiceprint.error)}
+            onRetry={() => voiceprint.refetch()}
+            className="py-8"
+          />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  async function onSubmit(values: VoiceprintFormValues) {
+    form.clearErrors("root");
+    setSaved(false);
+    try {
+      await save.mutateAsync({ match_threshold: Number(values.match_threshold) });
+      setSaved(true);
+    } catch (err) {
+      form.setError("root", { message: describeSettingsError(err) });
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{copy.settings.voiceprint.title}</CardTitle>
+        <CardDescription>{copy.settings.voiceprint.description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={form.handleSubmit(onSubmit)} className="grid max-w-sm gap-4" noValidate>
+          <div className="grid gap-2">
+            <Label htmlFor="voiceprint-threshold">{copy.settings.voiceprint.thresholdLabel}</Label>
+            <Input
+              id="voiceprint-threshold"
+              inputMode="decimal"
+              {...form.register("match_threshold")}
+              aria-invalid={!!errors.match_threshold}
+            />
+            <p className="text-xs text-muted-foreground">
+              {copy.settings.voiceprint.thresholdHint}
+            </p>
+            {errors.match_threshold && (
+              <p className="text-sm text-destructive">{errors.match_threshold.message}</p>
+            )}
+          </div>
+          {errors.root?.message && <FormError message={errors.root.message} />}
+          {saved && (
+            <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
+              <CheckCircle2 className="size-4 text-primary" />
+              {copy.settings.voiceprint.saved}
+            </p>
+          )}
+          <Button
+            type="submit"
+            disabled={form.formState.isSubmitting}
+            className="justify-self-start"
+          >
+            {form.formState.isSubmitting && <LoaderCircle className="animate-spin" />}
+            {copy.settings.voiceprint.submit}
           </Button>
         </form>
       </CardContent>

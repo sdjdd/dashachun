@@ -170,6 +170,18 @@ export const copy = {
         bucketRequired: "启用后必须填写存储桶",
       },
     },
+    voiceprint: {
+      title: "声纹识别",
+      description: "把已注册说话人的声音归到对话里，保存后对新连接的会话生效",
+      thresholdLabel: "匹配阈值",
+      thresholdHint: "余弦相似度达到该值才认定为已注册说话人，默认 0.4；调高更严格，调低更宽松",
+      submit: "保存",
+      saved: "已保存，新会话生效",
+      validation: {
+        thresholdNumber: "请输入 0 到 1 之间的数字",
+        thresholdRange: "取值范围 0 到 1",
+      },
+    },
   },
   agents: {
     nav: "智能体",

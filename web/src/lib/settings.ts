@@ -238,6 +238,45 @@ export function useSaveAudioCapture() {
   });
 }
 
+export interface VoiceprintSettings {
+  match_threshold: number;
+}
+
+export function useVoiceprintSettings() {
+  return useQuery({
+    queryKey: ["settings", "voiceprint"] as const,
+    queryFn: () => api<VoiceprintSettings>("/api/settings/voiceprint"),
+  });
+}
+
+export const voiceprintSchema = z.object({
+  match_threshold: z
+    .string()
+    .trim()
+    .refine(
+      (value) => value !== "" && Number.isFinite(Number(value)),
+      copy.settings.voiceprint.validation.thresholdNumber,
+    )
+    .refine((value) => {
+      const threshold = Number(value);
+      return threshold >= 0 && threshold <= 1;
+    }, copy.settings.voiceprint.validation.thresholdRange),
+});
+
+export type VoiceprintFormValues = z.infer<typeof voiceprintSchema>;
+
+export function useSaveVoiceprintSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: VoiceprintSettings) =>
+      api<VoiceprintSettings>("/api/settings/voiceprint", {
+        method: "PUT",
+        body: JSON.stringify(input),
+      }),
+    onSuccess: (saved) => queryClient.setQueryData(["settings", "voiceprint"], saved),
+  });
+}
+
 const ERROR_PREFIXES = ["Bad request: ", "Conflict: ", "Service unavailable: "];
 
 function plainMessage(message: string): string {

@@ -39,6 +39,10 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         auth: auth.clone(),
         server: server.clone(),
     });
+    let voiceprint_settings = routes::voiceprint::routes().with_state(SettingsState {
+        auth: auth.clone(),
+        server: server.clone(),
+    });
     let agents = routes::agents::routes().with_state(AgentsState {
         auth: auth.clone(),
         server: server.clone(),
@@ -53,6 +57,7 @@ pub fn app(server: ServerState, auth: AuthState) -> NormalizePath<Router> {
         .nest("/api/agents", agents)
         .nest("/api/settings/audio-capture", audio_capture)
         .nest("/api/settings/ota", ota_settings)
+        .nest("/api/settings/voiceprint", voiceprint_settings)
         .merge(Scalar::with_url("/scalar", docs::ApiDoc::openapi()))
         .route("/api/openapi.json", get(docs::spec));
 

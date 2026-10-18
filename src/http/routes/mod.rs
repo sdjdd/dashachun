@@ -15,3 +15,4 @@ pub mod ota;
 pub mod providers;
 pub mod settings;
 pub mod speakers;
+pub mod voiceprint;

@@ -14,7 +14,7 @@ use crate::http::dto::device::{ActivateDeviceArgs, DeviceResponse};
 use crate::http::dto::memory::MemoryResponse;
 use crate::http::dto::provider::{CreateProviderArgs, ProviderResponse, UpdateProviderArgs};
 use crate::http::dto::speaker::{CreateSpeakerArgs, SpeakerResponse, UpdateSpeakerArgs};
-use crate::settings::{AudioCaptureSettings, OtaSettings};
+use crate::settings::{AudioCaptureSettings, OtaSettings, VoiceprintSettings};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -53,6 +53,8 @@ use crate::settings::{AudioCaptureSettings, OtaSettings};
         crate::http::routes::audio_capture::put_capture,
         crate::http::routes::settings::get_ota,
         crate::http::routes::settings::put_ota,
+        crate::http::routes::voiceprint::get_threshold,
+        crate::http::routes::voiceprint::put_threshold,
         crate::http::routes::speakers::list_speakers,
         crate::http::routes::speakers::create_speaker,
         crate::http::routes::speakers::update_speaker,
@@ -80,6 +82,7 @@ use crate::settings::{AudioCaptureSettings, OtaSettings};
         UpdateProviderArgs,
         ProviderResponse,
         AudioCaptureSettings,
+        VoiceprintSettings,
         OtaSettings,
         CreateSpeakerArgs,
         UpdateSpeakerArgs,
@@ -137,6 +140,7 @@ mod tests {
             "/api/providers/{id}/activate",
             "/api/settings/audio-capture",
             "/api/settings/ota",
+            "/api/settings/voiceprint",
             "/api/agents/{agent_id}/speakers",
             "/api/agents/{agent_id}/speakers/{speaker_id}",
             "/api/agents/{agent_id}/conversations",
@@ -149,7 +153,7 @@ mod tests {
                 "missing {expected}: {paths:?}"
             );
         }
-        assert_eq!(paths.len(), 24, "unexpected extra paths: {paths:?}");
+        assert_eq!(paths.len(), 25, "unexpected extra paths: {paths:?}");
 
         let json = serde_json::to_value(&doc).unwrap();
         assert!(json["openapi"].as_str().unwrap().starts_with("3.1"));

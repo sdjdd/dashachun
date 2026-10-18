@@ -7,8 +7,9 @@
 //! like an audio capture); the collected 16 kHz speech is embedded off the
 //! async runtime and scored against the enrolled names. The outcome is a
 //! debug log line plus the [`Identification`] itself, which the listening
-//! stage resolves into the reply turn's speaker attribution; a threshold
-//! setting comes later.
+//! stage resolves into the reply turn's speaker attribution. The match
+//! threshold comes from the `voiceprint` settings row, which the factory
+//! reads once per session alongside the speaker snapshot.
 
 use std::sync::Arc;
 
@@ -16,26 +17,39 @@ use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, warn};
 
 use crate::agent::{AgentSession, UtteranceCapture, collect};
-use crate::voiceprint::{EnrolledEmbedding, MATCH_THRESHOLD, Voiceprint, VoiceprintError, cosine};
+use crate::voiceprint::{EnrolledEmbedding, Voiceprint, VoiceprintError, cosine};
 
 /// The per-connection speaker matcher: the shared CAM++ model plus the
 /// agent's enrolled speakers as they were when the device connected —
-/// enrollments made later join at the next session, never mid-session.
+/// enrollments made later join at the next session, never mid-session. The
+/// match threshold rides the same snapshot: the factory reads the
+/// `voiceprint` settings row per session, so an applied change reaches the
+/// matcher at the next connect.
 #[derive(Clone)]
 pub struct SpeakerMatcher {
     model: Arc<Mutex<Voiceprint>>,
     candidates: Vec<EnrolledEmbedding>,
+    threshold: f32,
 }
 
 impl SpeakerMatcher {
-    /// Builds the matcher from the model slot and the agent's enrolled
-    /// speakers; `None` for an empty candidate set — the caller skips
-    /// the whole pipeline instead of running an empty matcher.
-    pub fn new(model: Arc<Mutex<Voiceprint>>, candidates: Vec<EnrolledEmbedding>) -> Option<Self> {
+    /// Builds the matcher from the model slot, the agent's enrolled
+    /// speakers and the match threshold; `None` for an empty candidate
+    /// set — the caller skips the whole pipeline instead of running an
+    /// empty matcher.
+    pub fn new(
+        model: Arc<Mutex<Voiceprint>>,
+        candidates: Vec<EnrolledEmbedding>,
+        threshold: f32,
+    ) -> Option<Self> {
         if candidates.is_empty() {
             return None;
         }
-        Some(Self { model, candidates })
+        Some(Self {
+            model,
+            candidates,
+            threshold,
+        })
     }
 
     /// Opens the identification tap for one utterance and spawns its
@@ -96,7 +110,7 @@ impl SpeakerMatcher {
     /// the enrolled speakers: the best cosine wins.
     pub async fn identify(&self, pcm: &[i16]) -> Result<Identification, VoiceprintError> {
         let embedding = self.embed(pcm).await?;
-        Ok(score(&self.candidates, &embedding))
+        Ok(score(&self.candidates, &embedding, self.threshold))
     }
 
     async fn embed(&self, pcm: &[i16]) -> Result<Vec<f32>, VoiceprintError> {
@@ -150,8 +164,8 @@ impl SpeakerTap {
 }
 
 /// Scores one embedding against the candidates: the best cosine wins and
-/// [`MATCH_THRESHOLD`] decides whether it counts as identified.
-fn score(candidates: &[EnrolledEmbedding], embedding: &[f32]) -> Identification {
+/// the matcher's threshold decides whether it counts as identified.
+fn score(candidates: &[EnrolledEmbedding], embedding: &[f32], threshold: f32) -> Identification {
     let best = candidates
         .iter()
         .map(|candidate| {
@@ -169,7 +183,7 @@ fn score(candidates: &[EnrolledEmbedding], embedding: &[f32]) -> Identification 
         name: best.1,
         description: best.2,
         similarity: best.3,
-        matched: best.3 >= MATCH_THRESHOLD,
+        matched: best.3 >= threshold,
     }
 }
 
@@ -205,7 +219,7 @@ mod tests {
 
     #[test]
     fn scores_the_best_candidate_over_the_threshold() {
-        let identification = score(&candidates(), &[0.9, 0.1]);
+        let identification = score(&candidates(), &[0.9, 0.1], 0.4);
         assert_eq!(identification.id, 1);
         assert_eq!(identification.name, "a");
         assert_eq!(identification.description, "desc a");
@@ -217,9 +231,22 @@ mod tests {
     fn below_threshold_keeps_the_best_name_but_not_matched() {
         // -1.0 against "a", 0.0 against "b": the best score exists but is
         // nowhere near the threshold — the attribution stays undecided.
-        let identification = score(&candidates(), &[-1.0, 0.0]);
+        let identification = score(&candidates(), &[-1.0, 0.0], 0.4);
         assert_eq!(identification.name, "b");
         assert_eq!(identification.similarity, 0.0);
+        assert!(!identification.matched);
+    }
+
+    #[test]
+    fn the_threshold_decides_the_match() {
+        // 0.8 against "b" (both vectors unit-length, the arithmetic is
+        // exact): matched at 0.7, rejected at 0.9 — the configured
+        // threshold, not the score, draws the line.
+        let identification = score(&candidates(), &[0.6, 0.8], 0.7);
+        assert_eq!(identification.name, "b");
+        assert!(identification.matched);
+        let identification = score(&candidates(), &[0.6, 0.8], 0.9);
+        assert_eq!(identification.name, "b");
         assert!(!identification.matched);
     }
 
@@ -270,7 +297,7 @@ mod tests {
                 embedding: noise_embedding,
             },
         ];
-        let matcher = SpeakerMatcher::new(model, candidates).unwrap();
+        let matcher = SpeakerMatcher::new(model, candidates, 0.4).unwrap();
 
         let identified = matcher.identify(&speech).await.unwrap();
         assert_eq!(identified.name, "张三");
@@ -302,6 +329,7 @@ mod tests {
                 description: "同事".into(),
                 embedding: speech_embedding,
             }],
+            0.4,
         )
         .unwrap();
 

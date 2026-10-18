@@ -134,15 +134,21 @@ impl AgentFactory {
         // model is the boot slot, the agent's enrolled speakers are read
         // once per session — as the matcher's candidates and, from the same
         // snapshot, as the prompt's known-speakers roster (a roster entry
-        // exists exactly when the matcher can identify it). An agent
-        // without enrollments — or without the model — gets neither and
-        // runs no identification pipeline at all; enrollments made later
-        // join at the next session.
+        // exists exactly when the matcher can identify it). The match
+        // threshold rides the same per-session read: the `voiceprint`
+        // settings row is loaded here, so an applied change reaches every
+        // new session without a restart. An agent without enrollments — or
+        // without the model — gets neither and runs no identification
+        // pipeline at all; enrollments made later join at the next session.
         let (speaker_matcher, speakers) = match &self.voiceprint {
             Some(model) => {
                 let enrolled = SpeakerStore::new(self.pool.clone())
                     .embeddings_for_agent(agent_id)
                     .await?;
+                let threshold = crate::settings::load_voiceprint(&self.pool)
+                    .await
+                    .map_err(AppError::Internal)?
+                    .match_threshold;
                 let speakers = enrolled
                     .iter()
                     .map(|speaker| Speaker {
@@ -155,11 +161,12 @@ impl AgentFactory {
                     tracing::info!(
                         agent_id,
                         speakers = enrolled.len(),
+                        threshold,
                         "voiceprint identification enabled"
                     );
                 }
                 (
-                    SpeakerMatcher::new(model.clone(), enrolled).map(Arc::new),
+                    SpeakerMatcher::new(model.clone(), enrolled, threshold).map(Arc::new),
                     speakers,
                 )
             }

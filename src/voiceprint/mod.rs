@@ -9,8 +9,11 @@
 //! identities) and session-side
 //! identification (`identify.rs` — a per-utterance attribution whose matched
 //! name the listening stage resolves into the reply turn's system prompt,
-//! alongside the debug log line); a threshold setting comes later — the
-//! integration notes live in this directory's README.md.
+//! alongside the debug log line); the match threshold is the `voiceprint`
+//! settings section (`match_threshold`, default [`DEFAULT_MATCH_THRESHOLD`])
+//! — read per session by the factory, applied through
+//! `/api/settings/voiceprint`. The integration notes live in this
+//! directory's README.md.
 
 mod store;
 
@@ -49,10 +52,11 @@ pub const SAMPLE_RATE: u32 = 16_000;
 /// may differ — the ignored model test asserts this constant.
 pub const EMBEDDING_DIM: usize = 192;
 
-/// Cosine similarity above which an utterance is attributed to a voiceprint
-/// (same speaker ≈ 0.65–0.8, different speakers ≈ 0). The voiceprint-api
-/// convention; a settings surface can come later.
-pub const MATCH_THRESHOLD: f32 = 0.4;
+/// The default cosine similarity above which an utterance is attributed to
+/// a voiceprint (same speaker ≈ 0.65–0.8, different speakers ≈ 0) — the
+/// voiceprint-api convention. The operator-tunable value lives in the
+/// `voiceprint` settings section; this is what an absent row reads as.
+pub const DEFAULT_MATCH_THRESHOLD: f32 = 0.4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceprintError {
