@@ -32,6 +32,7 @@ pub use memory::{
     InMemEntryMemory, InMemMemory, MAX_ENTRIES, Memory, MemoryEntry, MemoryHook, OnCommit,
     TranscriptMessage, read_transcript,
 };
+pub(crate) use prompt::register_defuse_filters;
 pub use prompt::{Speaker, SystemPrompt, labelled_utterance};
 pub use store::{AgentRecord, AgentStore};
 pub use tool::{NoArgs, Tool, ToolOutcome, ToolSet};

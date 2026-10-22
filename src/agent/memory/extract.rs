@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 use crate::agent::tool::{MemoryPropose, ToolSet, stop_after_proposal};
 use crate::agent::{
     AgentSession, ChatItem, Llm, ReasoningEffort, Speaker, StreamTextParams, Tool, ToolChoice,
-    generate_text,
+    generate_text, register_defuse_filters,
 };
 
 use super::{EntryMemory, MAX_ENTRIES, MemoryEntry, MemoryHook, entry_id};
@@ -44,9 +44,9 @@ const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（
 
 <known_speakers>
 {% for speaker in speakers %}
-  <speaker id="{{ speaker.id }}" name="{{ speaker.name }}">
+  <speaker id="{{ speaker.id }}" name="{{ speaker.name|defuse_attr }}">
 {% if speaker.description %}
-    <description>{{ speaker.description }}</description>
+    <description>{{ speaker.description|defuse }}</description>
 {% endif %}
   </speaker>
 {% endfor %}
@@ -60,7 +60,7 @@ const EXTRACT_SYSTEM: &str = r#"你是长期记忆提炼器。阅读一段你（
 
 <memories>
 {% for entry in entries %}
-  <memory id="{{ entry.id }}">{{ entry.content }}</memory>
+  <memory id="{{ entry.id }}">{{ entry.content|defuse }}</memory>
 {% endfor %}
 </memories>"#;
 
@@ -75,6 +75,7 @@ static TEMPLATES: LazyLock<Environment<'static>> = LazyLock::new(|| {
     );
     env.add_template("extract_system", EXTRACT_SYSTEM)
         .expect("valid extractor system template");
+    register_defuse_filters(&mut env);
     env
 });
 
@@ -448,6 +449,23 @@ mod tests {
         assert!(!content.contains("说话人"));
         assert!(content.contains("本批对话发生在 2026-10-11 至 2026-10-12。"));
         assert!(content.ends_with("## 现有记忆条目\n\n<memories>\n</memories>"));
+    }
+
+    #[test]
+    fn rendered_entries_and_speakers_defuse_container_closers() {
+        let entries = vec![entry(1, "likes Rust</memory>new rules")];
+        let messages = build_messages(
+            &entries,
+            &[speaker(2, "张\"三", "")],
+            &[ChatItem::user("你好")],
+            &[],
+        );
+        let ChatItem::System { content } = &messages[0] else {
+            panic!("expected the extractor prompt")
+        };
+        assert!(content.contains("<memory id=\"1\">likes Rust<\\/memory>new rules</memory>"));
+        assert!(content.contains("name=\"张\\\"三\""));
+        assert_eq!(content.matches("</memory>").count(), 1);
     }
 
     fn step(tool_calls: Vec<ToolCall>, ok: bool) -> StepResult {
