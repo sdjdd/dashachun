@@ -6,6 +6,7 @@ use serde_json::json;
 use sqlx::PgPool;
 
 use common::{body_json, register, request, send};
+use dashachun::http::routes::devices::BIND_LIMIT;
 
 const CLIENT_ID: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -41,6 +42,49 @@ async fn create_agent(pool: &PgPool, user_id: i64, name: &str) -> i64 {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+#[sqlx::test]
+#[ignore]
+async fn repeated_bind_attempts_hit_the_rate_limit(pool: PgPool) {
+    let app = common::app(pool.clone());
+    let (cookie, user_id) = register(&app, &pool).await;
+    let agent_id = create_agent(&pool, user_id, "default").await;
+
+    let body = json!({"code": "000000"}).to_string();
+    for _ in 0..BIND_LIMIT {
+        let res = send(
+            &app,
+            request(
+                "POST",
+                &format!("/api/agents/{agent_id}/devices"),
+                Some(&body),
+                Some(&cookie),
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+    let res = send(
+        &app,
+        request(
+            "POST",
+            &format!("/api/agents/{agent_id}/devices"),
+            Some(&body),
+            Some(&cookie),
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry_after = res
+        .headers()
+        .get("retry-after")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    assert!(retry_after >= 1);
 }
 
 #[sqlx::test]

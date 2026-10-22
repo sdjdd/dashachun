@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::{Json, Router, routing::delete, routing::get};
 use uuid::Uuid;
 
+use super::auth::WINDOW;
 use crate::agent::AgentStore;
 use crate::device::BindOutcome;
 use crate::error::{AppError, ErrorResponse};
@@ -11,7 +12,15 @@ use crate::http::extract::Validated;
 use crate::http::extract::auth::AuthUser;
 use crate::http::session::AuthState;
 use crate::http::state::AgentsState;
+use crate::ratelimit::Decision;
 use crate::state::ServerState;
+
+/// Bind attempts are a fixed window per account: the activation code is
+/// six digits over a ten-minute TTL, so an unthrottled bind endpoint is a
+/// brute-force surface over the pairing space. The account is the subject,
+/// not the client IP — binding requires a login, and an account cap
+/// survives IP rotation.
+pub const BIND_LIMIT: u32 = 5;
 
 pub fn routes() -> Router<AgentsState> {
     Router::new()
@@ -35,6 +44,7 @@ pub fn routes() -> Router<AgentsState> {
         (status = 401, body = ErrorResponse, description = "Not authenticated"),
         (status = 404, body = ErrorResponse, description = "Unknown activation code or agent"),
         (status = 409, body = ErrorResponse, description = "Device already bound"),
+        (status = 429, body = ErrorResponse, description = "Rate limited"),
     ),
 )]
 pub(crate) async fn activate_device(
@@ -44,6 +54,16 @@ pub(crate) async fn activate_device(
     Path(agent_id): Path<i64>,
     Validated(args): Validated<ActivateDeviceArgs>,
 ) -> Result<Json<DeviceResponse>, AppError> {
+    match auth
+        .limiter
+        .hit("bind", &user.id.to_string(), BIND_LIMIT, WINDOW)
+        .await
+    {
+        Decision::Allowed => {}
+        Decision::Limited { retry_after } => {
+            return Err(AppError::TooManyRequests(retry_after.as_secs().max(1)));
+        }
+    }
     if !AgentStore::new(auth.pool.clone())
         .owns(agent_id, user.id)
         .await?
